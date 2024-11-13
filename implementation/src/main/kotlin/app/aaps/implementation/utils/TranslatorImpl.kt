@@ -186,6 +186,14 @@ class TranslatorImpl @Inject internal constructor(
         else                            -> rh.gs(R.string.unknown)
     }
 
+    override fun translate(exerciseDuty: TE.ExerciseDuty?): String  = when (exerciseDuty) {
+        TE.ExerciseDuty.LIGHT -> rh.gs(app.aaps.core.ui.R.string.duty_option_light)
+        TE.ExerciseDuty.MIDDLE -> rh.gs(app.aaps.core.ui.R.string.duty_option_middle)
+        TE.ExerciseDuty.HEAVY -> rh.gs(app.aaps.core.ui.R.string.duty_option_heavy)
+
+        else -> rh.gs(app.aaps.core.ui.R.string.duty_option_none)
+    }
+
     override fun translate(location: TE.Location?): String = when (location) {
         TE.Location.FRONT_RIGHT_UPPER_CHEST   -> rh.gs(R.string.location_front_right_upper_chest)
         TE.Location.FRONT_LEFT_UPPER_CHEST    -> rh.gs(R.string.location_front_left_upper_chest)

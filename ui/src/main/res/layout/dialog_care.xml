@@ -1,18 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
-    style="@style/StyleDialog"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:focusableInTouchMode="true"
-    tools:context=".dialogs.CareDialog">
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            xmlns:tools="http://schemas.android.com/tools"
+            style="@style/StyleDialog"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:focusableInTouchMode="true"
+            tools:context=".dialogs.CareDialog">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
+        <!-- Заголовок -->
         <RelativeLayout
             style="@style/StyleDialogHeader"
             android:layout_width="match_parent"
@@ -37,7 +38,6 @@
                 android:text="@string/careportal_profileswitch"
                 android:textAlignment="center"
                 android:textAppearance="?android:attr/textAppearanceLarge" />
-
         </RelativeLayout>
 
         <LinearLayout
@@ -47,6 +47,7 @@
             android:orientation="horizontal"
             android:padding="5dp" />
 
+        <!-- выбор источника BG -->
         <RadioGroup
             android:id="@+id/bgsource"
             android:layout_width="wrap_content"
@@ -77,9 +78,78 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/bg_other" />
-
         </RadioGroup>
 
+        <!-- sargius added: блок настроек нагрузки -->
+        <LinearLayout
+            android:id="@+id/sport_duty_layout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            tools:visibility="visible">
+
+            <!-- подпись + переключатель включения настроек -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="24dp"
+                android:orientation="horizontal"
+                android:gravity="center_horizontal|center_vertical"
+                tools:ignore="UseSwitchCompatOrMaterialXml">
+
+                <TextView
+                    android:id="@+id/sport_duty_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:gravity="center_horizontal"
+                    android:padding="10dp"
+                    android:textAppearance="@style/TextAppearance.AppCompat.Small"
+                    android:textStyle="bold"
+                    android:text="@string/sport_duty_options_label" />
+
+                <Switch
+                    android:id="@+id/switch_duty_options"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:checked="true" />
+            </LinearLayout>
+
+            <!-- сами опции нагрузки -->
+            <RadioGroup
+                android:id="@+id/sport_duty"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <RadioButton
+                    android:id="@+id/duty_light"
+                    style="@style/Widget.App.RadioButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/duty_option_light" />
+
+                <RadioButton
+                    android:id="@+id/duty_middle"
+                    style="@style/Widget.App.RadioButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/duty_option_middle" />
+
+                <RadioButton
+                    android:id="@+id/duty_heavy"
+                    style="@style/Widget.App.RadioButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/duty_option_heavy" />
+            </RadioGroup>
+        </LinearLayout>
+        <!-- /sargius added -->
+
+        <!-- BG -->
         <LinearLayout
             android:id="@+id/bg_layout"
             android:layout_width="match_parent"
@@ -115,9 +185,9 @@
                 android:paddingEnd="5dp"
                 android:text="@string/mgdl"
                 android:textAppearance="?android:attr/textAppearanceSmall" />
-
         </LinearLayout>
 
+        <!-- Длительность -->
         <LinearLayout
             android:id="@+id/duration_layout"
             android:layout_width="match_parent"
@@ -151,9 +221,9 @@
                 android:paddingEnd="5dp"
                 android:text="@string/unit_minute_short"
                 android:textAppearance="?android:attr/textAppearanceSmall" />
-
         </LinearLayout>
 
+        <!-- заметки / время / ОК-Отмена -->
         <include
             android:id="@+id/notes_layout"
             layout="@layout/notes" />
@@ -165,8 +235,6 @@
         <include
             android:id="@+id/okcancel"
             layout="@layout/okcancel" />
-
     </LinearLayout>
 
 </ScrollView>
-

@@ -45,6 +45,7 @@ data class TherapyEvent(
     var glucose: Double? = null,
     var glucoseType: MeterType? = null,
     var glucoseUnit: GlucoseUnit,
+    var exerciseDuty: ExerciseDuty? = null,
     val location: Location? = null,
     val arrow: Arrow? = null
 ) : TraceableDBEntry, DBEntryWithTimeAndDuration {
@@ -112,6 +113,15 @@ data class TherapyEvent(
         NONE
         ;
     }
+
+    enum class ExerciseDuty(val text: String) {
+        NONE("None"),
+        LIGHT("Light"),
+        MIDDLE("Middle"),
+        HEAVY("Heavy")
+        ;
+    }
+
     enum class Location {
         FRONT_RIGHT_UPPER_CHEST,
         FRONT_LEFT_UPPER_CHEST,
