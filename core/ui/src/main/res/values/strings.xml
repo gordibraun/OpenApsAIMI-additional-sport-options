@@ -702,4 +702,12 @@
 
     <!--    Playback-->
     <string name="audio_playback_attribution">"AAPS plays audio"</string>
+
+    <!-- Sport Options -->
+    <string name="exercise_mode">Exercise Mode</string>
+    <string name="sport_duty_options_label">Sport Duty Options</string>
+    <string name="duty_option_none">None</string>
+    <string name="duty_option_light">Light</string>
+    <string name="duty_option_middle">Middle</string>
+    <string name="duty_option_heavy">Heavy</string>
 </resources>

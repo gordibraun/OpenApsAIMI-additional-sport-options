@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 31,
-    "identityHash": "646bb0b4f948ae4a7fb732fb5e92e26a",
+    "identityHash": "547fdc73dfcb21428a0e0d383a556eed",
     "entities": [
       {
         "tableName": "apsResults",
@@ -2102,7 +2102,7 @@
       },
       {
         "tableName": "therapyEvents",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `version` INTEGER NOT NULL, `dateCreated` INTEGER NOT NULL, `isValid` INTEGER NOT NULL, `referenceId` INTEGER, `timestamp` INTEGER NOT NULL, `utcOffset` INTEGER NOT NULL, `duration` INTEGER NOT NULL, `type` TEXT NOT NULL, `note` TEXT, `enteredBy` TEXT, `glucose` REAL, `glucoseType` TEXT, `glucoseUnit` TEXT NOT NULL, `location` TEXT, `arrow` TEXT, `nightscoutSystemId` TEXT, `nightscoutId` TEXT, `pumpType` TEXT, `pumpSerial` TEXT, `temporaryId` INTEGER, `pumpId` INTEGER, `startId` INTEGER, `endId` INTEGER, FOREIGN KEY(`referenceId`) REFERENCES `therapyEvents`(`id`) ON UPDATE NO ACTION ON DELETE NO ACTION )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `version` INTEGER NOT NULL, `dateCreated` INTEGER NOT NULL, `isValid` INTEGER NOT NULL, `referenceId` INTEGER, `timestamp` INTEGER NOT NULL, `utcOffset` INTEGER NOT NULL, `duration` INTEGER NOT NULL, `type` TEXT NOT NULL, `note` TEXT, `enteredBy` TEXT, `glucose` REAL, `glucoseType` TEXT, `glucoseUnit` TEXT NOT NULL, `exerciseDuty` TEXT, `location` TEXT, `arrow` TEXT, `nightscoutSystemId` TEXT, `nightscoutId` TEXT, `pumpType` TEXT, `pumpSerial` TEXT, `temporaryId` INTEGER, `pumpId` INTEGER, `startId` INTEGER, `endId` INTEGER, FOREIGN KEY(`referenceId`) REFERENCES `therapyEvents`(`id`) ON UPDATE NO ACTION ON DELETE NO ACTION )",
         "fields": [
           {
             "fieldPath": "id",
@@ -2182,6 +2182,11 @@
             "columnName": "glucoseUnit",
             "affinity": "TEXT",
             "notNull": true
+          },
+          {
+            "fieldPath": "exerciseDuty",
+            "columnName": "exerciseDuty",
+            "affinity": "TEXT"
           },
           {
             "fieldPath": "location",
@@ -3461,7 +3466,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '646bb0b4f948ae4a7fb732fb5e92e26a')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '547fdc73dfcb21428a0e0d383a556eed')"
     ]
   }
 }

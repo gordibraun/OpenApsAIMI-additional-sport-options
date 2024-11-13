@@ -3,6 +3,7 @@ package app.aaps.ui.dialogs
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -35,6 +36,8 @@ import java.util.LinkedList
 import javax.inject.Inject
 
 class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
+
+    private val TAG = "CareDialog"
 
     @Inject lateinit var rh: ResourceHelper
     @Inject lateinit var profileFunction: ProfileFunction
@@ -123,8 +126,27 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
             UiInteraction.EventType.EXERCISE       -> {
                 binding.bgLayout.visibility = View.GONE
                 binding.bgsource.visibility = View.GONE
+                binding.sportDutyLayout.visibility = View.VISIBLE
             }
         }
+
+        // sargius added
+        binding.switchDutyOptions.setOnClickListener {
+            if (binding.switchDutyOptions.isChecked) {
+                Log.d(TAG, "Sport options checked")
+                binding.dutyLight.setChecked(true)
+            } else {
+                Log.d(TAG, "Sport options NOT checked")
+                binding.sportDuty.clearCheck()
+            }
+        }
+
+        binding.sportDuty.setOnClickListener {
+            if (binding.dutyLight.isSelected || binding.dutyMiddle.isSelected || binding.dutyHeavy.isSelected) {
+                binding.switchDutyOptions.setChecked(true)
+            }
+        }
+        ////
 
         val bg = profileUtil.fromMgdlToUnits(glucoseStatusProvider.glucoseStatusData?.glucose ?: 0.0)
         val bgTextWatcher: TextWatcher = object : TextWatcher {
@@ -204,6 +226,22 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
             therapyEvent.duration = T.mins(binding.duration.value.toLong()).msecs()
             valuesWithUnit.add(ValueWithUnit.Minute(binding.duration.value.toInt()).takeIf { binding.duration.value != 0.0 })
         }
+
+        // sargius added
+        if (options == UiInteraction.EventType.EXERCISE) {
+            val exerciseDuty = when {
+                binding.dutyLight.isChecked  -> TE.ExerciseDuty.LIGHT
+                binding.dutyMiddle.isChecked  -> TE.ExerciseDuty.MIDDLE
+                binding.dutyHeavy.isChecked  -> TE.ExerciseDuty.HEAVY
+
+                else -> TE.ExerciseDuty.NONE
+            }
+
+            actions.add(rh.gs(R.string.sport_duty_options_label) + ": " + translator.translate(exerciseDuty))
+            therapyEvent.exerciseDuty = exerciseDuty
+            Log.d(TAG, "exerciseDuty = $exerciseDuty")
+        }
+
         val notes = binding.notesLayout.notes.text.toString()
         if (notes.isNotEmpty()) {
             actions.add(rh.gs(app.aaps.core.ui.R.string.notes_label) + ": " + notes)
