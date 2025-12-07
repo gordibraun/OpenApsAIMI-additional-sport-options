@@ -23,6 +23,11 @@ object Constants {
     const val CPP_MAX_TIMESHIFT = 23
     const val MAX_PROFILE_SWITCH_DURATION = (7 * 24 * 60).toDouble()// [min] ~ 7 days
 
+    const val SPORT_PERCENTAGE_LIGHT = 80.0 // 80%
+    const val SPORT_PERCENTAGE_MIDDLE = 60.0 // 60%
+    const val SPORT_PERCENTAGE_HEAVY = 30.0 // 30%
+    const val NO_SPORT_PERCENTAGE = 100.0 // 100%
+
     //DanaR
     const val dailyLimitWarning = 0.95
 

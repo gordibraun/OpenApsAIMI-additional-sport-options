@@ -5,13 +5,14 @@ import app.aaps.core.data.model.RM
 import app.aaps.core.data.model.TE
 import app.aaps.core.data.model.TT
 
-sealed class ValueWithUnit {          //I use a sealed class because of StringResource that contains a listOf as second parameter
+// единое описания значения + единица измерения для разных UserEntry-событий
+sealed class ValueWithUnit {
 
-    object UNKNOWN : ValueWithUnit() // formerly None used as fallback
+    object UNKNOWN : ValueWithUnit() // fallback
 
-    data class SimpleString(val value: String) : ValueWithUnit() // formerly one usage of None
+    data class SimpleString(val value: String) : ValueWithUnit()
 
-    data class SimpleInt(val value: Int) : ValueWithUnit() // formerly one usage of None
+    data class SimpleInt(val value: Int) : ValueWithUnit()
 
     data class Mgdl(val value: Double) : ValueWithUnit()
 
@@ -35,13 +36,16 @@ sealed class ValueWithUnit {          //I use a sealed class because of StringRe
 
     data class TEMeterType(val value: TE.MeterType) : ValueWithUnit()
 
+    // добавлено Мэтью
     data class TELocation(val value: TE.Location) : ValueWithUnit()
 
     data class TEArrow(val value: TE.Arrow) : ValueWithUnit()
 
     data class TETTReason(val value: TT.Reason) : ValueWithUnit()
 
+    // режим Rotation Manager
     data class RMMode(val value: RM.Mode) : ValueWithUnit()
+
     companion object {
 
         fun fromGlucoseUnit(value: Double, glucoseUnit: GlucoseUnit): ValueWithUnit =
