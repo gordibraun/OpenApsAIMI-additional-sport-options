@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--Alexey added-->
+<resources>
+    <!-- Labels for Result block fields (default / English) -->
+    <string name="field_COB">COB</string>
+    <string name="field_IOB">IOB</string>
+    <string name="field_aimilog">aimilog</string>
+    <string name="field_bg">BG</string>
+    <string name="field_carbsReq">Carbs required</string>
+    <string name="field_carbsReqWithin">Carbs within (min)</string>
+    <string name="field_deliverAt">Deliver at</string>
+    <string name="field_duration">Duration</string>
+    <string name="field_eventualBG">Eventual BG</string>
+    <string name="field_insulinReq">Insulin required</string>
+    <string name="field_isHypoRisk">Hypo risk</string>
+    <string name="field_rate">Basal rate</string>
+    <string name="field_reason">Reason</string>
+    <!-- AIMI terms (default / English) -->
+    <string name="aimi_term_adjustments">Adjustments</string>
+    <string name="aimi_term_maxiob">MaxIOB</string>
+    <string name="aimi_term_maxsmb">MaxSMB</string>
+
+    <string name="aimi_term_uam_model">UAM model</string>
+    <string name="aimi_term_model_loaded">Model loaded</string>
+    <string name="aimi_term_uam_executed">UAM executed</string>
+    <string name="aimi_term_smb_uam">SMB (UAM)</string>
+
+    <string name="aimi_term_mpc_predictive_model">MPC predictive model</string>
+    <string name="aimi_term_pi_physiological_model">PI physiological model</string>
+    <string name="aimi_term_mpc_utile">MPC utile</string>
+    <string name="aimi_term_final_smb">Final SMB</string>
+
+    <string name="aimi_term_pkpd">PKPD</string>
+    <string name="aimi_term_dia">DIA</string>
+    <string name="aimi_term_peak">Peak</string>
+    <string name="aimi_term_tail">Tail</string>
+    <string name="aimi_term_activity">Activity</string>
+    <string name="aimi_term_anticip">anticip</string>
+    <string name="aimi_term_fresh">fresh</string>
+    <string name="aimi_term_isf_fused">ISF(fused)</string>
+    <string name="aimi_term_profile">profile</string>
+    <string name="aimi_term_tdd">TDD</string>
+    <string name="aimi_term_scale">scale</string>
+
+    <string name="aimi_term_proposed">proposed</string>
+    <string name="aimi_term_damped">damped</string>
+    <string name="aimi_term_quantized">quantized</string>
+
+    <string name="aimi_term_reactivity_factor">Reactivity factor</string>
+
+    <string name="aimi_term_autodrive">Autodrive</string>
+    <string name="aimi_term_snack_prebolus_mode">Snack/prebolus mode</string>
+    <string name="aimi_term_autodrive_conditions">Autodrive conditions</string>
+
+    <string name="aimi_term_bg_trend">BG Trend</string>
+    <string name="aimi_term_combined_delta">Combined Δ</string>
+    <string name="aimi_term_predicted_bg">Predicted BG</string>
+    <string name="aimi_term_accel">Accel.</string>
+    <string name="aimi_term_slope_min_dev">Slope Min Dev.</string>
+    <string name="aimi_term_tir">TIR</string>
+    <string name="aimi_term_calc_dynamic_peaktime">Calculation Dynamic PeakTime</string>
+    <string name="aimi_term_profile_peak">Profile peak</string>
+</resources>
