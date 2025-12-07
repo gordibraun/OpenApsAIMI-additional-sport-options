@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--Alexey added-->
+<resources>
+    <!-- Подписи полей блока Result (русская локаль) -->
+    <string name="field_COB">Углеводы в организме (COB)</string>
+    <string name="field_IOB">Активный инсулин (IOB)</string>
+    <string name="field_aimilog">Журнал AIMI</string>
+    <string name="field_bg">Текущая глюкоза</string>
+    <string name="field_carbsReq">Нужно углеводов</string>
+    <string name="field_carbsReqWithin">Углеводы в течение (мин)</string>
+    <string name="field_deliverAt">Время подачи</string>
+    <string name="field_duration">Длительность</string>
+    <string name="field_eventualBG">Ожидаемая глюкоза</string>
+    <string name="field_insulinReq">Нужно инсулина</string>
+    <string name="field_isHypoRisk">Риск гипогликемии</string>
+    <string name="field_rate">Базальная скорость</string>
+    <string name="field_reason">Причина</string>
+    <!-- AIMI terms (русская локаль) -->
+    <string name="aimi_term_adjustments">Корректировки</string>
+    <string name="aimi_term_maxiob">Макс. активный инсулин (MaxIOB)</string>
+    <string name="aimi_term_maxsmb">Максимальный SMB (MaxSMB)</string>
+
+    <string name="aimi_term_uam_model">Модель незаявленной еды (UAM)</string>
+    <string name="aimi_term_model_loaded">Модель загружена</string>
+    <string name="aimi_term_uam_executed">Модель UAM выполнена</string>
+    <string name="aimi_term_smb_uam">SMB по модели UAM</string>
+
+    <string name="aimi_term_mpc_predictive_model">MPC модель предсказания</string>
+    <string name="aimi_term_pi_physiological_model">PI физиологическая модель</string>
+    <string name="aimi_term_mpc_utile">Эффективность MPC (MPC utile)</string>
+    <string name="aimi_term_final_smb">Итоговый SMB</string>
+
+    <string name="aimi_term_pkpd">PKPD (фармакокинетика/фармакодинамика)</string>
+    <string name="aimi_term_dia">Длительность действия инсулина (DIA)</string>
+    <string name="aimi_term_peak">Пик действия (Peak)</string>
+    <string name="aimi_term_tail">Хвост действия (Tail)</string>
+    <string name="aimi_term_activity">Активность</string>
+    <string name="aimi_term_anticip">Ожидаемая часть (anticip)</string>
+    <string name="aimi_term_fresh">«Свежий» инсулин (fresh)</string>
+    <string name="aimi_term_isf_fused">Суммарная чувствительность к инсулину (ISF fused)</string>
+    <string name="aimi_term_profile">Профиль</string>
+    <string name="aimi_term_tdd">Суточная доза инсулина (TDD)</string>
+    <string name="aimi_term_scale">Масштаб (scale)</string>
+
+    <string name="aimi_term_proposed">предложено</string>
+    <string name="aimi_term_damped">приглушено (damped)</string>
+    <string name="aimi_term_quantized">округлено (quantized)</string>
+
+    <string name="aimi_term_reactivity_factor">Коэффициент чувствительности организма</string>
+
+    <string name="aimi_term_autodrive">Автопилот (Autodrive)</string>
+    <string name="aimi_term_snack_prebolus_mode">Режим перекус/предболюс</string>
+    <string name="aimi_term_autodrive_conditions">Условия автопилота</string>
+
+    <string name="aimi_term_bg_trend">Тренд глюкозы</string>
+    <string name="aimi_term_combined_delta">Суммарное изменение (Δ)</string>
+    <string name="aimi_term_predicted_bg">Прогноз глюкозы</string>
+    <string name="aimi_term_accel">Ускорение тренда</string>
+    <string name="aimi_term_slope_min_dev">Мин. отклонение наклона</string>
+    <string name="aimi_term_tir">Время в диапазоне (TIR)</string>
+    <string name="aimi_term_calc_dynamic_peaktime">Расчёт динамического времени пика</string>
+    <string name="aimi_term_profile_peak">Пик профиля</string>
+</resources>
+
