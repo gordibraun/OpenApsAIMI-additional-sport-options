@@ -281,7 +281,13 @@ class DashboardFragment : DaggerFragment() {
     private fun openBolus(): Boolean {
         activity?.let { activity ->
             protectionCheck.queryProtection(activity, ProtectionCheck.Protection.BOLUS, UIRunnable {
-                uiInteraction.runInsulinDialog(childFragmentManager)
+                // Alexey added было uiInteraction.runInsulinDialog(childFragmentManager)
+                // заменил InsulinDialog → WizardDialog так что теперь Калькулятор на главной странице
+                uiInteraction.runWizardDialog(
+                    childFragmentManager,
+                    null,   // carbs (можно передавать, если хочешь автозаполнение)
+                    null    // name / заметка
+                )
             })
         }
         return true
