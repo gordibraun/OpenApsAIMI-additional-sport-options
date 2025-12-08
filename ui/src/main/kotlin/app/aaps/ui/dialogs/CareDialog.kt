@@ -12,6 +12,12 @@ import android.widget.ArrayAdapter
 import androidx.annotation.StringRes
 import androidx.fragment.app.FragmentManager
 import app.aaps.core.data.configuration.Constants
+import app.aaps.core.data.configuration.Constants.DEF_TT_EXERCISE_DURATION
+import app.aaps.core.data.configuration.Constants.MIN_TT_EXERCISE_DURATION
+import app.aaps.core.data.configuration.Constants.NO_SPORT_PERCENTAGE
+import app.aaps.core.data.configuration.Constants.SPORT_PERCENTAGE_LIGHT
+import app.aaps.core.data.configuration.Constants.SPORT_PERCENTAGE_MIDDLE
+import app.aaps.core.data.configuration.Constants.SPORT_PERCENTAGE_HEAVY
 import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.TE
 import app.aaps.core.data.model.TT
@@ -61,7 +67,7 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
     @Inject lateinit var glucoseStatusProvider: GlucoseStatusProvider
     @Inject lateinit var profileUtil: ProfileUtil
 
-    // from ProfileSwitchDialog
+    // sargius from ProfileSwitchDialog
     @Inject lateinit var activePlugin: ActivePlugin
     @Inject lateinit var uel: UserEntryLogger
     @Inject lateinit var config: Config
@@ -72,17 +78,22 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
 
     private var queryingProtection = false
     private var profileName: String? = null
+    ////
 
     private val disposable = CompositeDisposable()
 
     private var options: UiInteraction.EventType = UiInteraction.EventType.BGCHECK
+    //private var valuesWithUnit = mutableListOf<XXXValueWithUnit?>()
     private var valuesWithUnit = mutableListOf<ValueWithUnit?>()
 
     @StringRes
     private var event: Int = app.aaps.core.ui.R.string.none
 
     private var _binding: DialogCareBinding? = null
+    // This property is only valid between onCreateView and
+    // onDestroyView.
     private val binding get() = _binding!!
+
 
     override fun onSaveInstanceState(savedInstanceState: Bundle) {
         super.onSaveInstanceState(savedInstanceState)
@@ -162,27 +173,110 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
             }
         }
 
-        // sport duty toggles (from Sargis)
+        // sargius added
+        val lastTherapyEvent = persistenceLayer.getLastTherapyRecordUpToNow(TE.Type.EXERCISE)
+        val lastExerciseDuty = lastTherapyEvent?.exerciseDuty
+        Log.d(TAG, "id = ${lastTherapyEvent?.id} lastTherapyEvent = $lastTherapyEvent, lastExerciseDuty = $lastExerciseDuty")
+        if (lastExerciseDuty == null || lastExerciseDuty == TE.ExerciseDuty.NONE) {
+            binding.switchDutyOptions.isChecked = false
+            binding.tt.isChecked = false
+
+            binding.dutyLight.isChecked = false
+            binding.dutyMiddle.isChecked = false
+            binding.dutyHeavy.isChecked = false
+
+        } else {
+            binding.switchDutyOptions.isChecked = true
+            binding.tt.isChecked = true
+
+            when (lastExerciseDuty) {
+                TE.ExerciseDuty.LIGHT -> binding.dutyLight.isChecked = true
+                TE.ExerciseDuty.MIDDLE -> binding.dutyMiddle.isChecked = true
+                TE.ExerciseDuty.HEAVY -> binding.dutyHeavy.isChecked = true
+
+                else -> {
+                    binding.dutyLight.isChecked = false
+                    binding.dutyMiddle.isChecked = false
+                    binding.dutyHeavy.isChecked = false
+                }
+            }
+        }
+
         binding.switchDutyOptions.setOnClickListener {
             if (binding.switchDutyOptions.isChecked) {
                 Log.d(TAG, "Sport options checked")
-                binding.dutyLight.isChecked = true
+                binding.dutyLight.setChecked(true)
+                binding.percentage.value = SPORT_PERCENTAGE_LIGHT
+                binding.tt.isChecked = true
+
             } else {
                 Log.d(TAG, "Sport options NOT checked")
                 binding.sportDuty.clearCheck()
+                binding.percentage.value = NO_SPORT_PERCENTAGE
+                binding.tt.isChecked = false
             }
         }
 
+        // radio buttons sport duty options
         binding.sportDuty.setOnClickListener {
+            Log.d(TAG, "sportDuty clicked")
             if (binding.dutyLight.isSelected || binding.dutyMiddle.isSelected || binding.dutyHeavy.isSelected) {
-                binding.switchDutyOptions.isChecked = true
+                binding.switchDutyOptions.setChecked(true)
+                binding.tt.isChecked = true
             }
         }
 
-        // percentage / timeshift (from ProfileSwitchDialog)
+        binding.dutyLight.setOnClickListener {
+            Log.d(TAG, "dutyLight clicked")
+            binding.switchDutyOptions.setChecked(true)
+            binding.percentage.value = SPORT_PERCENTAGE_LIGHT
+            binding.tt.isChecked = true
+
+            if (binding.dutyLight.isChecked) {
+                Log.d(TAG, "dutyLight isChecked")
+            }
+        }
+
+        binding.dutyMiddle.setOnClickListener {
+            Log.d(TAG, "dutyMiddle clicked")
+            binding.switchDutyOptions.setChecked(true)
+            binding.percentage.value = SPORT_PERCENTAGE_MIDDLE
+            binding.tt.isChecked = true
+        }
+
+        binding.dutyHeavy.setOnClickListener {
+            Log.d(TAG, "dutyHeavy clicked")
+            binding.switchDutyOptions.setChecked(true)
+            binding.percentage.value = SPORT_PERCENTAGE_HEAVY
+            binding.tt.isChecked = true
+        }
+        ////
+
+        // radio buttons duration presets
+        binding.duration30.setOnClickListener {
+            binding.duration.value = 30.0
+        }
+
+        binding.duration50.setOnClickListener {
+            binding.duration.value = 50.0
+        }
+
+        binding.duration80.setOnClickListener {
+            binding.duration.value = 80.0
+        }
+        ////
+
+        //
+        binding.tt.setOnClickListener {
+            val isTT = binding.duration.value > 0 && binding.percentage.value < 100 && binding.switchDutyOptions.isChecked
+            binding.tt.isChecked = isTT
+            Log.d(TAG, "isTT checked = ${binding.tt.isChecked}")
+        }
+        ////
+
+        // from ProfileSwitchDialog
         binding.percentage.setParams(
-            savedInstanceState?.getDouble("percentage")
-                ?: 100.0,
+            savedInstanceState?.getDouble("percentage") ?: SPORT_PERCENTAGE_LIGHT, // 100
             Constants.CPP_MIN_PERCENTAGE.toDouble(),
             Constants.CPP_MAX_PERCENTAGE.toDouble(),
             5.0,
@@ -193,15 +287,15 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         )
 
         binding.timeshift.setParams(
-            savedInstanceState?.getDouble("timeshift")
-                ?: 0.0,
+            savedInstanceState?.getDouble("timeshift") ?: 0.0,
             Constants.CPP_MIN_TIMESHIFT.toDouble(),
             Constants.CPP_MAX_TIMESHIFT.toDouble(),
-            1.0,
-            DecimalFormat("0"),
+            1.0, DecimalFormat("0"),
             false,
             binding.okcancel.ok
         )
+        ////
+
 
         val bg = profileUtil.fromMgdlToUnits(glucoseStatusProvider.glucoseStatusData?.glucose ?: 0.0)
         val bgTextWatcher: TextWatcher = object : TextWatcher {
@@ -212,7 +306,8 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
             }
         }
 
-        // profile selector
+        // from ProfileSwitchDialog
+        // profile
         context?.let { context ->
             val profileStore = activePlugin.activeProfileSource.profile ?: return
             val profileListToCheck = profileStore.getProfileList()
@@ -251,10 +346,13 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
                 )
             )
 
+            // set selected to actual profile
             if (profileName != null) {
                 binding.profileList.setText(profileName, false)
+
             } else {
                 binding.profileList.setText(profileList[0], false)
+
                 for (p in profileList.indices) {
                     if (profileList[p] == profileFunction.getOriginalProfileName()) {
                         binding.profileList.setText(profileList[p], false)
@@ -274,11 +372,12 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
                     )
                     binding.reusebutton.setOnClickListener {
                         binding.percentage.value = profile.value.originalPercentage.toDouble()
-                        binding.timeshift.value = T.msecs(profile.value.originalTimeshift).hours().toDouble()
+                        binding.timeshift.value = T.msecs(profile.value.originalTimeshift).mins().toDouble() // hours, sargius changed
                     }
                 }
             }
         }
+        ////
 
         if (profileFunction.getUnits() == GlucoseUnit.MMOL) {
             binding.bgUnits.text = rh.gs(app.aaps.core.ui.R.string.mmol)
@@ -309,33 +408,32 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         }
 
         binding.duration.setParams(
-            savedInstanceState?.getDouble("duration")
-                ?: 0.0,
-            0.0,
-            Constants.MAX_PROFILE_SWITCH_DURATION,
-            10.0,
-            DecimalFormat("0"),
+            savedInstanceState?.getDouble("duration") ?: DEF_TT_EXERCISE_DURATION,
+            MIN_TT_EXERCISE_DURATION,
+            Constants.MAX_TT_EXERCISE_DURATION,
+            10.0, DecimalFormat("0"),
             false,
-            binding.okcancel.ok
-        )
+            binding.okcancel.ok,
+            textWatcher
+        ) // DEF_TT_EXERCISE_DURATION
 
-        if (options == UiInteraction.EventType.NOTE ||
-            options == UiInteraction.EventType.QUESTION ||
-            options == UiInteraction.EventType.ANNOUNCEMENT ||
-            options == UiInteraction.EventType.EXERCISE
-        ) {
+        if (options == UiInteraction.EventType.NOTE || options == UiInteraction.EventType.QUESTION
+                || options == UiInteraction.EventType.ANNOUNCEMENT || options == UiInteraction.EventType.EXERCISE) {
+
             binding.notesLayout.root.visibility = View.VISIBLE
         }
 
+        // independent to preferences
         binding.bgLabel.labelFor = binding.bg.editTextId
         binding.durationLabel.labelFor = binding.duration.editTextId
 
         // from ProfileSwitchDialog
-        binding.ttLayout.visibility = View.GONE
+        // binding.ttLayout.visibility = View.GONE
         binding.percentageLabel.labelFor = binding.percentage.editTextId
         binding.timeshiftLabel.labelFor = binding.timeshift.editTextId
     }
 
+    // from ProfileSwitchDialog
     override fun onResume() {
         super.onResume()
         if (!queryingProtection) {
@@ -369,6 +467,7 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
     }
 
     override fun submit(): Boolean {
+        // from ProfileSwitchDialog
         if (_binding == null) return false
 
         val profileStore = activePlugin.activeProfileSource.profile ?: return false
@@ -376,6 +475,7 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         val actions: LinkedList<String> = LinkedList()
 
         val duration = binding.duration.value.toInt()
+
         val profileName = binding.profileList.text.toString()
         actions.add(rh.gs(app.aaps.core.ui.R.string.profile) + ": " + profileName)
 
@@ -384,7 +484,8 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
             actions.add(rh.gs(app.aaps.core.ui.R.string.percent) + ": " + percent + "%")
         }
 
-        val timeShift = binding.timeshift.value.toInt()
+        val timeShift = binding.timeshift.value.toInt() // timeShift is given in Minutes here
+        Log.d(TAG, "timeShift = $timeShift")
         if (timeShift != 0) {
             actions.add(
                 rh.gs(R.string.timeshift_label) + ": " +
@@ -402,9 +503,9 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
                     rh.gs(app.aaps.core.ui.R.string.activity)
             )
         }
+        ////
 
-        val enteredBy = "AAPS"
-
+        val enteredBy = "AndroidAPS"
         val unitResId = if (profileFunction.getUnits() == GlucoseUnit.MGDL) {
             app.aaps.core.ui.R.string.mgdl
         } else {
@@ -412,6 +513,23 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         }
 
         eventTime -= eventTime % 1000
+
+        // sargius added
+        val exerciseDutyOption = if (binding.switchDutyOptions.isChecked) {
+            if (binding.dutyLight.isChecked) {
+                TE.ExerciseDuty.LIGHT
+            } else if (binding.dutyMiddle.isChecked) {
+                TE.ExerciseDuty.MIDDLE
+            } else if (binding.dutyHeavy.isChecked) {
+                TE.ExerciseDuty.HEAVY
+            } else {
+                TE.ExerciseDuty.NONE
+            }
+
+        } else {
+            TE.ExerciseDuty.NONE
+        }
+        Log.d(TAG, "exerciseDutyOption = $exerciseDutyOption")
 
         val therapyEvent = TE(
             timestamp = eventTime,
@@ -424,9 +542,11 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
                 UiInteraction.EventType.QUESTION       -> TE.Type.QUESTION
                 UiInteraction.EventType.ANNOUNCEMENT   -> TE.Type.ANNOUNCEMENT
             },
-            glucoseUnit = profileFunction.getUnits()
+            glucoseUnit = profileFunction.getUnits(),
+            exerciseDuty = exerciseDutyOption
         )
 
+        // val actions: LinkedList<String> = LinkedList(), // moved up
         actions.add(rh.gs(R.string.confirm_treatment))
 
         if (options == UiInteraction.EventType.BGCHECK ||
@@ -439,6 +559,7 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
                     binding.sensor.isChecked -> TE.MeterType.SENSOR
                     else                     -> TE.MeterType.MANUAL
                 }
+
             actions.add(rh.gs(R.string.glucose_type) + ": " + translator.translate(meterType))
             actions.add(
                 rh.gs(app.aaps.core.ui.R.string.bg_label) + ": " +
@@ -451,34 +572,26 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         }
 
         if (options == UiInteraction.EventType.NOTE || options == UiInteraction.EventType.EXERCISE) {
-            if (duration > 0) {
-                actions.add(
-                    rh.gs(app.aaps.core.ui.R.string.duration_label) + ": " +
-                        rh.gs(app.aaps.core.ui.R.string.format_mins, binding.duration.value.toInt())
-                )
+            if (duration > 0L) {
+                actions.add(rh.gs(app.aaps.core.ui.R.string.duration_label) + ": " + rh.gs(app.aaps.core.ui.R.string.format_mins, binding.duration.value.toInt()))
                 therapyEvent.duration = T.mins(binding.duration.value.toLong()).msecs()
-                valuesWithUnit.add(
-                    ValueWithUnit.Minute(binding.duration.value.toInt())
-                        .takeIf { binding.duration.value != 0.0 }
-                )
+                valuesWithUnit.add(ValueWithUnit.Minute(binding.duration.value.toInt()).takeIf { !binding.duration.value.equals(0.0) })
             }
         }
 
-        // exercise duty (Sargis)
+        // sargius added
         if (options == UiInteraction.EventType.EXERCISE) {
             val exerciseDuty = when {
                 binding.dutyLight.isChecked  -> TE.ExerciseDuty.LIGHT
-                binding.dutyMiddle.isChecked -> TE.ExerciseDuty.MIDDLE
+                binding.dutyMiddle.isChecked  -> TE.ExerciseDuty.MIDDLE
                 binding.dutyHeavy.isChecked  -> TE.ExerciseDuty.HEAVY
-                else                         -> TE.ExerciseDuty.NONE
+
+                else -> TE.ExerciseDuty.NONE
             }
 
-            actions.add(
-                rh.gs(R.string.sport_duty_options_label) + ": " +
-                    translator.translate(exerciseDuty)
-            )
+            actions.add(rh.gs(R.string.sport_duty_options_label) + ": " + translator.translate(exerciseDuty))
             therapyEvent.exerciseDuty = exerciseDuty
-            Log.d(TAG, "exerciseDuty = $exerciseDuty")
+            Log.d(TAG, "1. exerciseDuty = $exerciseDuty")
         }
 
         val notes = binding.notesLayout.notes.text.toString()
@@ -488,10 +601,7 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         }
 
         if (eventTimeChanged) {
-            actions.add(
-                rh.gs(app.aaps.core.ui.R.string.time) + ": " +
-                    dateUtil.dateAndTimeString(eventTime)
-            )
+            actions.add(rh.gs(app.aaps.core.ui.R.string.time) + ": " + dateUtil.dateAndTimeString(eventTime))
         }
 
         therapyEvent.enteredBy = enteredBy
@@ -507,78 +617,52 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         }
 
         activity?.let { activity ->
-            val ps = profileFunction.buildProfileSwitch(
-                profileStore,
-                profileName,
-                duration,
-                percent,
-                timeShift,
-                eventTime
-            ) ?: return@let
+            // from ProfileSwitchDialog, pack activity?.let {... into validity checking
+            val ps = profileFunction.buildProfileSwitch2(profileStore, profileName, duration, percent, timeShift, eventTime) ?: return@let
 
-            val validity = ProfileSealed.PS(ps, activePlugin)
-                .isValid(
-                    rh.gs(app.aaps.core.ui.R.string.careportal_profileswitch),
-                    activePlugin.activePump,
-                    config,
-                    rh,
-                    rxBus,
-                    hardLimits,
-                    false
-                )
-
+            val validity = ProfileSealed.PS(ps, activePlugin).isValid(rh.gs(app.aaps.core.ui.R.string.careportal_profileswitch), activePlugin.activePump, config, rh, rxBus, hardLimits, false)
             if (validity.isValid) {
-                OKDialog.showConfirmation(
-                    activity,
-                    rh.gs(event),
-                    HtmlHelper.fromHtml(Joiner.on("<br/>").join(actions)),
-                    {
-                        // 1) сохраняем TE в CarePortal
-                        valuesWithUnit.add(0, ValueWithUnit.Timestamp(eventTime).takeIf { eventTimeChanged })
-                        valuesWithUnit.add(1, ValueWithUnit.TEType(therapyEvent.type))
-                        disposable += persistenceLayer.insertPumpTherapyEventIfNewByTimestamp(
-                            therapyEvent = therapyEvent,
-                            action = Action.CAREPORTAL,
-                            source = source,
-                            note = notes,
-                            listValues = valuesWithUnit.filterNotNull()
-                        ).subscribe()
+                OKDialog.showConfirmation(activity, rh.gs(event), HtmlHelper.fromHtml(Joiner.on("<br/>").join(actions)), {
 
-                        // 2) SiteRotation для CGM (логика Мэтью)
-                        if (therapyEvent.type == TE.Type.SENSOR_CHANGE &&
-                            preferences.get(BooleanKey.SiteRotationManageCgm)
-                        ) {
-                            SiteRotationDialog().also { srd ->
-                                srd.arguments = Bundle().also { args ->
-                                    args.putLong("time", therapyEvent.timestamp)
-                                    args.putInt("siteMode", UiInteraction.SiteMode.EDIT.ordinal)
-                                    args.putInt("siteType", TE.Type.SENSOR_CHANGE.ordinal)
-                                }
-                                srd.show(fm, "SiteRotationViewDialog")
-                            }
-                        }
+                    // old method
+                    valuesWithUnit.add(0, ValueWithUnit.Timestamp(eventTime).takeIf { eventTimeChanged })
+                    valuesWithUnit.add(1, ValueWithUnit.TEType(therapyEvent.type))
+                    Log.d(TAG, "insert therapyEvent by insertPumpTherapyEventIfNewByTimestamp(), therapyEvent = $therapyEvent")
+                    disposable += persistenceLayer.insertPumpTherapyEventIfNewByTimestamp(
+                        therapyEvent = therapyEvent,
+                        action = Action.CAREPORTAL,
+                        source = source,
+                        note = notes,
+                        listValues = valuesWithUnit.filterNotNull()
+                    ).subscribe()
 
-                        // 3) ProfileSwitch + TT (логика Саргиса)
-                        val created = profileFunction.createProfileSwitch(
+                    // transfer from ProfileSwitchDialog, converted for timeshift in Minutes
+                    if (profileFunction.createProfileSwitch2(
                             profileStore = profileStore,
                             profileName = profileName,
                             durationInMinutes = duration,
                             percentage = percent,
-                            timeShiftInHours = timeShift,
+                            timeShiftInMinutes = timeShift,
                             timestamp = eventTime,
                             action = Action.PROFILE_SWITCH,
                             source = Sources.ProfileSwitchDialog,
-                            note = notes.ifEmpty { null },
+                            note = notes,
                             listValues = listOf(
                                 ValueWithUnit.Timestamp(eventTime).takeIf { eventTimeChanged },
                                 ValueWithUnit.SimpleString(profileName),
                                 ValueWithUnit.Percent(percent),
-                                ValueWithUnit.Hour(timeShift).takeIf { timeShift != 0 },
+                                ValueWithUnit.Minute(timeShift).takeIf { timeShift != 0 },
                                 ValueWithUnit.Minute(duration).takeIf { duration != 0 }
                             ).filterNotNull()
                         )
+                    ) {
+                        // флаг «объективка выполнена» в новом стиле
+                        // Allexey added удалил флаг зачем то
+                        // if (percent == 90 && duration == 10) {
+                        //     preferences.put(BooleanKey.ObjectiveUseProfileSwitch, true)
+                        // }
 
-                        if (created && isTT) {
+                        if (isTT) {
                             disposable += persistenceLayer.insertAndCancelCurrentTemporaryTarget(
                                 TT(
                                     timestamp = eventTime,
@@ -597,22 +681,34 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
                                     ValueWithUnit.Minute(duration)
                                 ).filterNotNull()
                             ).subscribe()
+
+                        } else { // cancel temporary target if "tt" (Activity checkbox) not checked
+                            disposable += persistenceLayer.cancelCurrentTemporaryTargetIfAny(
+                                timestamp = eventTime,
+                                action = Action.TT,
+                                source = Sources.TTDialog,
+                                note = null,
+                                listValues = listOf()
+                            ).subscribe()
                         }
-                    },
-                    null
-                )
+                    }
+
+                }, null)
+
             } else {
                 OKDialog.show(
                     activity,
                     rh.gs(app.aaps.core.ui.R.string.careportal_profileswitch),
                     HtmlHelper.fromHtml(Joiner.on("<br/>").join(validity.reasons))
                 )
+
                 return false
             }
         }
 
         return true
     }
+
 
     // from ProfileSwitchDialog
     private val textWatcher: TextWatcher = object : TextWatcher {
@@ -621,6 +717,7 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
                 val isDuration = binding.duration.value > 0
                 val isLowerPercentage = binding.percentage.value < 100
                 binding.ttLayout.visibility = (isDuration && isLowerPercentage).toVisibility()
+                Log.d(TAG, "isDuration = $isDuration, isLowerPercentage = $isLowerPercentage")
             }
         }
 

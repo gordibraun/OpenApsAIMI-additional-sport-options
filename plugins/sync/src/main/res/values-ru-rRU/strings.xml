@@ -199,4 +199,7 @@
     <string name="wear_action_loop_state_now_pump_disconnected">Помпа отключена</string>
     <string name="garmin_request_key">Ключ запроса</string>
     <string name="garmin_request_key_summary">Дополнительный ключ для безопасности соединения HTTP между устройством Garmin и AAPS.</string>
+    <string name="wear_action_enter_exercise_mode_message">
+        Режим упражнения: %1$d%% на %2$d мин (сдвиг %3$d ч)
+    </string>
 </resources>

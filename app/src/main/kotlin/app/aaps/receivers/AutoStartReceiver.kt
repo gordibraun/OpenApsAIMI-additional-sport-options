@@ -10,7 +10,8 @@ import javax.inject.Inject
 
 class AutoStartReceiver : DaggerBroadcastReceiver() {
 
-    @Inject lateinit var dummyServiceHelper: DummyServiceHelper
+    @Inject
+    lateinit var dummyServiceHelper: DummyServiceHelper
 
     @SuppressLint("UnsafeProtectedBroadcastReceiver")
     override fun onReceive(context: Context, intent: Intent) {
@@ -20,7 +21,12 @@ class AutoStartReceiver : DaggerBroadcastReceiver() {
 
     @VisibleForTesting
     fun processIntent(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED)
-            dummyServiceHelper.startService(context)
+        when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED,
+            Intent.ACTION_LOCKED_BOOT_COMPLETED,
+            Intent.ACTION_USER_UNLOCKED -> {
+                dummyServiceHelper.startService(context)
+            }
+        }
     }
 }

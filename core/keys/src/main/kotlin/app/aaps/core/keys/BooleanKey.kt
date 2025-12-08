@@ -23,6 +23,7 @@ enum class BooleanKey(
     OverviewShowTreatmentButton("show_treatment_button", false, defaultedBySM = true, hideParentScreenIfHidden = true),
     OverviewShowWizardButton("show_wizard_button", true, defaultedBySM = true),
     OverviewShowInsulinButton("show_insulin_button", true, defaultedBySM = true),
+    OverviewShowExerciseModeButton("show_exercise_mode_button", true, defaultedBySM = true),
     OverviewShowCarbsButton("show_carbs_button", true, defaultedBySM = true),
     OverviewShowCgmButton("show_cgm_button", false, defaultedBySM = true, showInNsClientMode = false),
     OverviewShowCalibrationButton("show_calibration_button", false, defaultedBySM = true, showInNsClientMode = false),
@@ -78,6 +79,7 @@ enum class BooleanKey(
     SmsReportPumpUnreachable("smscommunicator_report_pump_unreachable", true),
 
     VirtualPumpStatusUpload("virtualpump_uploadstatus", false, showInNsClientMode = false),
+    GarminLocalHttpServer("communication_http", false, defaultedBySM = true, hideParentScreenIfHidden = true),
     NsClientUploadData("ns_upload", true, showInNsClientMode = false, hideParentScreenIfHidden = true),
     NsClientAcceptCgmData("ns_receive_cgm", false, showInNsClientMode = false, hideParentScreenIfHidden = true),
     NsClientAcceptProfileStore("ns_receive_profile_store", true, showInNsClientMode = false, hideParentScreenIfHidden = true),

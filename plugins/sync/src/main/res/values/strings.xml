@@ -1,6 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- AAPSClient -->
+    <!-- NSClient -->
+    <string name="key_ns_temporary_target_last_synced_id" translatable="false">ns_temporary_target_last_sync</string>
+    <string name="key_ns_glucose_value_last_synced_id" translatable="false">ns_glucose_value_last_sync</string>
+    <string name="key_ns_food_last_synced_id" translatable="false">ns_food_last_sync</string>
+    <string name="key_ns_therapy_event_last_synced_id" translatable="false">ns_therapy_event_last_sync</string>
+    <string name="key_ns_bolus_calculator_result_last_synced_id" translatable="false">ns_bolus_calculator_result_last_synced_id</string>
+    <string name="key_ns_carbs_last_synced_id" translatable="false">ns_carbs_last_synced_id</string>
+    <string name="key_ns_bolus_last_synced_id" translatable="false">ns_bolus_last_synced_id</string>
+    <string name="key_ns_device_status_last_synced_id" translatable="false">ns_device_status_last_synced_id</string>
+    <string name="key_ns_temporary_basal_last_synced_id" translatable="false">ns_temporary_basal_last_synced_id</string>
+    <string name="key_ns_extended_bolus_last_synced_id" translatable="false">ns_extended_bolus_last_synced_id</string>
+    <string name="key_ns_profile_switch_last_synced_id" translatable="false">ns_profile_switch_last_synced_id</string>
+    <string name="key_ns_effective_profile_switch_last_synced_id" translatable="false">ns_effective_profile_switch_last_synced_id</string>
+    <string name="key_ns_offline_event_last_synced_id" translatable="false">ns_offline_event_last_synced_id</string>
+    <string name="key_ns_profile_store_last_synced_timestamp" translatable="false">ns_profile_store_last_synced_timestamp</string>
+    <string name="key_ns_client_v3_last_modified" translatable="false">key_ns_client_v3_last_modified</string>
+
     <string name="ns_cellular">Use Cellular connection</string>
     <string name="ns_wifi">Use WiFi connection</string>
     <string name="ns_wifi_ssids">WiFi SSID</string>
@@ -208,5 +224,7 @@
     <string name="wear_action_loop_state_now_pump_disconnected">Pump disconnected</string>
     <string name="garmin_request_key">Request Key</string>
     <string name="garmin_request_key_summary">Optional key to secure HTTP communication between Garmin device and AAPS.</string>
-
+    <string name="wear_action_enter_exercise_mode_message">
+        Exercise mode: %1$d%% for %2$d min (shift %3$d h)
+    </string>
 </resources>

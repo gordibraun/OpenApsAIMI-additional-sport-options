@@ -37,6 +37,13 @@ object Constants {
     const val MIN_TT_MMOL = 4.0
     const val MAX_TT_MMOL = 10.0
 
+    const val TT_MIN_PERCENTAGE = 30
+    const val TT_MAX_PERCENTAGE = 100
+
+    const val MIN_TT_EXERCISE_DURATION = 0.toDouble()
+    const val DEF_TT_EXERCISE_DURATION = 60.toDouble()
+    const val MAX_TT_EXERCISE_DURATION = (7 * 24 * 60).toDouble()// [min] ~ 7 days
+
     //NSClientInternal
     const val MAX_LOG_LINES = 90
 

@@ -282,7 +282,7 @@
     <string name="complication_br_cob_iob_ext1">BR, CoB &amp; IoB Ext1</string>
     <string name="complication_br_cob_iob_ext2">BR, CoB &amp; IoB Ext2</string>
     <string name="complication_br_iob">BR &amp; IoB</string>
-    <string name="complication_br">Basal rate</string>"
+    <string name="complication_br">Basal rate</string>
     <string name="complication_cob_iob">CoB &amp; IoB</string>
     <string name="complication_cob_icon">CoB Icon</string>
     <string name="complication_cob_detailed">CoB Detailed</string>
@@ -293,4 +293,6 @@
     <string name="key_loop_states_data" translatable="false">loop_states</string>
     <string name="label_loop_state_title">AAPS(Loop state)</string>
     <string name="action_loop_state_selected">Loop state requested</string>
+    <string name="label_watchface_large">AAPS Large</string>
+    <string name="menu_exercise_mode">Exercise mode</string>
 </resources>
