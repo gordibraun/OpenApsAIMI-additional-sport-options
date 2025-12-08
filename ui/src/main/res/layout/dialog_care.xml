@@ -250,10 +250,40 @@
                 android:textAppearance="?android:attr/textAppearanceSmall" />
         </LinearLayout>
 
-        <!-- sargius: percentage / timeshift / TT -->
+        <RadioGroup
+            android:id="@+id/sport_duration_presets"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginBottom="10dp"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/duration_30"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="false"
+                android:text="@string/duration_preset_30" />
+
+            <RadioButton
+                android:id="@+id/duration_50"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="false"
+                android:text="@string/duration_preset_50" />
+
+            <RadioButton
+                android:id="@+id/duration_80"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/duration_preset_80" />
+        </RadioGroup>
+
+        <!-- sargius added from profile switch dialog -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginBottom="2dp"
             android:orientation="horizontal">
 
             <TextView
@@ -319,7 +349,7 @@
                 android:minWidth="45dp"
                 android:paddingStart="5dp"
                 android:paddingEnd="5dp"
-                android:text="@string/unit_hours"
+                android:text="@string/unit_minutes"
                 android:textAppearance="?android:attr/textAppearanceSmall" />
         </LinearLayout>
 
@@ -346,6 +376,7 @@
                 android:layout_height="wrap_content"
                 android:layout_gravity="center_vertical"
                 android:layout_weight="1"
+                android:checked="true"
                 android:text="@string/activity" />
         </LinearLayout>
 

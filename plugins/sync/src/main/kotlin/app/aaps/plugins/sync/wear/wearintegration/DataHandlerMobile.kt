@@ -2,6 +2,7 @@ package app.aaps.plugins.sync.wear.wearintegration
 
 import android.app.NotificationManager
 import android.content.Context
+import android.util.Log
 import app.aaps.core.data.configuration.Constants
 import app.aaps.core.data.iob.InMemoryGlucoseValue
 import app.aaps.core.data.model.BCR
@@ -168,102 +169,125 @@ class DataHandlerMobile @Inject constructor(
             .toObservable(EventData.ActionPumpStatus::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "ActionPumpStatus received from ${it.sourceNodeId}")
-                           rxBus.send(
-                               EventMobileToWear(
-                                   EventData.ConfirmAction(
-                                       rh.gs(R.string.pump_status).uppercase(),
-                                       pumpStatusProvider.shortStatus(false),
-                                       returnCommand = null
-                                   )
-                               )
-                           )
-                       }, fabricPrivacy::logException)
+               aapsLogger.debug(LTag.WEAR, "$TAG; ActionPumpStatus received from ${it.sourceNodeId}, send message ConfirmAction")
+               rxBus.send(
+                   EventMobileToWear(
+                       EventData.ConfirmAction(
+                           rh.gs(R.string.pump_status).uppercase(),
+                           pumpStatusProvider.shortStatus(false),
+                           returnCommand = null
+                       )
+                   )
+               )
+           }, fabricPrivacy::logException)
+
         disposable += rxBus
             .toObservable(EventData.ActionLoopStatus::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "ActionLoopStatus received from ${it.sourceNodeId}")
-                           rxBus.send(
-                               EventMobileToWear(
-                                   EventData.ConfirmAction(
-                                       rh.gs(R.string.loop_status).uppercase(),
-                                       "$targetsStatus\n\n$loopStatus\n\n$oAPSResultStatus",
-                                       returnCommand = null
-                                   )
-                               )
-                           )
-                       }, fabricPrivacy::logException)
+               aapsLogger.debug(LTag.WEAR, "ActionLoopStatus received from ${it.sourceNodeId}")
+               rxBus.send(
+                   EventMobileToWear(
+                       EventData.ConfirmAction(
+                           rh.gs(R.string.loop_status).uppercase(),
+                           "$targetsStatus\n\n$loopStatus\n\n$oAPSResultStatus",
+                           returnCommand = null
+                       )
+                   )
+               )
+           }, fabricPrivacy::logException)
         disposable += rxBus
-            .toObservable(EventData.LoopStatesRequest::class.java)
+            .toObservable(EventData.ActionLoopStatesRequest::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "LoopStatesRequest received from ${it.sourceNodeId}")
+                           aapsLogger.debug(LTag.WEAR, "ActionLoopStatesRequest received from ${it.sourceNodeId}")
                            handleAvailableLoopStates()
                        }, fabricPrivacy::logException)
+
         disposable += rxBus
             .toObservable(EventData.LoopStateSelected::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "LoopStateSelected received from ${it.sourceNodeId}")
+                           aapsLogger.debug(LTag.WEAR, "LoopStateSelected received $it from ${it.sourceNodeId}")
                            handleLoopStateSelected(it)
                        }, fabricPrivacy::logException)
+
         disposable += rxBus
             .toObservable(EventData.LoopStateConfirmed::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "LoopStateSelected received from ${it.sourceNodeId}")
+                           aapsLogger.debug(LTag.WEAR, "LoopStateConfirmed received $it from ${it.sourceNodeId}")
                            handleLoopStateConfirmed(it)
                        }, fabricPrivacy::logException)
         disposable += rxBus
+
             .toObservable(EventData.ActionTddStatus::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe {
                 aapsLogger.debug(LTag.WEAR, "ActionTddStatus received from ${it.sourceNodeId}")
                 handleTddStatus()
             }
+
+        disposable += rxBus
+            .toObservable(EventData.ActionExerciseMode::class.java)
+            .observeOn(aapsSchedulers.io)
+            .subscribe({
+               aapsLogger.debug(LTag.WEAR, "ActionExerciseMode received $it from ${it.sourceNodeId}")
+               handleExerciseModeCommand(it)
+            }, fabricPrivacy::logException)
+        disposable += rxBus
+            .toObservable(EventData.ActionExerciseModeConfirmed::class.java)
+            .observeOn(aapsSchedulers.io)
+            .subscribe({
+               aapsLogger.debug(LTag.WEAR, "ActionExerciseModeConfirmed received $it from ${it.sourceNodeId}")
+               doExerciseMode(it)
+            }, fabricPrivacy::logException)
+
         disposable += rxBus
             .toObservable(EventData.ActionProfileSwitchSendInitialData::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "ActionProfileSwitchSendInitialData received $it from ${it.sourceNodeId}")
-                           handleProfileSwitchSendInitialData()
-                       }, fabricPrivacy::logException)
+               aapsLogger.debug(LTag.WEAR, "ActionProfileSwitchSendInitialData received $it from ${it.sourceNodeId}")
+               handleProfileSwitchSendInitialData()
+            }, fabricPrivacy::logException)
+
         disposable += rxBus
             .toObservable(EventData.ActionProfileSwitchPreCheck::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "ActionProfileSwitchPreCheck received $it from ${it.sourceNodeId}")
-                           handleProfileSwitchPreCheck(it)
-                       }, fabricPrivacy::logException)
+               aapsLogger.debug(LTag.WEAR, "ActionProfileSwitchPreCheck received $it from ${it.sourceNodeId}")
+               handleProfileSwitchPreCheck(it)
+            }, fabricPrivacy::logException)
         disposable += rxBus
             .toObservable(EventData.ActionProfileSwitchConfirmed::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "ActionProfileSwitchConfirmed received $it from ${it.sourceNodeId}")
-                           doProfileSwitch(it)
-                       }, fabricPrivacy::logException)
+               aapsLogger.debug(LTag.WEAR, "ActionProfileSwitchConfirmed received $it from ${it.sourceNodeId}")
+               doProfileSwitch(it)
+            }, fabricPrivacy::logException)
+
         disposable += rxBus
             .toObservable(EventData.ActionTempTargetPreCheck::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "ActionTempTargetPreCheck received $it from ${it.sourceNodeId}")
-                           handleTempTargetPreCheck(it)
-                       }, fabricPrivacy::logException)
+               aapsLogger.debug(LTag.WEAR, "ActionTempTargetPreCheck received $it from ${it.sourceNodeId}")
+               handleTempTargetPreCheck(it)
+            }, fabricPrivacy::logException)
         disposable += rxBus
             .toObservable(EventData.ActionTempTargetConfirmed::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "ActionTempTargetConfirmed received $it from ${it.sourceNodeId}")
-                           doTempTarget(it)
-                       }, fabricPrivacy::logException)
+                   aapsLogger.debug(LTag.WEAR, "ActionTempTargetConfirmed received $it from ${it.sourceNodeId}")
+                   doTempTarget(it)
+               }, fabricPrivacy::logException)
+
         disposable += rxBus
             .toObservable(EventData.ActionBolusPreCheck::class.java)
             .observeOn(aapsSchedulers.io)
             .subscribe({
-                           aapsLogger.debug(LTag.WEAR, "ActionBolusPreCheck received $it from ${it.sourceNodeId}")
-                           handleBolusPreCheck(it)
-                       }, fabricPrivacy::logException)
+                   aapsLogger.debug(LTag.WEAR, "ActionBolusPreCheck received $it from ${it.sourceNodeId}")
+                   handleBolusPreCheck(it)
+               }, fabricPrivacy::logException)
         disposable += rxBus
             .toObservable(EventData.ActionBolusConfirmed::class.java)
             .observeOn(aapsSchedulers.io)
@@ -760,15 +784,19 @@ class DataHandlerMobile @Inject constructor(
         val activeProfileSwitch = persistenceLayer.getEffectiveProfileSwitchActiveAt(dateUtil.now())
         if (activeProfileSwitch == null) {
             sendError(rh.gs(R.string.no_active_profile))
+            return
         }
         if (command.percentage < Constants.CPP_MIN_PERCENTAGE || command.percentage > Constants.CPP_MAX_PERCENTAGE) {
             sendError(rh.gs(app.aaps.core.ui.R.string.valueoutofrange, "Profile-Percentage"))
+            return
         }
         if (command.timeShift < Constants.CPP_MIN_TIMESHIFT || command.timeShift > Constants.CPP_MAX_TIMESHIFT) {
             sendError(rh.gs(app.aaps.core.ui.R.string.valueoutofrange, "Profile-Timeshift"))
+            return
         }
         if (command.duration < 0 || command.duration > Constants.MAX_PROFILE_SWITCH_DURATION) {
             sendError(rh.gs(app.aaps.core.ui.R.string.valueoutofrange, "Profile-Duration"))
+            return
         }
         val profileName = profileFunction.getOriginalProfileName()
         val message = rh.gs(R.string.profile_message, profileName, command.timeShift, command.percentage, command.duration)
@@ -777,6 +805,28 @@ class DataHandlerMobile @Inject constructor(
                 EventData.ConfirmAction(
                     rh.gs(app.aaps.core.ui.R.string.confirm).uppercase(), message,
                     returnCommand = EventData.ActionProfileSwitchConfirmed(command.timeShift, command.percentage, command.duration)
+                )
+            )
+        )
+    }
+
+    private fun handleExerciseModeCommand(action: EventData.ActionExerciseMode) {
+        Log.d(TAG, "handleExerciseModeCommand")
+        val title = rh.gs(app.aaps.core.ui.R.string.confirm).uppercase()
+        var message = ""
+
+        var percentage = action.percentage
+        var duration = action.duration
+        var timeshift = action.timeShift
+
+        message += rh.gs(R.string.wear_action_enter_exercise_mode_message, percentage, duration, timeshift)
+
+        rxBus.send(
+            EventMobileToWear(
+                EventData.ConfirmAction(
+                    title,
+                    message,
+                    returnCommand = EventData.ActionExerciseModeConfirmed(percentage, duration, timeshift)
                 )
             )
         )
@@ -1239,6 +1289,45 @@ class DataHandlerMobile @Inject constructor(
         }
     }
 
+    // Используем ту же логику, что и Bolus Wizard,
+    // чтобы получить "Missing __ g"
+    private fun computeWizardCarbsReq(profile: Profile): Int {
+        val bgReading = iobCobCalculator.ads.actualBg() ?: return 0
+        val cobInfo = iobCobCalculator.getCobInfo("WearStatusWizard")
+        val displayCob = cobInfo.displayCob ?: return 0
+        val tempTarget = persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())
+        val profileName = profileFunction.getProfileName()
+
+        val wizard = bolusWizardProvider.get().doCalc(
+            profile = profile,
+            profileName = profileName,
+            tempTarget = tempTarget,
+            carbs = 0,
+            cob = displayCob,
+            bg = bgReading.valueToUnits(profileFunction.getUnits()),
+            correction = 0.0,
+            percentageCorrection = 100,
+            useBg = preferences.get(BooleanKey.WearWizardBg),
+            useCob = preferences.get(BooleanKey.WearWizardCob),
+            includeBolusIOB = preferences.get(BooleanKey.WearWizardIob),
+            includeBasalIOB = preferences.get(BooleanKey.WearWizardIob),
+            useSuperBolus = false,
+            useTT = preferences.get(BooleanKey.WearWizardTt),
+            useTrend = preferences.get(BooleanKey.WearWizardTrend),
+            useAlarm = false
+        )
+
+        val carbsEq = wizard.carbsEquivalent
+        aapsLogger.debug(LTag.WEAR, "computeWizardCarbsReq: carbsEq=$carbsEq")
+        return if (carbsEq > 0.0) carbsEq.toInt() else 0
+    }
+
+    // активность Exercise mode dвыделение - true, если сейчас активен Exercise Mode (TT c reason = ACTIVITY)
+    private fun isExerciseModeActive(): Boolean {
+        val tt = persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())
+        return tt?.reason == TT.Reason.ACTIVITY
+    }
+
     private fun sendStatus(caller: String) {
         val profile = profileFunction.getProfile()
         var status = rh.gs(app.aaps.core.ui.R.string.noprofile)
@@ -1247,6 +1336,11 @@ class DataHandlerMobile @Inject constructor(
         var cobString = ""
         var currentBasal = ""
         var bgiString = ""
+
+        // новые поля из Саргиса
+        var carbsReq = 0
+        var exerciseModeActive = false
+
         if (config.appInitialized && profile != null) {
             val bolusIob = iobCobCalculator.calculateIobFromBolus().round()
             val basalIob = iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended().round()
@@ -1254,14 +1348,28 @@ class DataHandlerMobile @Inject constructor(
             iobDetail = "(${decimalFormatter.to2Decimal(bolusIob.iob)}|${decimalFormatter.to2Decimal(basalIob.basaliob)})"
             cobString = iobCobCalculator.getCobInfo("WatcherUpdaterService").generateCOBString(decimalFormatter)
             currentBasal =
-                processedTbrEbData.getTempBasalIncludingConvertedExtended(System.currentTimeMillis())?.toStringShort(rh) ?: rh.gs(app.aaps.core.ui.R.string.pump_base_basal_rate, profile.getBasal())
+                processedTbrEbData.getTempBasalIncludingConvertedExtended(System.currentTimeMillis())?.toStringShort(rh)
+                    ?: rh.gs(app.aaps.core.ui.R.string.pump_base_basal_rate, profile.getBasal())
 
-            //bgi
+            // BGI
             if (glucoseStatusProvider.glucoseStatusData != null) {
-                val bgi = -(bolusIob.activity + basalIob.activity) * 5 * profileUtil.fromMgdlToUnits(profile.getIsfMgdl("DataHandlerMobile $caller"))
-                bgiString = "" + (if (bgi >= 0) "+" else "") + decimalFormatter.to1Decimal(bgi)
+                val bgi = -(bolusIob.activity + basalIob.activity) * 5 *
+                    profileUtil.fromMgdlToUnits(profile.getIsfMgdl("DataHandlerMobile $caller"))
+                bgiString = (if (bgi >= 0) "+" else "") + decimalFormatter.to1Decimal(bgi)
             }
+
             status = generateStatusString(profile)
+
+            // 🔹 Вместо APS-carbs берём "Missing __ g" из BolusWizard
+            carbsReq = computeWizardCarbsReq(profile)
+
+            // 🔹 Проверяем, активен ли Exercise Mode (TT ACTIVITY)
+            exerciseModeActive = isExerciseModeActive()
+
+            Log.d(
+                TAG,
+                "sendStatus: caller=$caller, wizardCarbsReq=$carbsReq, exerciseModeActive=$exerciseModeActive"
+            )
         }
 
         //batteries
@@ -1279,20 +1387,21 @@ class DataHandlerMobile @Inject constructor(
         val tempTarget = persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())?.let { tempTarget ->
             tempTargetLevel = 2     // Yellow
             profileUtil.toTargetRangeString(tempTarget.lowTarget, tempTarget.highTarget, GlucoseUnit.MGDL, units)
-        } ?: profileFunction.getProfile()?.let { profile ->
+        } ?: profileFunction.getProfile()?.let { profileLocal ->
             // If the target is not the same as set in the profile then oref has overridden it
             val targetUsed =
                 if (config.APS) loop.lastRun?.constraintsProcessed?.targetBG ?: 0.0
                 else if (config.AAPSCLIENT) processedDeviceStatusData.getAPSResult()?.targetBG ?: 0.0
                 else 0.0
 
-            if (targetUsed != 0.0 && abs(profile.getTargetMgdl() - targetUsed) > 0.01) {
+            if (targetUsed != 0.0 && abs(profileLocal.getTargetMgdl() - targetUsed) > 0.01) {
                 tempTargetLevel = 1     // Green
                 profileUtil.toTargetRangeString(targetUsed, targetUsed, GlucoseUnit.MGDL, units)
             } else {
-                profileUtil.toTargetRangeString(profile.getTargetLowMgdl(), profile.getTargetHighMgdl(), GlucoseUnit.MGDL, units)
+                profileUtil.toTargetRangeString(profileLocal.getTargetLowMgdl(), profileLocal.getTargetHighMgdl(), GlucoseUnit.MGDL, units)
             }
         } ?: ""
+
         // Reservoir Level
         val pump = activePlugin.activePump
         val maxReading = pump.pumpDescription.maxResorvoirReading.toDouble()
@@ -1325,7 +1434,10 @@ class DataHandlerMobile @Inject constructor(
                     tempTargetLevel = tempTargetLevel,
                     reservoirString = reservoirString,
                     reservoir = reservoir,
-                    reservoirLevel = reservoirLevel
+                    reservoirLevel = reservoirLevel,
+                    // 🔹 добавляем поля из Саргиса (нужны изменения в EventData.Status)
+                    carbsReq = carbsReq,
+                    exerciseModeActive = exerciseModeActive
                 )
             )
         )
@@ -1376,6 +1488,7 @@ class DataHandlerMobile @Inject constructor(
             avgDeltaMgdl = glucoseStatus?.shortAvgDelta
         )
     }
+
 
     //Check for Temp-Target:
     private
@@ -1637,6 +1750,88 @@ class DataHandlerMobile @Inject constructor(
         doBolus(0.0, carbs, carbsTime, duration, null, notes)
     }
 
+    // Alexey: расширенный Exercise Mode – как в CareDialog:
+    // при включении: ProfileSwitch + TT ACTIVITY
+    // при отключении: только отмена TT, профиль не трогаем
+    private fun doExerciseMode(command: EventData.ActionExerciseModeConfirmed) {
+        Log.d(TAG, "doExerciseMode, command = $command")
+
+        // 1) duration == 0 → только отменяем TT, профиль не трогаем
+        if (command.duration == 0) {
+            disposable += persistenceLayer.cancelCurrentTemporaryTargetIfAny(
+                timestamp = dateUtil.now(),
+                action = Action.CANCEL_TT,
+                source = Sources.Wear,
+                note = null,
+                listValues = listOf(ValueWithUnit.TETTReason(TT.Reason.WEAR))
+            ).subscribe()
+            return
+        }
+
+        // 2) Есть длительность → ставим и профиль, и TT (как CareDialog)
+        val profileStore = activePlugin.activeProfileSource.profile
+        val profile = profileFunction.getProfile()
+        val profileName =
+            profileFunction.getOriginalProfileName() ?: profileFunction.getProfileName()
+
+        if (profileStore == null || profile == null) {
+            sendError(rh.gs(R.string.no_active_profile))
+            return
+        }
+
+        val percentage = command.percentage
+        val durationMinutes = command.duration           // с часов приходит в минутах
+        val timeShiftMinutes = command.timeShift
+        val timestamp = System.currentTimeMillis()
+
+        // ProfileSwitch через createProfileSwitch2
+        val profileSwitchCreated = profileFunction.createProfileSwitch2(
+            profileStore = profileStore,
+            profileName = profileName,
+            durationInMinutes = durationMinutes,
+            percentage = percentage,
+            timeShiftInMinutes = timeShiftMinutes,
+            timestamp = timestamp,
+            action = Action.PROFILE_SWITCH,
+            source = Sources.Wear,
+            note = null,
+            listValues = listOfNotNull(
+                ValueWithUnit.Timestamp(timestamp),
+                ValueWithUnit.SimpleString(profileName),
+                ValueWithUnit.Percent(percentage),
+                ValueWithUnit.Minute(timeShiftMinutes).takeIf { timeShiftMinutes != 0 },
+                ValueWithUnit.Minute(durationMinutes).takeIf { durationMinutes != 0 }
+            )
+        )
+
+        if (!profileSwitchCreated) {
+            sendError(rh.gs(app.aaps.core.ui.R.string.careportal_profileswitch))
+            return
+        }
+
+        // 3) Temporary Target ACTIVITY – как и было, только используем тот же timestamp
+        val target = preferences.get(UnitDoubleKey.OverviewActivityTarget)
+        val units = profileFunction.getUnits()
+
+        disposable += persistenceLayer.insertAndCancelCurrentTemporaryTarget(
+            temporaryTarget = TT(
+                timestamp = timestamp,
+                duration = TimeUnit.MINUTES.toMillis(durationMinutes.toLong()),
+                reason = TT.Reason.ACTIVITY,
+                lowTarget = profileUtil.convertToMgdl(target, units),
+                highTarget = profileUtil.convertToMgdl(target, units)
+            ),
+            action = Action.TT,
+            source = Sources.Wear,
+            note = null,
+            listValues = listOf(
+                ValueWithUnit.TETTReason(TT.Reason.ACTIVITY),
+                ValueWithUnit.fromGlucoseUnit(target, units),
+                ValueWithUnit.Minute(durationMinutes)
+            )
+        ).subscribe()
+    }
+
     private fun doProfileSwitch(command: EventData.ActionProfileSwitchConfirmed) {
         //check for validity
         if (command.percentage < Constants.CPP_MIN_PERCENTAGE || command.percentage > Constants.CPP_MAX_PERCENTAGE)
@@ -1710,4 +1905,7 @@ class DataHandlerMobile @Inject constructor(
             importExportPrefs.exportCustomWatchface(cwfData, command.withDate)
     }
 
+    companion object {
+        private const val TAG = "DataHandlerMobile"
+    }
 }

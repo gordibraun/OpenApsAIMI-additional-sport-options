@@ -164,12 +164,59 @@ class ProfileFunctionImpl @Inject constructor(
         )
     }
 
+    override fun buildProfileSwitch2(profileStore: ProfileStore, profileName: String, durationInMinutes: Int, percentage: Int, timeShiftInMinutes: Int, timestamp: Long): PS? {
+        val pureProfile = profileStore.getSpecificProfile(profileName) ?: return null
+        return PS(
+            timestamp = timestamp,
+            basalBlocks = pureProfile.basalBlocks,
+            isfBlocks = pureProfile.isfBlocks,
+            icBlocks = pureProfile.icBlocks,
+            targetBlocks = pureProfile.targetBlocks,
+            glucoseUnit = pureProfile.glucoseUnit,
+            profileName = profileName,
+            timeshift = T.mins(timeShiftInMinutes.toLong()).msecs(),
+            percentage = percentage,
+            duration = T.mins(durationInMinutes.toLong()).msecs(),
+            iCfg = activePlugin.activeInsulin.iCfg.also {
+                it.insulinEndTime = (pureProfile.dia * 3600 * 1000).toLong()
+            }
+        )
+    }
+
     override fun createProfileSwitch(
         profileStore: ProfileStore, profileName: String, durationInMinutes: Int, percentage: Int, timeShiftInHours: Int, timestamp: Long,
         action: Action, source: Sources, note: String?, listValues: List<ValueWithUnit>
     ): Boolean {
         val ps = buildProfileSwitch(profileStore, profileName, durationInMinutes, percentage, timeShiftInHours, timestamp) ?: return false
         disposable += persistenceLayer.insertOrUpdateProfileSwitch(ps, action, source, note, listValues).subscribe()
+        return true
+    }
+
+    override fun createProfileSwitch2(
+        profileStore: ProfileStore,
+        profileName: String,
+        durationInMinutes: Int,
+        percentage: Int,
+        timeShiftInMinutes: Int,
+        timestamp: Long,
+        action: Action,
+        source: Sources,
+        note: String?,
+        listValues: List<ValueWithUnit>
+    ): Boolean {
+        val ps = buildProfileSwitch2(
+            profileStore,
+            profileName,
+            durationInMinutes,
+            percentage,
+            timeShiftInMinutes,
+            timestamp
+        ) ?: return false
+
+        disposable += persistenceLayer
+            .insertOrUpdateProfileSwitch(ps, action, source, note, listValues)
+            .subscribe()
+
         return true
     }
 

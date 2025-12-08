@@ -167,6 +167,20 @@ fun TE.Location.toDb(): TherapyEvent.Location = when (this) {
     TE.Location.NONE                      -> TherapyEvent.Location.NONE
 }
 
+fun TherapyEvent.ExerciseDuty.fromDb(): TE.ExerciseDuty = when (this) {
+    TherapyEvent.ExerciseDuty.NONE -> TE.ExerciseDuty.NONE
+    TherapyEvent.ExerciseDuty.LIGHT -> TE.ExerciseDuty.LIGHT
+    TherapyEvent.ExerciseDuty.MIDDLE -> TE.ExerciseDuty.MIDDLE
+    TherapyEvent.ExerciseDuty.HEAVY -> TE.ExerciseDuty.HEAVY
+}
+
+fun TE.ExerciseDuty.toDb(): TherapyEvent.ExerciseDuty = when (this) {
+    TE.ExerciseDuty.NONE -> TherapyEvent.ExerciseDuty.NONE
+    TE.ExerciseDuty.LIGHT -> TherapyEvent.ExerciseDuty.LIGHT
+    TE.ExerciseDuty.MIDDLE -> TherapyEvent.ExerciseDuty.MIDDLE
+    TE.ExerciseDuty.HEAVY -> TherapyEvent.ExerciseDuty.HEAVY
+}
+
 fun TherapyEvent.Arrow.fromDb(): TE.Arrow = when (this) {
     TherapyEvent.Arrow.UP         -> TE.Arrow.UP
     TherapyEvent.Arrow.UP_RIGHT   -> TE.Arrow.UP_RIGHT
@@ -209,6 +223,7 @@ fun TherapyEvent.fromDb(): TE = TE(
     glucose = this.glucose,
     glucoseType = this.glucoseType?.fromDb(),
     glucoseUnit = this.glucoseUnit.fromDb(),
+    exerciseDuty = this.exerciseDuty?.fromDb(),
     location = this.location?.fromDb(),
     arrow = this.arrow?.fromDb()
 )
@@ -229,6 +244,7 @@ fun TE.toDb(): TherapyEvent = TherapyEvent(
     glucose = this.glucose,
     glucoseType = this.glucoseType?.toDb(),
     glucoseUnit = this.glucoseUnit.toDb(),
+    exerciseDuty = this.exerciseDuty?.toDb(),
     location = this.location?.toDb(),
     arrow = this.arrow?.toDb()
 )

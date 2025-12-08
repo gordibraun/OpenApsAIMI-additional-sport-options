@@ -110,7 +110,7 @@ sealed class EventData : Event() {
     data class ActionUserActionConfirmed(val id: Int, val title: String) : EventData()
 
     @Serializable
-    data class LoopStatesRequest(val timeStamp: Long) : EventData()
+    data class ActionLoopStatesRequest(val timeStamp: Long) : EventData()
 
     @Serializable
     data class LoopStateSelected(val timeStamp: Long, val index: Int, val duration: Int? = null) : EventData()
@@ -158,13 +158,22 @@ sealed class EventData : Event() {
 
             PRESET_ACTIVITY, PRESET_HYPO, PRESET_EATING, CANCEL, MANUAL
         }
-
     }
+
+    @Serializable
+    data class ActionExerciseMode(
+        val percentage: Int,
+        val duration: Int,
+        val timeShift: Int
+    ): EventData()
 
     // Mobile <- Wear return
 
     @Serializable
     data class ActionWizardConfirmed(val timeStamp: Long) : EventData()
+
+    @Serializable
+    data class ActionExerciseModeConfirmed(val percentage: Int = 0, val duration: Int = 0, val timeShift: Int = 0) : EventData()
 
     @Serializable
     data class ActionTempTargetConfirmed(val isMgdl: Boolean = true, val duration: Int = 0, val low: Double = 0.0, val high: Double = 0.0) : EventData()
@@ -335,7 +344,9 @@ sealed class EventData : Event() {
         val tempTargetLevel: Int,
         val reservoirString: String,
         val reservoir: Double,
-        val reservoirLevel: Int
+        val reservoirLevel: Int,
+        val carbsReq: Int = 0,      // 🔹 добавляем на часы carbsReq
+        val exerciseModeActive: Boolean = false   // 👈выделяем exercise mode пока активен
     ) : EventData(), EventDataSet
 
     @Serializable

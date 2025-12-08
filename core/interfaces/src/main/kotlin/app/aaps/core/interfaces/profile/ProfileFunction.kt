@@ -68,7 +68,37 @@ interface ProfileFunction {
      * @param timestamp         expected time
      * @return null if profile cannot be created from profile store
      */
-    fun buildProfileSwitch(profileStore: ProfileStore, profileName: String, durationInMinutes: Int, percentage: Int, timeShiftInHours: Int, timestamp: Long): PS?
+    fun buildProfileSwitch(
+        profileStore: ProfileStore,
+        profileName: String,
+        durationInMinutes: Int,
+        percentage: Int,
+        timeShiftInHours: Int,
+        timestamp: Long
+
+    ): PS?
+
+    /**
+     * Build a new circadian profile switch request based on provided profile
+     * timeShift is given here in minutes
+     *
+     * @param profileStore  ProfileStore to use
+     * @param profileName   this profile from profile store
+     * @param durationInMinutes
+     * @param percentage        100 = no modification
+     * @param timeShiftInMinutes  0 = no modification
+     * @param timestamp         expected time
+     * @return null if profile cannot be created from profile store
+     */
+    fun buildProfileSwitch2(
+        profileStore: ProfileStore,
+        profileName: String,
+        durationInMinutes: Int,
+        percentage: Int,
+        timeShiftInMinutes: Int,
+        timestamp: Long
+
+    ): PS?
 
     /**
      * Create a new circadian profile switch request based on provided profile
@@ -102,6 +132,21 @@ interface ProfileFunction {
      * @param listValues Values for UserEntry logging
      * @return true if profile switch is created
      */
+
+    fun createProfileSwitch2(
+        profileStore: ProfileStore,
+        profileName: String,
+        durationInMinutes: Int,
+        percentage: Int,
+        timeShiftInMinutes: Int,
+        timestamp: Long,
+        action: Action,
+        source: Sources,
+        note: String? = null,
+        listValues: List<ValueWithUnit>
+
+    ): Boolean
+
     fun createProfileSwitch(
         durationInMinutes: Int, percentage: Int, timeShiftInHours: Int,
         action: Action, source: Sources, note: String? = null, listValues: List<ValueWithUnit>

@@ -47,6 +47,7 @@ class TempTargetActivity : ViewSelectorActivity() {
         }
 
         override fun instantiateItem(container: ViewGroup, row: Int, col: Int): View = when {
+            // duration
             col == 0                    -> {
                 val viewAdapter = EditPlusMinusViewAdapter.getViewAdapter(sp, applicationContext, container, false)
                 val view = viewAdapter.root
