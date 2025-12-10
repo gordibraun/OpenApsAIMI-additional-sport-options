@@ -16,12 +16,13 @@ class ForceSnapshotReceiver : BroadcastReceiver() {
         if (intent.action != "app.aaps.wear.ACTION_TEST_RESEND") return
 
         val svc = Intent(ctx, WearSnapshotService::class.java)
-            .setAction("FORCE_SNAPSHOT")
+            .setAction("FORCE_SNAPSHOT")   // сервис увидит это и отправит данные
 
         try {
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(svc)
             else ctx.startService(svc)
         } catch (_: Throwable) {
+            // на всякий случай второй вызов
             ctx.startService(svc)
         }
     }
