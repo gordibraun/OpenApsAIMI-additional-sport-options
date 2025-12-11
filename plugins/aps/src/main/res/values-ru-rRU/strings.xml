@@ -43,7 +43,7 @@
     <string name="openapsma_request_label">запрос</string>
     <string name="constraints">ограничения</string>
     <string name="openapsma_autosensdata_label">данные autosens</string>
-    <string name="openapsma_script_debug_data_label">Отладка скрипта</string>
+    <string name="openapsma_script_debug_data_label">Отладка скрипта. Это технические данные, которые показывают внутренние данные AIMI которые им расчитаны.</string>
     <string name="openapsama_use_autosens">Пользоваться функцией Autosens</string>
     <string name="openapsma_max_basal_title">Максимальное значение ед./ч для скорости временного базала</string>
     <string name="openapsma_max_basal_summary">В контексте OpenAPS эта величина называется макс базал</string>

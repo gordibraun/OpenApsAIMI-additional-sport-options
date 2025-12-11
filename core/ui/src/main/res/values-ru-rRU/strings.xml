@@ -28,7 +28,8 @@
     <string name="pump_paused">Помпа приостановлена</string>
     <string name="and">И</string>
     <string name="patient_name_default" comment="This is default patient display name, when user does not provide real one">Пользователь</string>
-    <string name="result">Результат</string>
+    <string name="result">Результат Это итог вычислений AIMI за один цикл расчёта (loop cycle).
+        То есть AIMI собирает входные данные (глюкоза, тренды, активность, карбы, инсулин и т. д.), запускает свои модели — и в разделе Результат показывает финальное решение, которое будет использоваться для корректировки базала или SMB. </string>
     <string name="settings">Настройки</string>
     <string name="statuslights">Индикаторы состояния</string>
     <string name="do_ns_upload_title">Выгружать (передавать данные) ГК в Nightscout</string>
