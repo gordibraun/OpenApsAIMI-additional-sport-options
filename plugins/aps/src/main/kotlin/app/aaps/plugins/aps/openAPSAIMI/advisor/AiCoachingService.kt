@@ -136,7 +136,7 @@ class AiCoachingService {
         sb.append("- Si hypers repas : vérifie Ratio Glucides (IC) et repas 'Moyen'/'Fort'.\n")
         sb.append("- Si SMB inefficace : vérifie 'MaxSMB' et 'Unified Reactivity'.\n")
         sb.append("\nIMPORTANT : Si tu recommandes une modification complexe, ajoute toujours : 'Pour plus de détails, consulte la documentation AIMI'.\n")
-        sb.append("Réponds en Français. Format : 'Analyse courte' puis 'Recommandation ' (liste à puces concrète).")
+        sb.append("Отвечай на русском языке, ясно и структурировано. Сначала дай краткий анализ, затем список конкретных рекомендаций. Дай аналитику и рекомендации по более точной настройке каждого параметра ")
 
         return sb.toString()
     }
