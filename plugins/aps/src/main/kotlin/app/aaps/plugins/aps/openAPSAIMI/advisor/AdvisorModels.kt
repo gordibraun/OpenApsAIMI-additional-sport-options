@@ -4,7 +4,7 @@ package app.aaps.plugins.aps.openAPSAIMI.advisor
  * =============================================================================
  * AIMI ADVISOR DATA MODELS
  * =============================================================================
- * 
+ *
  * Simple, non-nullable data classes for the AIMI Profile Advisor feature.
  * Zero external dependencies - guaranteed crash-free.
  * =============================================================================
@@ -34,37 +34,36 @@ data class AdvisorMetrics(
  * Domain area for a recommendation.
  */
 enum class RecommendationDomain {
-    SAFETY,             // Hypo prevention priority
-    BASAL,              // Basal rate adjustments
-    ISF,                // Insulin Sensitivity Factor
-    TARGET,             // BG targets
-    SMB,                // SMB settings
-    MODES,              // Meal modes configuration
-    PROFILE_QUALITY     // General profile assessment
+    SAFETY,
+    BASAL,
+    ISF,
+    TARGET,
+    SMB,
+    MODES,
+    PROFILE_QUALITY
 }
 
 /**
  * Priority level for recommendations.
  */
 enum class RecommendationPriority {
-    CRITICAL,   // Safety issue, address immediately
-    HIGH,       // Significant improvement opportunity
-    MEDIUM,     // Worth considering
-    LOW         // Minor optimization
+    CRITICAL,
+    HIGH,
+    MEDIUM,
+    LOW
 }
 
 /**
  * Severity classification for the overall score.
  */
 enum class AdvisorSeverity {
-    GOOD,       // Score >= 7.0
-    WARNING,    // 4.0 <= Score < 7.0
-    CRITICAL    // Score < 4.0
+    GOOD,
+    WARNING,
+    CRITICAL
 }
 
 /**
  * A single recommendation from the advisor.
- * Uses Resource IDs for localization.
  */
 data class AimiRecommendation(
     val domain: RecommendationDomain,
@@ -72,7 +71,6 @@ data class AimiRecommendation(
     val titleResId: Int,
     val descriptionResId: Int,
     val actionsResIds: List<Int> = emptyList(),
-    // New: Specific actions for the Rules Engine
     val advisorActions: List<AdvisorAction> = emptyList()
 )
 
@@ -82,7 +80,7 @@ data class AimiRecommendation(
 data class AdvisorReport(
     val generatedAt: Long,
     val metrics: AdvisorMetrics,
-    val overallScore: Double,           // 0-10 score
+    val overallScore: Double,
     val overallSeverity: AdvisorSeverity,
     val overallAssessment: String,
     val recommendations: List<AimiRecommendation>,
@@ -91,23 +89,37 @@ data class AdvisorReport(
 
 /**
  * =============================================================================
- * RULES ENGINE MODELS
+ * RULES ENGINE CONTEXT
  * =============================================================================
  */
-
 data class AdvisorContext(
     val metrics: AdvisorMetrics,
     val profile: AimiProfileSnapshot,
-    val prefs: AimiPrefsSnapshot
+    val prefs: AimiPrefsSnapshot,
+
+    val basalProfile24h: List<BasalBlock>,
+    val cgm24h: Cgm24hSnapshot,
+    val meals24h: List<MealSnapshot>,
+    val apsSettings: AimiFullSettingsSnapshot,
+
+    // NEW — for deep analysis / LLM
+    val insulin24h: Insulin24hSnapshot? = null,
+    val steps24h: Steps24hSnapshot? = null
 )
 
+/**
+ * Profile snapshot.
+ */
 data class AimiProfileSnapshot(
-    val nightBasal: Double,      // U/h (average or specific block)
+    val nightBasal: Double,      // U/h
     val icRatio: Double,         // g/U
     val isf: Double,             // mg/dL/U
     val targetBg: Double         // mg/dL
 )
 
+/**
+ * AIMI preferences snapshot.
+ */
 data class AimiPrefsSnapshot(
     val maxSmb: Double,                     // U
     val lunchFactor: Double,                // multiplier
@@ -130,3 +142,88 @@ enum class AdvisorActionCode {
     REDUCE_MAX_SMB,
     INCREASE_LUNCH_FACTOR
 }
+
+/**
+ * =============================================================================
+ * EXTRA SNAPSHOTS FOR LLM / DEEP AUDIT
+ * =============================================================================
+ */
+
+data class BasalBlock(
+    val from: String,     // "HH:MM"
+    val to: String,       // "HH:MM"
+    val uPerHour: Double
+)
+
+data class Cgm24hSnapshot(
+    val intervalMin: Int,
+    val valuesMgDl: List<Int>
+)
+
+data class MealSnapshot(
+    val timestamp: Long,
+    val carbsG: Double,
+    val bolusU: Double? = null,
+    val note: String? = null
+)
+
+data class AimiFullSettingsSnapshot(
+    val json: String
+)
+
+/**
+ * Insulin activity snapshot (24h).
+ */
+data class Insulin24hSnapshot(
+    val totalU: Double,
+    val basalU: Double,
+    val bolusU: Double,
+    val smbU: Double,
+    val tempBasals: List<TempBasalEvent>,
+    val smbs: List<SmbEvent>,
+    val boluses: List<BolusEvent>,
+    val iobNow: Double,
+    val cobNow: Double
+)
+
+data class TempBasalEvent(
+    val ts: Long,
+    val durationMin: Int,
+    val rateUph: Double? = null,
+    val percent: Int? = null
+)
+
+data class SmbEvent(val ts: Long, val units: Double)
+
+data class BolusEvent(
+    val ts: Long,
+    val units: Double,
+    val kind: String // meal / correction / other
+)
+
+/**
+ * Steps / activity snapshot.
+ */
+data class Steps24hSnapshot(
+    val intervalMin: Int,
+    val values: List<Int>
+)
+
+/**
+ * Lightweight report representation for LLM.
+ */
+data class AdvisorReportForLLM(
+    val overallScore: Double,
+    val overallSeverity: String,
+    val overallAssessment: String,
+    val summary: String,
+    val recommendations: List<RecForLLM>
+)
+
+data class RecForLLM(
+    val domain: String,
+    val priority: String,
+    val title: String,
+    val description: String,
+    val advisorActions: List<AdvisorAction>
+)

@@ -1,3 +1,5 @@
+// Alexey added забираю из этого файла все данные экрана AIMI 3.3 для передачи нейросети
+
 package app.aaps.plugins.aps.openAPSAIMI
 
 import android.annotation.SuppressLint

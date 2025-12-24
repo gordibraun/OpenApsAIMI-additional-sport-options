@@ -1,3 +1,4 @@
+// основной промпт задача для нейросети здесь
 package app.aaps.plugins.aps.openAPSAIMI.advisor
 
 import org.json.JSONArray
@@ -10,12 +11,13 @@ import java.net.URL
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.util.Log
 
 /**
  * =============================================================================
  * AI COACHING SERVICE
  * =============================================================================
- * 
+ *
  * Interacts with OpenAI API to generate natural language coaching advice.
  * Uses robust HttpURLConnection (zero dependency).
  * =============================================================================
@@ -24,7 +26,8 @@ class AiCoachingService {
 
     companion object {
         private const val OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-        private const val MODEL = "gpt-4o" // or gpt-3.5-turbo
+        private const val MODEL = "gpt-4o"
+        private const val TAG = "AiCoachingService"
     }
 
     /**
@@ -34,19 +37,36 @@ class AiCoachingService {
      * @param apiKey The user's OpenAI API Key
      */
     suspend fun fetchAdvice(
-        context: AdvisorContext, 
-        report: AdvisorReport, 
+        context: AdvisorContext,
+        report: AdvisorReport,
         apiKey: String
     ): String = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) return@withContext "API Key manquante. Veuillez configurer votre clé OpenAI."
 
         try {
+            val keysDump =
+                flattenJsonKeys(JSONObject(context.apsSettings.json))
+                    .joinToString("\n")
+
+            logLong("AIMI_KEYS", keysDump)
+
+            // 2️⃣ ЛОГ: КЛЮЧ = ЗНАЧЕНИЕ (РЕАЛЬНЫЕ ЦИФРЫ)
+            val apsObj = JSONObject(context.apsSettings.json)
+            val valuesDump =
+                flattenJsonKeyValues(apsObj)
+                    .joinToString("\n")
+            logLong("AIMI_VALUES", valuesDump)
+
             val prompt = buildPrompt(context, report)
+            logLong("AIMI_PROMPT", "===== FULL PROMPT SENT TO AI =====\n$prompt")
+            Log.d("AIMI_PROMPT", "PROMPT length=${prompt.length}")
             val jsonBody = buildJsonBody(prompt)
-            
+            val jsonStr = jsonBody.toString()
+            Log.d(TAG, "OPENAI JSON length=${jsonStr.length}")
+            logLong(TAG, "===== OPENAI REQUEST JSON =====\n$jsonStr")
             val url = URL(OPENAI_URL)
             val connection = url.openConnection() as HttpURLConnection
-            
+
             connection.apply {
                 requestMethod = "POST"
                 setRequestProperty("Content-Type", "application/json")
@@ -72,7 +92,18 @@ class AiCoachingService {
                     response.append(line)
                 }
                 reader.close()
-                return@withContext parseResponse(response.toString())
+                val responseStr = response.toString()
+
+                // ✅ сырой JSON-ответ OpenAI (может быть большой)
+                Log.d("AIMI_RESPONSE", "RESPONSE JSON length=${responseStr.length}")
+                logLong("AIMI_RESPONSE", "===== OPENAI RAW RESPONSE =====\n$responseStr")
+
+                // ✅ распарсенный текст
+                val advice = parseResponse(responseStr)
+                Log.d("AIMI_ADVISOR", "adviceLen=${advice.length}, tail=${advice.takeLast(30)}")
+                logLong("AIMI_ADVISOR", "===== AI ADVICE TEXT =====\n$advice")
+
+                return@withContext advice
             } else {
                 return@withContext "Erreur API ($responseCode). Veuillez vérifier votre clé ou votre connexion."
             }
@@ -83,62 +114,127 @@ class AiCoachingService {
         }
     }
 
+    private fun flattenJsonKeys(obj: JSONObject, prefix: String = ""): List<String> {
+        val out = mutableListOf<String>()
+        val it = obj.keys()
+        while (it.hasNext()) {
+            val k = it.next()
+            val path = if (prefix.isEmpty()) k else "$prefix.$k"
+            val v = obj.opt(k)
+            when (v) {
+                is JSONObject -> out += flattenJsonKeys(v, path)
+                else -> out += path
+            }
+        }
+        return out.sorted()
+    }
+
+    private fun flattenJsonKeyValues(
+        obj: JSONObject,
+        prefix: String = "",
+        maskKeys: Set<String> = setOf("global.aimi_advisor_openai_key")
+    ): List<String> {
+        val out = mutableListOf<String>()
+        val it = obj.keys()
+        while (it.hasNext()) {
+            val k = it.next()
+            val path = if (prefix.isEmpty()) k else "$prefix.$k"
+            val v = obj.opt(k)
+
+            when (v) {
+                is JSONObject -> out += flattenJsonKeyValues(v, path, maskKeys)
+                is JSONArray -> out += "$path=[len=${v.length()}]"
+                else -> {
+                    val valueStr = if (maskKeys.contains(path)) "***MASKED***" else (v?.toString() ?: "null")
+                    out += "$path=$valueStr"
+                }
+            }
+        }
+        return out.sorted()
+    }
+
+    private fun logLong(tag: String, msg: String, chunkSize: Int = 3000) {
+        var i = 0
+        while (i < msg.length) {
+            val end = minOf(i + chunkSize, msg.length)
+            android.util.Log.d(tag, msg.substring(i, end))
+            i = end
+        }
+    }
+
     /**
      * Construct the prompt for the LLM.
      */
     private fun buildPrompt(ctx: AdvisorContext, report: AdvisorReport): String {
-        val sb = StringBuilder()
-        
-        // 1. Context: Metrics
-        sb.append("CONTEXTE PATIENT (7 derniers jours) :\n")
-        sb.append("- TIR 70-180: ${(ctx.metrics.tir70_180 * 100).roundToInt()}%\n")
-        sb.append("- Hypo (<70): ${(ctx.metrics.timeBelow70 * 100).roundToInt()}%\n")
-        sb.append("- Hyper (>180): ${(ctx.metrics.timeAbove180 * 100).roundToInt()}%\n")
-        sb.append("- Moyenne BG: ${ctx.metrics.meanBg.roundToInt()} mg/dL (GMI: ${ctx.metrics.gmi}%)\n")
-        sb.append("- TDD Moyen: ${ctx.metrics.tdd.roundToInt()} U (Basale: ${(ctx.metrics.basalPercent * 100).roundToInt()}%, Bolus: ${(100 - (ctx.metrics.basalPercent * 100).roundToInt())}%)\n")
-        sb.append("- Score AIMI: ${report.overallScore}/10\n\n")
+        val cgm = ctx.cgm24h
+        val interval = cgm.intervalMin.coerceAtLeast(1)
+        val pointsPerHour = (60 / interval).coerceAtLeast(1)
+        val last8h = cgm.valuesMgDl.takeLast(pointsPerHour * 8)
 
-        // 2. Context: Profile Settings
-        sb.append("PARAMÈTRES DU PROFIL ACTUEL :\n")
-        sb.append("- Basale Nuit: ${ctx.profile.nightBasal} U/h\n")
-        sb.append("- Ratio Glucides (IC): ${ctx.profile.icRatio} g/U\n")
-        sb.append("- Sensibilité (ISF): ${ctx.profile.isf} mg/dL/U\n")
-        sb.append("- Cible (Target): ${ctx.profile.targetBg} mg/dL\n\n")
+        val lastValue = cgm.valuesMgDl.lastOrNull()
+        val min8h = last8h.minOrNull()
+        val max8h = last8h.maxOrNull()
 
-        // 3. Context: Algorithm Preferences
-        sb.append("PRÉFÉRENCES AIMI :\n")
-        sb.append("- Max SMB: ${ctx.prefs.maxSmb} U\n")
-        sb.append("- Facteur Déjeuner: ${ctx.prefs.lunchFactor}x\n")
-        sb.append("- Autodrive Max: ${ctx.prefs.autodriveMaxBasal} U\n\n")
+        // NEW: insulin / activity snapshots (may be null)
+        val ins = ctx.insulin24h
+        val steps = ctx.steps24h
+        val stepsSummary = steps?.let {
+            val last8hSteps = it.values.takeLast(pointsPerHour * 8)
+            val stepsTotal24h = it.values.sum()
+            val stepsTotal8h = last8hSteps.sum()
+            "steps24h: intervalMin=${it.intervalMin}, total24h=$stepsTotal24h, total8h=$stepsTotal8h, last8h=$last8hSteps"
+        } ?: "steps24h: null"
 
-        // 4. Observations (Rules Engine)
-        sb.append("OBSERVATIONS DU SYSTÈME :\n")
-        if (report.recommendations.isEmpty()) {
-            sb.append("- Aucune alerte système majeure.\n")
-        } else {
-            report.recommendations.forEach { rec ->
-                 // Use resource ID mapping simulation or just generic description for context
-                 val type = rec.domain.name
-                 val prio = rec.priority.name
-                 sb.append("- $type ($prio): Voir actions suggérées.\n")
-            }
-        }
-        sb.append("\n")
+        val insulinSummary = ins?.let {
+            val tb = it.tempBasals.takeLast(10)
+            val smbs = it.smbs.takeLast(10)
+            val bol = it.boluses.takeLast(10)
+            """
+            insulin24h:
+            - totalU=${it.totalU}, basalU=${it.basalU}, bolusU=${it.bolusU}, smbU=${it.smbU}
+            - iobNow=${it.iobNow}, cobNow=${it.cobNow}
+            - tempBasals(last10)=$tb
+            - smbs(last10)=$smbs
+            - boluses(last10)=$bol
+            """.trimIndent()
+        } ?: "insulin24h: null"
 
-        // 5. Instruction / Persona
-        sb.append("CONSIDNE :\n")
-        sb.append("Tu es un Expert Médical spécialiste des boucles fermées (OpenAPS).\n")
-        sb.append("Ton objectif est d'optimiser le réglage du profil pour améliorer le TIR et réduire les Hypos/Hypers.\n")
-        sb.append("Analyse la corrélation entre les paramètres (ISF, IC, Basale) et les résultats.\n")
-        sb.append("SI les résultats sont sous-optimaux (TIR < 80% ou Hypos > 3%), TU DOIS RECOMMANDER UNE MODIFICATION PRÉCISE D'UN PARAMÈTRE.\n")
-        sb.append("Analyses spécifiques :\n")
-        sb.append("- Si hypos fréquentes : vérifie Basale Nuit et ISF.\n")
-        sb.append("- Si hypers repas : vérifie Ratio Glucides (IC) et repas 'Moyen'/'Fort'.\n")
-        sb.append("- Si SMB inefficace : vérifie 'MaxSMB' et 'Unified Reactivity'.\n")
-        sb.append("\nIMPORTANT : Si tu recommandes une modification complexe, ajoute toujours : 'Pour plus de détails, consulte la documentation AIMI'.\n")
-        sb.append("Отвечай на русском языке, ясно и структурировано. Сначала дай краткий анализ, затем список конкретных рекомендаций. Дай аналитику и рекомендации по более точной настройке каждого параметра ")
+        return """
+ЗАДАЧА:
+Разобрать, почему глюкоза систематически отклоняется примерно на ±20 mg/dL от цели.
+Дать инженерные гипотезы, проверки и безопасные действия.
 
-        return sb.toString()
+ДАННЫЕ:
+- Target: ${ctx.profile.targetBg} mg/dL
+- Mean BG (7d): ${ctx.metrics.meanBg.roundToInt()} mg/dL
+- Δ от Target: ${(ctx.metrics.meanBg - ctx.profile.targetBg).roundToInt()} mg/dL
+- TIR 70–180: ${(ctx.metrics.tir70_180 * 100).roundToInt()}%
+- Hypo <70: ${(ctx.metrics.timeBelow70 * 100).roundToInt()}%
+- Hyper >180: ${(ctx.metrics.timeAbove180 * 100).roundToInt()}%
+- CGM last8h: last=$lastValue, min=$min8h, max=$max8h, values=$last8h
+- $insulinSummary
+- $stepsSummary
+- Profile: basalNight=${ctx.profile.nightBasal}, IC=${ctx.profile.icRatio}, ISF=${ctx.profile.isf}
+- AIMI prefs: MaxSMB=${ctx.prefs.maxSmb}, LunchFactor=${ctx.prefs.lunchFactor}, AutodriveMaxBasal=${ctx.prefs.autodriveMaxBasal}
+
+JSON SETTINGS (SOURCE OF TRUTH):
+${ctx.apsSettings.json}
+
+RULES-BASED REPORT:
+${report.toString()}
+
+ФОРМАТ ОТВЕТА:
+1) КОРОТКО: что идёт не так
+2) ТОП-5 ГИПОТЕЗ
+   - причина
+   - какие параметры задействованы
+   - confidence: LOW/MEDIUM/HIGH
+3) ЧТО ПРОВЕРИТЬ В ЛОГАХ (конкретно)
+4) 2–3 БЕЗОПАСНЫХ ЭКСПЕРИМЕНТА (малый шаг + критерий отката)
+
+НЕ ПОВТОРЯЙ входные данные.
+
+""".trimIndent()
     }
 
     /**
@@ -147,12 +243,29 @@ class AiCoachingService {
     private fun buildJsonBody(prompt: String): JSONObject {
         val root = JSONObject()
         root.put("model", MODEL)
-        
+
         val messages = JSONArray()
-        
+
         val systemMsg = JSONObject()
-        systemMsg.put("role", "system")
-        systemMsg.put("content", "You are a helpful diabetes optimization assistant.")
+        systemMsg.put("role", "system") // ✅ добавили role
+        systemMsg.put(
+            "content", """
+Ты работаешь в режиме ГЛУБОКОГО ИССЛЕДОВАНИЯ (Deep Technical Audit).
+
+ОПРЕДЕЛЕНИЕ РЕЖИМА:
+нужно понять где что то идет не так
+
+ТРЕБОВАНИЯ К ВЫВОДАМ:
+- Не задавай вопросы
+---
+Ты — технический аудитор настроек AIMI / AndroidAPS (замкнутый контур).
+Цель: дать инженерный аудит конфигурации, а не общие советы по диабету.
+
+ПРАВИЛА ОТВЕТА:
+обязательно найди точную причину проблемы. Помни что тебе переданы все данные для анализа так что именно порекомендуй мне как поменять параметры.
+Текст ответа на русском, ключи JSON допускаются как есть.
+            """.trimIndent()
+        )
         messages.put(systemMsg)
 
         val userMsg = JSONObject()
@@ -161,9 +274,9 @@ class AiCoachingService {
         messages.put(userMsg)
 
         root.put("messages", messages)
-        root.put("temperature", 0.7)
-        root.put("max_tokens", 400)
-        
+        root.put("temperature", 0.3)
+        root.put("max_tokens", 3000)
+
         return root
     }
 

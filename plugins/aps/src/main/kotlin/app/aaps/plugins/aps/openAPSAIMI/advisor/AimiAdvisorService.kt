@@ -1,5 +1,6 @@
 package app.aaps.plugins.aps.openAPSAIMI.advisor
 
+import org.json.JSONObject
 import kotlin.math.roundToInt
 import app.aaps.plugins.aps.R
 import kotlin.math.max
@@ -102,8 +103,205 @@ class AimiAdvisorService {
             autodriveMaxBasal = preferences.get(DoubleKey.autodriveMaxBasal).toDouble()
         )
 
-        return AdvisorContext(metrics, aimiProfile, aimiPrefs)
+        // 4) Full basal profile 24h
+        val basalProfile24h = collectBasalProfile24h(profile)
+
+        // 5) CGM last 24h (raw)
+        val cgm24h = collectCgm24h(persistenceLayer)
+
+        // 6) Meals / carbs last 24h
+        val meals24h = collectMeals24h(persistenceLayer)
+
+        // 7) Full APS/AIMI settings dump
+        val apsSettings = collectApsSettings(preferences)
+
+        val insulin24h = collectInsulin24h(persistenceLayer, start, end)
+        val steps24h = collectSteps24h(persistenceLayer)
+
+        return AdvisorContext(
+            metrics = metrics,
+            profile = aimiProfile,
+            prefs = aimiPrefs,
+
+            basalProfile24h = basalProfile24h,
+            cgm24h = cgm24h,
+            meals24h = meals24h,
+            apsSettings = apsSettings,
+
+            insulin24h = insulin24h,
+            steps24h = steps24h
+        )
     }
+
+    private fun collectBasalProfile24h(
+        profile: app.aaps.core.interfaces.profile.Profile?
+    ): List<BasalBlock> = emptyList()
+
+    private fun collectCgm24h(
+        persistenceLayer: app.aaps.core.interfaces.db.PersistenceLayer
+    ): Cgm24hSnapshot {
+        val end = System.currentTimeMillis()
+        val start24h = end - 24L * 3600L * 1000L
+
+        val readings = try {
+            persistenceLayer.getBgReadingsDataFromTimeToTime(start24h, end, true)
+                .filter { it.isValid }
+                .sortedBy { it.timestamp }
+        } catch (e: Exception) {
+            emptyList<app.aaps.core.data.model.GV>()
+        }
+
+        val values = readings.map { it.value.roundToInt() }
+
+        // Авто-определение шага (медиана интервала между точками)
+        val intervalMin = run {
+            val deltasMin = readings
+                .zipWithNext { a, b -> ((b.timestamp - a.timestamp) / 60000L).toInt() }
+                .filter { it in 1..30 } // отсекаем мусор/прыжки времени
+
+            if (deltasMin.isEmpty()) 5
+            else deltasMin.sorted()[deltasMin.size / 2] // медиана
+        }
+
+        return Cgm24hSnapshot(
+            intervalMin = intervalMin,
+            valuesMgDl = values
+        )
+    }
+
+    private fun collectMeals24h(
+        persistenceLayer: app.aaps.core.interfaces.db.PersistenceLayer
+    ): List<MealSnapshot> = emptyList()
+
+    private fun collectInsulin24h(
+        persistenceLayer: app.aaps.core.interfaces.db.PersistenceLayer,
+        start: Long,
+        end: Long
+    ): Insulin24hSnapshot {
+        return Insulin24hSnapshot(
+            totalU = 0.0,
+            basalU = 0.0,
+            bolusU = 0.0,
+            smbU = 0.0,
+            tempBasals = emptyList(),
+            smbs = emptyList(),
+            boluses = emptyList(),
+            iobNow = 0.0,
+            cobNow = 0.0
+        )
+    }
+
+    private fun collectSteps24h(
+        persistenceLayer: app.aaps.core.interfaces.db.PersistenceLayer
+    ): Steps24hSnapshot? {
+        return null
+    }
+
+    // Alexey added получаем все настроки ААПС АИМИ
+    private fun collectApsSettings(
+        preferences: app.aaps.core.keys.interfaces.Preferences
+    ): AimiFullSettingsSnapshot {
+
+        fun safePut(block: () -> Unit) {
+            try {
+                block()
+            } catch (_: Throwable) {
+                // молча пропускаем отсутствующий ключ
+            }
+        }
+
+        fun putBool(obj: JSONObject, key: app.aaps.core.keys.BooleanKey) =
+            safePut { obj.put(key.key, preferences.get(key)) }
+
+        fun putInt(obj: JSONObject, key: app.aaps.core.keys.IntKey) =
+            safePut { obj.put(key.key, preferences.get(key)) }
+
+        fun putDouble(obj: JSONObject, key: app.aaps.core.keys.DoubleKey) =
+            safePut { obj.put(key.key, preferences.get(key)) }
+
+        fun putString(obj: JSONObject, key: app.aaps.core.keys.StringKey) =
+            safePut { obj.put(key.key, preferences.get(key)) }
+
+        fun putUnit(obj: JSONObject, key: app.aaps.core.keys.UnitDoubleKey) =
+            safePut { obj.put(key.key, preferences.get(key)) }
+
+        return try {
+            val root = JSONObject()
+
+            // ─────────────────── GLOBAL ───────────────────
+            root.put("global", JSONObject().apply {
+                putBool(this, app.aaps.core.keys.BooleanKey.OApsAIMIMLtraining)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIMaxSMB)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIweight)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMICHO)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMITDD7)
+            })
+
+            // ─────────────────── PKPD ───────────────────
+            root.put("pkpd", JSONObject().apply {
+                putBool(this, app.aaps.core.keys.BooleanKey.OApsAIMIPkpdEnabled)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIPkpdInitialDiaH)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIPkpdInitialPeakMin)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIPkpdBoundsDiaMinH)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIPkpdBoundsDiaMaxH)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIPkpdBoundsPeakMinMin)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIPkpdBoundsPeakMinMax)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIPkpdMaxDiaChangePerDayH)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIPkpdMaxPeakChangePerDayMin)
+
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIIsfFusionMinFactor)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIIsfFusionMaxFactor)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIIsfFusionMaxChangePerTick)
+
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMISmbTailThreshold)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMISmbTailDamping)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMISmbExerciseDamping)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMISmbLateFatDamping)
+            })
+
+            // ─────────────────── DEVICES ───────────────────
+            root.put("devices", JSONObject().apply {
+                putBool(this, app.aaps.core.keys.BooleanKey.OApsAIMIEnableStepsFromWatch)
+                putBool(this, app.aaps.core.keys.BooleanKey.OApsxdriponeminute)
+            })
+
+            // ─────────────────── FLAGS / LEARNERS / NGR ───────────────────
+            root.put("flags", JSONObject().apply {
+                putBool(this, app.aaps.core.keys.BooleanKey.OApsAIMInight)
+            })
+
+            root.put("learners", JSONObject().apply {
+                putBool(this, app.aaps.core.keys.BooleanKey.OApsAIMIUnifiedReactivityEnabled)
+            })
+
+            root.put("nightGrowth", JSONObject().apply {
+                putBool(this, app.aaps.core.keys.BooleanKey.OApsAIMINightGrowthEnabled)
+                putInt(this, app.aaps.core.keys.IntKey.OApsAIMINightGrowthAgeYears)
+                putString(this, app.aaps.core.keys.StringKey.OApsAIMINightGrowthStart)
+                putString(this, app.aaps.core.keys.StringKey.OApsAIMINightGrowthEnd)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMINightGrowthMaxIobExtra)
+            })
+
+            // ─────────────────── HIGH BG / MODES / AUTODRIVE / AAPS ───────────────────
+            root.put("highBg", JSONObject().apply {
+                putInt(this, app.aaps.core.keys.IntKey.OApsAIMIHighBGinterval)
+                putDouble(this, app.aaps.core.keys.DoubleKey.OApsAIMIHighBGMaxSMB)
+            })
+
+            // (modes / autodrive / aaps — оставь как у тебя, логика та же)
+
+            AimiFullSettingsSnapshot(json = root.toString())
+
+        } catch (t: Throwable) {
+            AimiFullSettingsSnapshot(
+                json = JSONObject()
+                    .put("error", "collectApsSettings failed")
+                    .put("message", t.message ?: "unknown")
+                    .toString()
+            )
+        }
+    }
+
 
     /**
      * Score global 0–10. 10 = perfect, 0 = critical.
@@ -171,7 +369,15 @@ class AimiAdvisorService {
         )
         val profile = AimiProfileSnapshot(0.80, 10.0, 45.0, 100.0)
         val prefs = AimiPrefsSnapshot(2.0, 1.0, 1.2, 3.0)
-        return AdvisorContext(metrics, profile, prefs)
+        return AdvisorContext(
+            metrics = metrics,
+            profile = profile,
+            prefs = prefs,
+            basalProfile24h = emptyList(),
+            cgm24h = Cgm24hSnapshot(intervalMin = 5, valuesMgDl = emptyList()),
+            meals24h = emptyList(),
+            apsSettings = AimiFullSettingsSnapshot(json = "{}")
+        )
     }
 
     private fun calculateMetrics(history: List<app.aaps.core.data.model.GV>, days: Int): AdvisorMetrics {
