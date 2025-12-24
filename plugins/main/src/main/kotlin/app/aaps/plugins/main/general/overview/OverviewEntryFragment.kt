@@ -63,7 +63,9 @@ class OverviewEntryFragment : DaggerFragment() {
 
     private fun showSelectedOverview() {
         val binding = _binding ?: return
-        val useDashboard = preferences.get(BooleanKey.OverviewUseDashboardLayout)
+        val useDashboard = false
+        // Alexey added Выключил новый экран от Метью с дашбордами
+        // val useDashboard = preferences.get(BooleanKey.OverviewUseDashboardLayout)
         val newTag = if (useDashboard) DASHBOARD_TAG else OVERVIEW_TAG
         if (newTag == currentTag && childFragmentManager.findFragmentByTag(newTag) != null) return
 

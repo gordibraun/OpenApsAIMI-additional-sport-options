@@ -39,7 +39,14 @@ class DashboardModesActivity : TranslatedDaggerAppCompatActivity() {
     }
 
     private fun renderActions() {
-        val actions = automation.userEvents().filter { it.isEnabled && it.canRun() }
+        val all = automation.userEvents()
+        android.util.Log.i("MODES", "userEvents total=${all.size}")
+        all.forEach {
+            android.util.Log.i("MODES", "event='${it.title}' enabled=${it.isEnabled} canRun=${it.canRun()}")
+        }
+
+        val actions = all.filter { it.isEnabled && it.canRun() }
+
         binding.modesEmpty.isVisible = actions.isEmpty()
         binding.actionsContainer.removeAllViews()
         val spacing = resources.getDimensionPixelSize(R.dimen.dashboard_chip_spacing)
