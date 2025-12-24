@@ -380,13 +380,17 @@ class AutomationPlugin @Inject constructor(
     }
 
     override fun userEvents(): List<AutomationEvent> {
-        val list = mutableListOf<AutomationEvent>()
-        val iterator = synchronized(this) { automationEvents.toMutableList().iterator() }
-        while (iterator.hasNext()) {
-            val event = iterator.next()
-            if (event.userAction && event.isEnabled) list.add(event)
+        val snapshot = synchronized(this) { automationEvents.toList() }
+
+        aapsLogger.info(LTag.AUTOMATION, "userEvents(): total=${snapshot.size}")
+        snapshot.forEachIndexed { i, e ->
+            aapsLogger.info(
+                LTag.AUTOMATION,
+                "event[$i] title='${e.title}' enabled=${e.isEnabled} userAction=${e.userAction} canRun=${e.canRun()}"
+            )
         }
-        return list
+
+        return snapshot.filter { it.userAction && it.isEnabled }
     }
 
     fun getActionDummyObjects(): List<Action> {
