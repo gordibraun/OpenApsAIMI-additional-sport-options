@@ -2876,9 +2876,24 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val iobActivityNow = iobActionProfile.activityNow
         val iobActivityIn30Min = iobActionProfile.activityIn30Min
 
-// On met à jour la variable `iob` globale de la classe avec la valeur de notre profiler pour la cohérence
-        this.iob = iobTotal.toFloat()
+        // ✅ DEBUG: compare profiler output vs raw iob_data_array[0]
+        val i0 = iob_data_array.firstOrNull()
+        consoleLog.add(
+            "IOB SOURCE CHECK: profiler.iobTotal=${"%.2f".format(iobTotal)} | " +
+                "raw.iob0=${"%.2f".format(i0?.iob ?: Double.NaN)} | " +
+                "raw.basaliob0=${"%.2f".format(i0?.basaliob ?: Double.NaN)} | " +
+                "raw.bolussnooze0=${"%.4f".format(i0?.bolussnooze ?: Double.NaN)}"
+        )
 
+// ✅ Use raw iob0 as the SMB IOB source (fallback to profiler if null)
+        val iobFromIobData = i0?.iob ?: iobTotal
+        this.iob = iobFromIobData.toFloat()
+        rT.reason.append("\nIOB (used for SMB): ${"%.2f".format(this.iob)} U")
+
+// ✅ Confirm what AIMI will actually use for SMB
+        consoleLog.add(
+            "IOB FOR SMB = ${"%.3f".format(this.iob)} | raw.iob0=${"%.3f".format(i0?.iob ?: Double.NaN)}"
+        )
 // On ajoute les nouvelles informations au log pour le débogage
         consoleLog.add(
             "PAI: Peak in ${"%.0f".format(iobPeakMinutes)}m | " +
@@ -3469,7 +3484,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         if (fusedSensitivity != null) {
             // --- LOG ---
             consoleError.add(
-                "ISF fusionné=${"%.1f".format(fusedSensitivity)} dynISF=${"%.1f".format(dynSensitivity)} → appliqué=${"%.1f".format(sens)}"
+                "ISF объединенный=${"%.1f".format(fusedSensitivity)} dynISF=${"%.1f".format(dynSensitivity)} → применен=${"%.1f".format(sens)}"
             )
 
             // --- 🔥 NOUVEAU : synchroniser l’ISF dans le provider PKPD ---
@@ -3877,7 +3892,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // Detailed logging as requested
         val hasPred = predictedBg > 20
         val hyperKicker = (bg > target_bg + 30 && (delta >= 0.3 || shortAvgDelta >= 0.2))
-        consoleLog.add("SMB Decision: BG=${"%.0f".format(bg)}, Delta=${"%.1f".format(delta)}, IOB=${"%.2f".format(iob)}, HasPred=$hasPred, HyperKicker=$hyperKicker, UAM=${"%.2f".format(modelcal)}, Proposed=${"%.2f".format(this.predictedSMB)}")
+        consoleLog.add(
+            "SMB Decision: BG=${"%.0f".format(bg)}, Delta=${"%.1f".format(delta)}, " +
+                "IOB_local=${"%.2f".format(iob)}, " +
+                "HasPred=$hasPred, HyperKicker=$hyperKicker, UAM=${"%.2f".format(modelcal)}, Proposed=${"%.2f".format(this.predictedSMB)}"
+        )
         val pkpdDiaMinutesOverride: Double? = pkpdRuntime?.params?.diaHrs?.let { it * 60.0 } // PKPD donne des heures → on passe en minutes
         val useLegacyDynamicsdia = pkpdDiaMinutesOverride == null
         val smbExecution = SmbInstructionExecutor.execute(
