@@ -60,6 +60,8 @@ import java.text.DecimalFormat
 import javax.inject.Inject
 import javax.inject.Provider
 import kotlin.math.abs
+import android.graphics.Color
+
 
 class WizardDialog : DaggerDialogFragment() {
 
@@ -531,9 +533,11 @@ class WizardDialog : DaggerDialogFragment() {
                     context, rh, app.aaps.core.ui.R.attr
                         .carbsColor
                 ) else ""
+                // Работаем со следующей строкой чтобы вывести на главное активити результат
                 binding.total.text = HtmlHelper.fromHtml(rh.gs(R.string.result_insulin_carbs, insulinText, carbsText))
                 binding.okcancel.ok.visibility = View.VISIBLE
             } else {
+                // Здесь Не хватает углеводов выводится
                 binding.total.text = HtmlHelper.fromHtml(rh.gs(R.string.missing_carbs, wizard.carbsEquivalent.toInt()).formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor))
                 binding.okcancel.ok.visibility = View.INVISIBLE
             }

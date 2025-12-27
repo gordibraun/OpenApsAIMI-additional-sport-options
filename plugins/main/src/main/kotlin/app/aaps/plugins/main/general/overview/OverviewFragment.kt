@@ -117,9 +117,11 @@ import io.reactivex.rxjava3.kotlin.plusAssign
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
-import javax.inject.Provider
 import kotlin.math.abs
 import kotlin.math.min
+import app.aaps.core.objects.wizard.BolusWizard
+import javax.inject.Provider
+import app.aaps.core.objects.extensions.valueToUnits
 
 class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickListener {
 
@@ -161,6 +163,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     @Inject lateinit var graphDataProvider: Provider<GraphData>
     @Inject lateinit var commandQueue: CommandQueue
     @Inject lateinit var notificationUiBinder: NotificationUiBinder
+    @Inject lateinit var bolusWizardProvider: Provider<BolusWizard>
 
     private val disposable = CompositeDisposable()
 
@@ -1000,6 +1003,54 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val iobDialogText = iobDialogText()
         val displayText = iobCobCalculator.getCobInfo("Overview COB").displayText(rh, decimalFormatter)
         val lastCarbsTime = persistenceLayer.getNewestCarbs()?.timestamp ?: 0L
+
+        // ---- NEW: посчитать то же ядро, что в WizardDialog, но без UI ----
+        val profileStore = activePlugin.activeProfileSource.profile
+        val profile = profileFunction.getProfile()
+        val tempTarget = persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())
+        val units = profileFunction.getUnits()
+
+        // BG как в визарде (в текущих единицах)
+        val bg = iobCobCalculator.ads.actualBg()?.valueToUnits(units) ?: 0.0
+
+        // COB (как в визарде: берём displayCob)
+        val cob = iobCobCalculator.getCobInfo("Overview COB").displayCob ?: 0.0
+
+        val wizardLine: String? =
+            if (profile != null && profileStore != null) {
+                val profileName = profileFunction.getProfileName()
+                val w = bolusWizardProvider.get().doCalc(
+                    profile,                       // specificProfile
+                    profileName,                   // profileName
+                    tempTarget,                    // tempTarget
+                    0,                             // carbs
+                    cob,                           // cob
+                    bg,                            // bg in current units
+                    0.0,                           // correction
+                    preferences.get(app.aaps.core.keys.IntKey.OverviewBolusPercentage),
+                    true,                          // bgCheckbox
+                    true,                          // cobCheckbox
+                    true,                          // iobCheckbox
+                    true,                          // ??? (в визарде два раза iobCheckbox)
+                    false,                         // superbolus
+                    false,                         // ttCheckbox
+                    false,                         // trendCheckbox
+                    false,                         // alarm
+                    "",                            // notes
+                    0,                             // carbTime
+                    usePercentage = false,
+                    totalPercentage = preferences.get(app.aaps.core.keys.IntKey.OverviewBolusPercentage).toDouble()
+                )
+
+                // “Результат / Не хватает” без текста, только значение+единица
+                if (w.calculatedTotalInsulin > 0.0) {
+                    rh.gs(app.aaps.core.ui.R.string.format_insulin_units, w.calculatedTotalInsulin)
+                } else {
+                    rh.gs(app.aaps.core.objects.R.string.format_carbs, w.carbsEquivalent.toInt())
+                }
+            } else null
+        // ---- /NEW ----
+
         runOnUiThread {
             _binding ?: return@runOnUiThread
             binding.infoLayout.iob.text = iobText
@@ -1009,19 +1060,23 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
             val constraintsProcessed = loop.lastRun?.constraintsProcessed
             val lastRun = loop.lastRun
+
             if (config.APS && constraintsProcessed != null && lastRun != null) {
+
+                // ВСЕГДА добавляем вторую строку (результат / не хватает)
+                wizardLine?.let {
+                    cobText += "\n$it"
+                }
+
+                // Анимация — оставляем по старой логике
                 if (constraintsProcessed.carbsReq > 0) {
-                    //only display carbsreq when carbs have not been entered recently
-                    if (lastCarbsTime < lastRun.lastAPSRun) {
-                        cobText += "\n" + constraintsProcessed.carbsReq + " " + rh.gs(app.aaps.core.ui.R.string.required)
-                    }
-                    if (carbAnimation?.isRunning == false)
-                        carbAnimation?.start()
+                    if (carbAnimation?.isRunning == false) carbAnimation?.start()
                 } else {
                     carbAnimation?.stop()
                     carbAnimation?.selectDrawable(0)
                 }
             }
+
             binding.infoLayout.cob.text = cobText
         }
     }

@@ -1470,4 +1470,14 @@ interface PersistenceLayer {
      */
     fun insertOrUpdateApsResult(apsResult: APSResult): Single<TransactionResult<APSResult>>
 
+    // Alexey added
+    data class WizardRequired(
+        val value: Double,      // только число
+        val isCarbs: Boolean,   // true = "Не хватает" (carbs), false = "Результат" (insulin)
+        val timestamp: Long
+    )
+
+    fun saveWizardRequired(required: WizardRequired)
+    fun getWizardRequired(): WizardRequired?
+
 }

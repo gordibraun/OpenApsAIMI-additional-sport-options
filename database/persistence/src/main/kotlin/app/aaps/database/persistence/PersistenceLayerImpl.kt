@@ -1959,4 +1959,14 @@ class PersistenceLayerImpl @Inject constructor(
                 }
                 transactionResult
             }
+    // Alexey added
+    override fun saveWizardRequired(required: PersistenceLayer.WizardRequired) {
+        // TODO: сохранить required куда-то (prefs / db)
+    }
+
+    override fun getWizardRequired(): PersistenceLayer.WizardRequired? {
+        // TODO: прочитать и вернуть, либо null
+        return null
+    }
+
 }
