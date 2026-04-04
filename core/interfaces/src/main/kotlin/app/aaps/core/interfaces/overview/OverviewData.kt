@@ -52,6 +52,7 @@ interface OverviewData {
     var bucketedGraphSeries: SeriesData
     var bgReadingGraphSeries: SeriesData
     var predictionsGraphSeries: SeriesData
+    var finalAimiPredictionGraphSeries: SeriesData
 
     val basalScale: Scale
     var baseBasalGraphSeries: SeriesData

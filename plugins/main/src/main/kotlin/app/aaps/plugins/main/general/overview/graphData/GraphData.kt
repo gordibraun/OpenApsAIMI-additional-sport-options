@@ -61,8 +61,12 @@ class GraphData @Inject constructor(
         } else overviewData.maxBgValue
         minY = 0.0
         addSeries(overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
+        addSeries(overviewData.finalAimiPredictionGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
         if (addPredictions) addSeries(overviewData.predictionsGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
         (overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).setOnDataPointTapListener { _, dataPoint ->
+            if (dataPoint is GlucoseValueDataPoint) ToastUtils.infoToast(context, dataPoint.label)
+        }
+        (overviewData.finalAimiPredictionGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).setOnDataPointTapListener { _, dataPoint ->
             if (dataPoint is GlucoseValueDataPoint) ToastUtils.infoToast(context, dataPoint.label)
         }
     }

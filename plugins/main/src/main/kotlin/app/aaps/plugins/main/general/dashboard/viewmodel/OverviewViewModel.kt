@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModelProvider
 import app.aaps.core.data.iob.InMemoryGlucoseValue
 import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.RM
+import app.aaps.core.data.model.SourceSensor
 import app.aaps.core.data.model.TE
 import app.aaps.core.data.model.TrendArrow
 import app.aaps.core.interfaces.aps.IobTotal
@@ -298,8 +299,10 @@ class OverviewViewModel(
         val request = loop.lastRun?.request ?: return resourceHelper.gs(R.string.dashboard_adjustment_prediction_unavailable)
         val predictions = request.predictionsAsGv
         if (predictions.isEmpty()) return resourceHelper.gs(R.string.dashboard_adjustment_prediction_unavailable)
+        val prioritizedPredictions = predictions.filter { it.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION }
+            .ifEmpty { predictions }
         val targetTime = now + TimeUnit.MINUTES.toMillis(PREDICTION_LOOKAHEAD_MINUTES)
-        val closest = predictions.minByOrNull { abs(it.timestamp - targetTime) }
+        val closest = prioritizedPredictions.minByOrNull { abs(it.timestamp - targetTime) }
             ?: return resourceHelper.gs(R.string.dashboard_adjustment_prediction_unavailable)
         val valueText = profileUtil.fromMgdlToStringInUnits(closest.value)
         val minutes = max(1L, abs(closest.timestamp - now) / TimeUnit.MINUTES.toMillis(1))

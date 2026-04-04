@@ -202,6 +202,7 @@
     <attr name="deviationGreenColor" format="reference|color" />
     <attr name="deviationRedColor" format="reference|color" />
     <attr name="predictionColor" format="reference|color" />
+    <attr name="aimiFinalPredictionColor" format="reference|color" />
     <attr name="iobPredASColor" format="reference|color" />
     <attr name="bgiColor" format="reference|color" />
     <attr name="ratioColor" format="reference|color" />

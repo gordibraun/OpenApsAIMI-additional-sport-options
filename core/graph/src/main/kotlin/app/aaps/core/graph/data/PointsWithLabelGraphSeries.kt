@@ -145,13 +145,14 @@ open class PointsWithLabelGraphSeries<E : DataPointWithLabelInterface> : BaseSer
                     mPaint.strokeWidth = 0f
                     canvas.drawCircle(endX, endY, value.size * scaledPxSize, mPaint)
                 } else if (value.shape == Shape.PREDICTION) {
+                    val predictionRadius = scaledPxSize * value.size
                     mPaint.color = value.color(graphView.context)
                     mPaint.style = value.paintStyle
                     mPaint.strokeWidth = 0f
-                    canvas.drawCircle(endX, endY, scaledPxSize, mPaint)
+                    canvas.drawCircle(endX, endY, predictionRadius, mPaint)
                     mPaint.style = value.paintStyle
                     mPaint.strokeWidth = 0f
-                    canvas.drawCircle(endX, endY, scaledPxSize / 3, mPaint)
+                    canvas.drawCircle(endX, endY, predictionRadius / 3, mPaint)
                 } else if (value.shape == Shape.RECTANGLE) {
                     canvas.drawRect(endX - scaledPxSize, endY - scaledPxSize, endX + scaledPxSize, endY + scaledPxSize, mPaint)
                 } else if (value.shape == Shape.TRIANGLE) {

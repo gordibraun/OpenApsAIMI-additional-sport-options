@@ -210,6 +210,19 @@ open class APSResultObject(protected val injector: HasAndroidInjector) : APSResu
             val startTime = date
 
             val predictions = predictions()
+            predictions?.AIMI_FINAL?.let { iob ->
+                for (i in 1 until iob.size) {
+                    val gv = GV(
+                        raw = 0.0,
+                        noise = 0.0,
+                        value = iob[i].toDouble(),
+                        timestamp = startTime + i * 5 * 60 * 1000L,
+                        sourceSensor = SourceSensor.AIMI_FINAL_PREDICTION,
+                        trendArrow = TrendArrow.NONE
+                    )
+                    array.add(gv)
+                }
+            }
             predictions?.IOB?.let { iob ->
                 for (i in 1 until iob.size) {
                     val gv = GV(
@@ -282,6 +295,7 @@ open class APSResultObject(protected val injector: HasAndroidInjector) : APSResu
             var latest: Long = 0
             val startTime = date
             val predictions = predictions()
+            predictions?.AIMI_FINAL?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
             predictions?.IOB?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
             predictions?.aCOB?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
             predictions?.COB?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }

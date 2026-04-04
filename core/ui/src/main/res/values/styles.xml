@@ -228,6 +228,7 @@
         <item name="deviationGreenColor">@color/deviationGreen</item>
         <item name="deviationRedColor">@color/deviationRed</item>
         <item name="predictionColor">@color/prediction</item>
+        <item name="aimiFinalPredictionColor">@color/omni_cyan</item>
         <item name="iobPredASColor">@color/iobPredAS</item>
         <item name="bgiColor">@color/bgi</item>
         <item name="ratioColor">@color/ratio</item>

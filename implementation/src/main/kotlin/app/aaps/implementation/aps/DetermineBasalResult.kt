@@ -177,6 +177,20 @@ class DetermineBasalResult @Inject constructor(
             val startTime = date
 
             val predictions = predictions()
+            predictions?.AIMI_FINAL?.let { aimiFinal ->
+                for (i in 1 until aimiFinal.size) {
+                    array.add(
+                        GV(
+                            raw = 0.0,
+                            noise = 0.0,
+                            value = aimiFinal[i].toDouble(),
+                            timestamp = startTime + i * 5 * 60 * 1000L,
+                            sourceSensor = SourceSensor.AIMI_FINAL_PREDICTION,
+                            trendArrow = TrendArrow.NONE
+                        )
+                    )
+                }
+            }
             predictions?.IOB?.let { iob ->
                 for (i in 1 until iob.size) {
                     array.add(
@@ -256,6 +270,7 @@ class DetermineBasalResult @Inject constructor(
             var latest = 0L
             val startTime = date
             val preds = predictions()
+            preds?.AIMI_FINAL?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
             preds?.IOB?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
             preds?.aCOB?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
             preds?.COB?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }

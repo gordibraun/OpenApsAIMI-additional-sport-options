@@ -24,7 +24,7 @@ class GlucoseValueDataPoint(
     override fun getY(): Double = valueToUnits(profileUtil.units)
 
     override fun setY(y: Double) {}
-    override val label: String = dateUtil.timeString(data.timestamp) + " " + profileUtil.fromMgdlToStringInUnits(data.value)
+    override val label: String = predictionLabel(dateUtil.timeString(data.timestamp), profileUtil.fromMgdlToStringInUnits(data.value))
     override val duration = 0L
     override val shape get() = if (isPrediction) Shape.PREDICTION else Shape.BG
     override val size = if (isPrediction) 1f else 0.6f
@@ -44,15 +44,20 @@ class GlucoseValueDataPoint(
             SourceSensor.A_COB_PREDICTION -> -0x7f000001 and rh.gac(context, app.aaps.core.ui.R.attr.cobColor)
             SourceSensor.UAM_PREDICTION   -> rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
             SourceSensor.ZT_PREDICTION    -> rh.gac(context, app.aaps.core.ui.R.attr.ztColor)
+            SourceSensor.AIMI_FINAL_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.aimiFinalPredictionColor)
             else                          -> rh.gac(context, app.aaps.core.ui.R.attr.defaultTextColor)
         }
     }
+
+    private fun predictionLabel(time: String, value: String): String =
+        if (isPrediction) "${data.sourceSensor.text}: $time $value" else "$time $value"
 
     private val isPrediction: Boolean
         get() = data.sourceSensor == SourceSensor.IOB_PREDICTION ||
             data.sourceSensor == SourceSensor.COB_PREDICTION ||
             data.sourceSensor == SourceSensor.A_COB_PREDICTION ||
             data.sourceSensor == SourceSensor.UAM_PREDICTION ||
-            data.sourceSensor == SourceSensor.ZT_PREDICTION
+            data.sourceSensor == SourceSensor.ZT_PREDICTION ||
+            data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION
 
 }

@@ -184,7 +184,7 @@ class OpenAPSFragment : DaggerFragment(), MenuProvider {
                 ?.let { HtmlHelper.fromHtml(it.formatAimiLineBreaks()) }
 
             binding.autosensdata.text = lastAPSResult.autosensResult?.dataClassToHtml()
-            binding.lastrun.text = dateUtil.dateAndTimeString(openAPSPlugin.lastAPSRun)
+            binding.lastrun.text = dateUtil.dateAndTimeString(lastAPSResult.date)
         }
         binding.swipeRefresh.isRefreshing = false
     }

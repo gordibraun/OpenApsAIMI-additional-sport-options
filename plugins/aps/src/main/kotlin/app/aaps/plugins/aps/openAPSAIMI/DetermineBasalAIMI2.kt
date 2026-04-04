@@ -2613,6 +2613,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val sanitizedPredictions = advancedPredictions.map { round(min(401.0, max(39.0, it)), 0) }
         val intsPredictions = sanitizedPredictions.map { it.toInt() }
         rT.predBGs = Predictions().apply {
+            AIMI_FINAL = intsPredictions
             IOB = intsPredictions
             COB = intsPredictions
             ZT = intsPredictions
@@ -4056,6 +4057,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             rT.reason.append(" | 🛡️ Cap: ${"%.2f".format(beforeCap)} → ${"%.2f".format(smbToGive)}")
         }
         val savedReason = rT.reason.toString()
+        val savedPredBGs = rT.predBGs
         rT = RT(
             algorithm = APSResult.Algorithm.AIMI,
             runningDynamicIsf = dynIsfMode,
@@ -4075,6 +4077,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             variable_sens = "%.0f".format(variableSensitivity.toDouble()).toDouble()
         )
         rT.reason.append(savedReason)
+        rT.predBGs = savedPredBGs
         var rate = when {
             snackTime && snackrunTime in 0..30 && delta < 15 -> calculateRate(basal, profile_current_basal, 4.0, "AI Force basal because mealTime $snackrunTime.", currenttemp, rT)
             mealTime && mealruntime in 0..30 && delta < 15 -> calculateRate(basal, profile_current_basal, 10.0, "AI Force basal because mealTime $mealruntime.", currenttemp, rT)
@@ -4208,6 +4211,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val sanitizedPredictions = advancedPredictions.map { round(min(401.0, max(39.0, it)), 0) }
         val intsPredictions = sanitizedPredictions.map { it.toInt() }
         rT.predBGs = Predictions().apply {
+            AIMI_FINAL = intsPredictions
             IOB = intsPredictions
             COB = intsPredictions
             ZT  = intsPredictions

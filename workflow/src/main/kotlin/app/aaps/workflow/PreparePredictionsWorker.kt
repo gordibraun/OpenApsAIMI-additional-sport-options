@@ -3,12 +3,14 @@ package app.aaps.workflow
 import android.content.Context
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import app.aaps.core.data.model.SourceSensor
 import app.aaps.core.data.time.T
 import app.aaps.core.graph.data.DataPointWithLabelInterface
 import app.aaps.core.graph.data.GlucoseValueDataPoint
 import app.aaps.core.graph.data.PointsWithLabelGraphSeries
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.configuration.Config
+import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.nsclient.ProcessedDeviceStatusData
 import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.overview.OverviewMenus
@@ -75,14 +77,28 @@ class PreparePredictionsWorker(
         }
 
         val bgListArray: MutableList<DataPointWithLabelInterface> = ArrayList()
+        val finalAimiListArray: MutableList<DataPointWithLabelInterface> = ArrayList()
         val predictions: MutableList<GlucoseValueDataPoint>? = apsResult?.predictionsAsGv
             ?.map { bg -> GlucoseValueDataPoint(bg, profileUtil, rh, dateUtil) }
             ?.toMutableList()
         if (predictions != null) {
             predictions.sortWith { o1: GlucoseValueDataPoint, o2: GlucoseValueDataPoint -> o1.x.compareTo(o2.x) }
-            for (prediction in predictions) if (prediction.data.value >= 40) bgListArray.add(prediction)
+            for (prediction in predictions) {
+                if (prediction.data.value < 40) continue
+                if (prediction.data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION) finalAimiListArray.add(prediction)
+                else bgListArray.add(prediction)
+            }
         }
         data.overviewData.predictionsGraphSeries = PointsWithLabelGraphSeries(Array(bgListArray.size) { i -> bgListArray[i] })
+        data.overviewData.finalAimiPredictionGraphSeries = PointsWithLabelGraphSeries(Array(finalAimiListArray.size) { i -> finalAimiListArray[i] })
+        val firstFinalPoint = finalAimiListArray.firstOrNull() as? GlucoseValueDataPoint
+        val lastFinalPoint = finalAimiListArray.lastOrNull() as? GlucoseValueDataPoint
+        aapsLogger.debug(
+            LTag.WORKER,
+            "AIMI final prediction prepared: points=${finalAimiListArray.size}" +
+                (firstFinalPoint?.let { " first=${dateUtil.dateAndTimeString(it.data.timestamp)} ${profileUtil.fromMgdlToStringInUnits(it.data.value)}" } ?: "") +
+                (lastFinalPoint?.let { " last=${dateUtil.dateAndTimeString(it.data.timestamp)} ${profileUtil.fromMgdlToStringInUnits(it.data.value)}" } ?: "")
+        )
         return Result.success()
     }
 }
