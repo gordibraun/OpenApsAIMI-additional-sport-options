@@ -54,7 +54,16 @@ class SensitivityOref1Plugin @Inject constructor(
     aapsLogger, rh, preferences
 ), PluginConstraints {
 
+    private fun syncLegacyAbsorptionSetting() {
+        val legacyCutoff = preferences.get(DoubleKey.AbsorptionCutOff)
+        val activeMaxTime = preferences.get(DoubleKey.AbsorptionMaxTime)
+        if (legacyCutoff != activeMaxTime) {
+            preferences.put(DoubleKey.AbsorptionMaxTime, legacyCutoff)
+        }
+    }
+
     override fun detectSensitivity(ads: AutosensDataStore, fromTime: Long, toTime: Long): AutosensResult {
+        syncLegacyAbsorptionSetting()
         val profile = profileFunction.getProfile()
         if (profile == null) {
             aapsLogger.error("No profile")
@@ -206,21 +215,21 @@ class SensitivityOref1Plugin @Inject constructor(
         return output
     }
 
-    override fun maxAbsorptionHours(): Double = preferences.get(DoubleKey.AbsorptionCutOff)
+    override fun maxAbsorptionHours(): Double = preferences.get(DoubleKey.AbsorptionMaxTime)
     override val isMinCarbsAbsorptionDynamic: Boolean = false
     override val isOref1: Boolean = true
 
     override fun configuration(): JSONObject =
         JSONObject()
             .put(DoubleKey.ApsSmbMin5MinCarbsImpact, preferences)
-            .put(DoubleKey.AbsorptionCutOff, preferences)
+            .put(DoubleKey.AbsorptionMaxTime, preferences)
             .put(DoubleKey.AutosensMin, preferences)
             .put(DoubleKey.AutosensMax, preferences)
 
     override fun applyConfiguration(configuration: JSONObject) {
         configuration
             .store(DoubleKey.ApsSmbMin5MinCarbsImpact, preferences)
-            .store(DoubleKey.AbsorptionCutOff, preferences)
+            .store(DoubleKey.AbsorptionMaxTime, preferences)
             .store(DoubleKey.AutosensMin, preferences)
             .store(DoubleKey.AutosensMax, preferences)
     }
@@ -242,7 +251,7 @@ class SensitivityOref1Plugin @Inject constructor(
             title = rh.gs(R.string.absorption_settings_title)
             initialExpandedChildrenCount = 0
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsSmbMin5MinCarbsImpact, dialogMessage = R.string.openapsama_min_5m_carb_impact_summary, title = R.string.openapsama_min_5m_carb_impact))
-            addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.AbsorptionCutOff, dialogMessage = R.string.absorption_cutoff_summary, title = R.string.absorption_cutoff_title))
+            addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.AbsorptionMaxTime, dialogMessage = R.string.absorption_max_time_summary, title = R.string.absorption_max_time_title))
             addPreference(preferenceManager.createPreferenceScreen(context).apply {
                 key = "absorption_oref1_advanced"
                 title = rh.gs(app.aaps.core.ui.R.string.advanced_settings_title)

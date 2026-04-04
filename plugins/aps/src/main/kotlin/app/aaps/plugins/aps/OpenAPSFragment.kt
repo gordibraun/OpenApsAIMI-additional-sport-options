@@ -78,7 +78,6 @@ class OpenAPSFragment : DaggerFragment(), MenuProvider {
             rh.gac(context, com.google.android.material.R.attr.colorSecondary)
         )
         binding.swipeRefresh.setOnRefreshListener {
-            binding.lastrun.text = rh.gs(R.string.executing)
             handler.post { activePlugin.activeAPS.invoke("OpenAPS swipe refresh", false) }
         }
     }
@@ -92,7 +91,6 @@ class OpenAPSFragment : DaggerFragment(), MenuProvider {
     override fun onMenuItemSelected(item: MenuItem): Boolean =
         when (item.itemId) {
             ID_MENU_RUN -> {
-                binding.lastrun.text = rh.gs(R.string.executing)
                 handler.post { activePlugin.activeAPS.invoke("OpenAPS menu", false) }
                 true
             }

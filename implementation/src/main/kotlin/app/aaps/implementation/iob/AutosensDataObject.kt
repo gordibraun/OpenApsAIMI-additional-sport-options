@@ -85,7 +85,7 @@ class AutosensDataObject @Inject constructor(
     override fun removeOldCarbs(toTime: Long, isAAPSOrWeighted: Boolean) {
         val maxAbsorptionHours: Double =
             if (isAAPSOrWeighted) preferences.get(DoubleKey.AbsorptionMaxTime)
-            else preferences.get(DoubleKey.AbsorptionCutOff)
+            else preferences.get(DoubleKey.AbsorptionMaxTime)
         var i = 0
         while (i < activeCarbsList.size) {
             val c = activeCarbsList[i]

@@ -421,7 +421,6 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
 
     override fun invoke(initiator: String, tempBasalFallback: Boolean) {
         aapsLogger.debug(LTag.APS, "invoke from $initiator tempBasalFallback: $tempBasalFallback")
-        lastAPSResult = null
         val glucoseStatus = getGlucoseStatusData(false)
         if (glucoseStatus == null) {
             rxBus.send(EventResetOpenAPSGui(rh.gs(R.string.openapsma_no_glucose_data)))
