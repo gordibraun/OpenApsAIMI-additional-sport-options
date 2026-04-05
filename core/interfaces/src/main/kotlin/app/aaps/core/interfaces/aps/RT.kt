@@ -25,6 +25,9 @@ data class RT(
     var bg: Double? = null,
     var tick: String? = null,
     var eventualBG: Double? = null,
+    var predictedBG: Double? = null,
+    var minGuardBG: Double? = null,
+    var hypoThreshold: Double? = null,
     var targetBG: Double? = null,
     var snoozeBG: Double? = null, // AMA only
     var insulinReq: Double? = null,
@@ -48,6 +51,7 @@ data class RT(
 
     var consoleLog: MutableList<String>? = null,
     var consoleError: MutableList<String>? = null,
+    var safetyMechanism: String? = null,
     var isHypoRisk: Boolean = false
 ) {
 

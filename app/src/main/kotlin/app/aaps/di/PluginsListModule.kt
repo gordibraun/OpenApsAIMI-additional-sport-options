@@ -234,7 +234,7 @@ abstract class PluginsListModule {
     @Binds
     @APS
     @IntoMap
-    @IntKey(190)
+    @IntKey(7)
     abstract fun bindLoopPlugin(plugin: LoopPlugin): PluginBase
 
     @Binds

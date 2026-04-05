@@ -22,6 +22,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelLastRun"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -67,9 +68,60 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp">
+
+                <TextView
+                    android:id="@+id/summaryTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_horizontal"
+                    android:text="Краткий итог AIMI"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    tools:ignore="HardcodedText" />
+
+                <TextView
+                    android:id="@+id/summaryMain"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:lineSpacingExtra="2dp"
+                    android:padding="10dp"
+                    android:textSize="14sp"
+                    tools:text="Текущая глюкоза, дельта, IOB, COB, цель и финальный прогноз." />
+
+                <TextView
+                    android:id="@+id/summaryDecision"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:lineSpacingExtra="2dp"
+                    android:padding="10dp"
+                    android:textSize="14sp"
+                    tools:text="Запрошенный инсулин, SMB, временная базальная и ключевой safety-статус." />
+
+            </LinearLayout>
+
+            <View
+                android:layout_width="fill_parent"
+                android:layout_height="2dip"
+                android:layout_marginStart="20dp"
+                android:layout_marginTop="5dp"
+                android:layout_marginEnd="20dp"
+                android:layout_marginBottom="5dp"
+                android:background="?android:attr/dividerHorizontal" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelInputParametersHeader"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -97,6 +149,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelConstraints"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -146,6 +199,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelGlucoseStatus"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -195,6 +249,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelCurrentTemp"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -243,6 +298,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelIobData"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -291,6 +347,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelProfile"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -339,6 +396,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelMealData"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -387,6 +445,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelAutosensData"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -434,6 +493,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelResultHeader"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -470,6 +530,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelScriptDebug"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -518,6 +579,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelResult"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -566,6 +628,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelRequest"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"

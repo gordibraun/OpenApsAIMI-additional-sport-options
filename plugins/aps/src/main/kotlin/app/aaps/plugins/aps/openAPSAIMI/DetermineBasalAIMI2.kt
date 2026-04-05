@@ -3794,6 +3794,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         this.eventualBG = pkpdPredictions.eventual
         this.predictedBg = pkpdPredictions.eventual.toFloat()
         rT.eventualBG = pkpdPredictions.eventual
+        rT.predictedBG = predictedBg.toDouble()
         //calculate BG impact: the amount BG "should" be rising or falling based on insulin activity alone
         val bgi = round((-iob_data.activity * sens * 5), 2)
         // project deviations for 30 minutes
@@ -3852,6 +3853,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         //val smbProposed = modelcal.toDouble()
         val minBg = minOf(safe(bg), safe(predictedBg.toDouble()), safe(eventualBG))
         val threshold = computeHypoThreshold(minBg, profile.lgsThreshold)
+        rT.minGuardBG = minBg
+        rT.hypoThreshold = threshold
 
         val isHypoBlocked = shouldBlockHypoWithHysteresis(
                 bg = bg,
@@ -3862,6 +3865,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             )
 
         var fallbackActive = false
+        rT.safetyMechanism = "Защитный механизм не активирован"
         if (isHypoBlocked) {
              if (canFallbackSmbWithoutPrediction(bg, delta.toDouble(), target_bg, iob.toDouble(), profile)) {
                  fallbackActive = true
@@ -3869,6 +3873,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
 
         if (isHypoBlocked && !fallbackActive) {
+            rT.safetyMechanism = "Hypo guard + safety margin"
             //rT.reason.appendLine(
             //    "🛑 Hypo guard+hystérèse: minBG=${convertBG(minBg)} " +
             //        "≤ Th=${convertBG(threshold)} (BG=${convertBG(bg)}, pred=${convertBG(predictedBg.toDouble())}, ev=${convertBG(eventualBG)}) → SMB=0"
@@ -3879,6 +3884,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             var finalModelSmb = modelcal
              
              if (fallbackActive) {
+                 rT.safetyMechanism = "Hyper fallback (SMB разблокирован с демпфированием)"
                  // Damping for fallback (Hyper Kicker replacement)
                  // User suggested 50% dampening when relying on raw UAM without global prediction
                  finalModelSmb = modelcal * 0.5f 
@@ -4058,6 +4064,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         val savedReason = rT.reason.toString()
         val savedPredBGs = rT.predBGs
+        val savedPredictedBG = rT.predictedBG
+        val savedMinGuardBG = rT.minGuardBG
+        val savedHypoThreshold = rT.hypoThreshold
+        val savedSafetyMechanism = rT.safetyMechanism
         rT = RT(
             algorithm = APSResult.Algorithm.AIMI,
             runningDynamicIsf = dynIsfMode,
@@ -4065,6 +4075,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             bg = bg,
             tick = tick,
             eventualBG = eventualBG,
+            predictedBG = savedPredictedBG,
+            minGuardBG = savedMinGuardBG,
+            hypoThreshold = savedHypoThreshold,
             //targetBG = target_bg,
             targetBG = "%.0f".format(target_bg).toDouble(),
             insulinReq = 0.0,
@@ -4073,6 +4086,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             sensitivityRatio = "%.0f".format(sensitivityRatio).toDouble(),
             consoleLog = consoleLog,
             consoleError = consoleError,
+            safetyMechanism = savedSafetyMechanism,
             //variable_sens = variableSensitivity.toDouble()
             variable_sens = "%.0f".format(variableSensitivity.toDouble()).toDouble()
         )

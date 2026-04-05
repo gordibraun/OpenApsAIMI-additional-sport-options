@@ -22,6 +22,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelLastRun"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -67,11 +68,62 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp">
+
+                <TextView
+                    android:id="@+id/summaryTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_horizontal"
+                    android:text="Краткий итог цикла"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    tools:ignore="HardcodedText" />
+
+                <TextView
+                    android:id="@+id/summaryDecision"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:lineSpacingExtra="2dp"
+                    android:padding="10dp"
+                    android:textSize="14sp"
+                    tools:text="Что запросил алгоритм и что осталось после ограничений." />
+
+                <TextView
+                    android:id="@+id/summaryExecution"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:lineSpacingExtra="2dp"
+                    android:padding="10dp"
+                    android:textSize="14sp"
+                    tools:text="Что запросили у помпы и что реально было исполнено." />
+
+            </LinearLayout>
+
+            <View
+                android:layout_width="fill_parent"
+                android:layout_height="2dip"
+                android:layout_marginStart="20dp"
+                android:layout_marginTop="5dp"
+                android:layout_marginEnd="20dp"
+                android:layout_marginBottom="5dp"
+                android:background="?android:attr/dividerHorizontal" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
                 android:focusable="true"
                 android:orientation="horizontal"
                 android:screenReaderFocusable="true">
 
                 <TextView
+                    android:id="@+id/labelSource"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -121,6 +173,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelRequest"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -170,6 +223,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelConstraintsProcessed"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -218,6 +272,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelConstraints"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -266,6 +321,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelTbrRequestTime"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -314,6 +370,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelTbrExecutionTime"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -362,6 +419,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelTbrSetByPump"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -410,6 +468,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelSmbRequestTime"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -458,6 +517,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelSmbExecutionTime"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -506,6 +566,7 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/labelSmbSetByPump"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
@@ -552,4 +613,3 @@
     </androidx.core.widget.NestedScrollView>
 
 </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
-
