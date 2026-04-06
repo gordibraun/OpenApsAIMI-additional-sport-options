@@ -1,10 +1,12 @@
 package app.aaps.plugins.aps.di
 
+import app.aaps.core.interfaces.aps.AimiMealAssist
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.autotune.Autotune
 import app.aaps.plugins.aps.OpenAPSFragment
 import app.aaps.plugins.aps.autotune.AutotunePlugin
 import app.aaps.plugins.aps.loop.LoopPlugin
+import app.aaps.plugins.aps.openAPSAIMI.meal.AimiMealAssistImpl
 import app.aaps.plugins.aps.openAPSAIMI.di.WCycleModule
 import app.aaps.plugins.aps.openAPSAIMI.advisor.AimiProfileAdvisorActivity
 import dagger.Binds
@@ -31,5 +33,6 @@ abstract class ApsModule {
 
         @Binds fun bindLoop(loopPlugin: LoopPlugin): Loop
         @Binds fun bindAutotune(autotunePlugin: AutotunePlugin): Autotune
+        @Binds fun bindAimiMealAssist(impl: AimiMealAssistImpl): AimiMealAssist
     }
 }

@@ -2627,7 +2627,6 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         return PredictionResult(eventual, intsPredictions)
     }
 
-
     private fun determineNoteBasedOnBg(bg: Double): String {
         return when {
             //bg > 170 -> "more aggressive"

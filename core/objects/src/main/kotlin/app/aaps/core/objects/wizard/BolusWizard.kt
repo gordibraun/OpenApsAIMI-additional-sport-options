@@ -12,6 +12,9 @@ import app.aaps.core.data.time.T
 import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
 import app.aaps.core.data.ue.ValueWithUnit
+import app.aaps.core.interfaces.aps.AimiMealAssist
+import app.aaps.core.interfaces.aps.AimiMealDecision
+import app.aaps.core.interfaces.aps.AimiMealInput
 import app.aaps.core.interfaces.aps.GlucoseStatus
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.automation.Automation
@@ -77,7 +80,8 @@ class BolusWizard @Inject constructor(
     private val uiInteraction: UiInteraction,
     private val persistenceLayer: PersistenceLayer,
     private val decimalFormatter: DecimalFormatter,
-    private val processedDeviceStatusData: ProcessedDeviceStatusData
+    private val processedDeviceStatusData: ProcessedDeviceStatusData,
+    private val aimiMealAssist: AimiMealAssist
 ) {
 
     var timeStamp = dateUtil.now()
@@ -125,6 +129,8 @@ class BolusWizard @Inject constructor(
     var calculatedPercentage: Int = 100
         private set
     var calculatedCorrection: Double = 0.0
+        private set
+    var aimiMealDecision: AimiMealDecision? = null
         private set
 
     // Input
@@ -276,11 +282,78 @@ class BolusWizard @Inject constructor(
 
         val bolusStep = activePlugin.activePump.pumpDescription.bolusStep
         calculatedTotalInsulin = Round.roundTo(calculatedTotalInsulin, bolusStep)
-
         insulinAfterConstraints = constraintChecker.applyBolusConstraints(ConstraintObject(calculatedTotalInsulin, aapsLogger)).value()
+
+        val wizardInput = buildAimiMealInput()
+        val aimiDecision = aimiMealAssist.evaluate(wizardInput)
+        val aimiRawBolus = Round.roundTo(aimiDecision.recommendedBolus, bolusStep)
+        calculatedTotalInsulin = aimiRawBolus
+        insulinAfterConstraints = constraintChecker.applyBolusConstraints(ConstraintObject(calculatedTotalInsulin, aapsLogger)).value()
+        aimiMealDecision = aimiDecision.copy(recommendedBolus = insulinAfterConstraints)
 
         aapsLogger.debug(this.toString())
         return this
+    }
+
+    private fun buildAimiMealInput(): AimiMealInput {
+        val units = profileFunction.getUnits()
+        return AimiMealInput(
+            timestamp = dateUtil.now(),
+            profileName = profileName,
+            bg = bg,
+            delta = glucoseStatus?.shortAvgDelta ?: 0.0,
+            carbs = carbs,
+            cob = cob,
+            carbTimeMinutes = carbTime,
+            targetBgLow = profileUtil.convertToMgdl(targetBGLow, units),
+            targetBgHigh = profileUtil.convertToMgdl(targetBGHigh, units),
+            ic = ic,
+            isf = profileUtil.convertToMgdl(sens, units),
+            bolusIob = insulinFromBolusIOB,
+            basalIob = insulinFromBasalIOB,
+            wizardRecommendedBolus = insulinAfterConstraints,
+            wizardCalculatedBolus = calculatedTotalInsulin,
+            wizardInsulinFromCarbs = insulinFromCarbs,
+            wizardInsulinFromBg = insulinFromBG,
+            wizardInsulinFromTrend = insulinFromTrend,
+            wizardInsulinFromCob = insulinFromCOB,
+            wizardInsulinFromBolusIob = insulinFromBolusIOB,
+            wizardInsulinFromBasalIob = insulinFromBasalIOB,
+            wizardInsulinFromSuperBolus = insulinFromSuperBolus,
+            correction = correction,
+            trendInsulin = insulinFromTrend,
+            notes = notes
+        )
+    }
+
+    private fun aimiExplainShort(): String? {
+        val decision = aimiMealDecision ?: return null
+        return buildString {
+            append("AIMI")
+            append(" (")
+            append(
+                when (decision.mealMode) {
+                    "highcarb" -> "high carb"
+                    "meal" -> "meal"
+                    "breakfast" -> "breakfast"
+                    "lunch" -> "lunch"
+                    "dinner" -> "dinner"
+                    "snack" -> "snack"
+                    else -> "correction"
+                }
+            )
+            append("): ")
+            append(rh.gs(app.aaps.core.ui.R.string.format_insulin_units, decision.recommendedBolus))
+            append(" | target ")
+            append(profileUtil.fromMgdlToStringInUnits(decision.targetBg, profile.units))
+            append(" | factor ")
+            append(decimalFormatter.to2Decimal(decision.modeFactor))
+            if (decision.prebolusBonus > 0.0) {
+                append(" | prebolus +")
+                append(decimalFormatter.to2Decimal(decision.prebolusBonus))
+                append("U")
+            }
+        }
     }
 
     fun createBolusCalculatorResult(): BCR {
@@ -362,6 +435,9 @@ class BolusWizard @Inject constructor(
             )
         if (config.AAPSCLIENT && insulinAfterConstraints > 0)
             actions.add(rh.gs(app.aaps.core.ui.R.string.bolus_recorded_only).formatColor(context, rh, app.aaps.core.ui.R.attr.warningColor))
+        aimiExplainShort()?.let {
+            actions.add(it.formatColor(context, rh, app.aaps.core.ui.R.attr.infoColor))
+        }
         if (useAlarm && !advisor && carbs > 0 && carbTime > 0)
             actions.add(rh.gs(app.aaps.core.ui.R.string.alarminxmin, carbTime).formatColor(context, rh, app.aaps.core.ui.R.attr.infoColor))
         if (advisor)
@@ -467,6 +543,9 @@ class BolusWizard @Inject constructor(
         if (percentageCorrection != 100) {
             message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_percent, totalBeforePercentageAdjustment, percentageCorrection, calculatedTotalInsulin)
         }
+        aimiMealDecision?.let { decision ->
+            message += "\nAIMI: ${decision.explanation}"
+        }
         return message
     }
 
@@ -542,6 +621,9 @@ class BolusWizard @Inject constructor(
                                     uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
                                 } else if (useAlarm && carbs > 0 && carbTime > 0) {
                                     automation.scheduleTimeToEatReminder(T.mins(carbTime.toLong()).secs().toInt())
+                                }
+                                if (result.success) {
+                                    aimiMealDecision?.let { aimiMealAssist.activate(buildAimiMealInput(), it) }
                                 }
                             }
                         })

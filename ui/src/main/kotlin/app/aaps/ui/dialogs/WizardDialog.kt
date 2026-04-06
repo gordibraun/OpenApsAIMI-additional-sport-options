@@ -2,6 +2,7 @@ package app.aaps.ui.dialogs
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Paint
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -291,6 +292,7 @@ class WizardDialog : DaggerDialogFragment() {
             .observeOn(aapsSchedulers.main)
             .subscribe({ calculateInsulin() }, fabricPrivacy::logException)
         setA11yLabels()
+        binding.wizardTitle.paintFlags = binding.wizardTitle.paintFlags or Paint.UNDERLINE_TEXT_FLAG
     }
 
     private fun setA11yLabels() {
@@ -492,6 +494,7 @@ class WizardDialog : DaggerDialogFragment() {
         )
 
         wizard?.let { wizard ->
+            binding.wizardAimiLogic.text = buildAimiLogicSummary(wizard, specificProfile, bg, carbsAfterConstraint, cob, carbTime)
             binding.bg.text = rh.gs(R.string.format_bg_isf, valueToUnitsToString(profileUtil.convertToMgdl(bg, profileFunction.getUnits()), profileFunction.getUnits().asText), wizard.sens)
             binding.bgInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, wizard.insulinFromBG)
 
@@ -546,6 +549,63 @@ class WizardDialog : DaggerDialogFragment() {
             calculatedCorrection = wizard.calculatedCorrection
         }
 
+    }
+
+    private fun buildAimiLogicSummary(
+        wizard: BolusWizard,
+        profile: Profile,
+        bg: Double,
+        carbs: Int,
+        cob: Double,
+        carbTime: Int
+    ): CharSequence {
+        val decision = wizard.aimiMealDecision
+        val targetText = profileUtil.toTargetRangeString(
+            profileUtil.convertToMgdl(profile.getTargetLowMgdl(), GlucoseUnit.MGDL),
+            profileUtil.convertToMgdl(profile.getTargetHighMgdl(), GlucoseUnit.MGDL),
+            GlucoseUnit.MGDL,
+            profileFunction.getUnits()
+        )
+        val summary = buildString {
+            append("<b>AIMI встроен в расчёт Мастера Болюса.</b><br/>")
+            append("Входы: ")
+            append("ГК ")
+            append(valueToUnitsToString(profileUtil.convertToMgdl(bg, profileFunction.getUnits()), profileFunction.getUnits().asText))
+            append(", углеводы ")
+            append(carbs)
+            append(" г, время углеводов ")
+            append(carbTime)
+            append(" мин, target ")
+            append(targetText)
+            append(", IC ")
+            append(decimalFormatter.to1Decimal(wizard.ic))
+            append(", ISF ")
+            append(decimalFormatter.to1Decimal(wizard.sens))
+            append(", COB ")
+            append(decimalFormatter.to1Decimal(cob))
+            append(", IOB ")
+            append(decimalFormatter.to2Decimal(-(wizard.insulinFromBolusIOB + wizard.insulinFromBasalIOB)))
+            append(" ед, тренд ")
+            append(decimalFormatter.to2Decimal(wizard.insulinFromTrend))
+            append(" ед.<br/>")
+            if (decision != null) {
+                append("AIMI meal mode: <b>")
+                append(decision.mealMode)
+                append("</b>, factor ")
+                append(decimalFormatter.to2Decimal(decision.modeFactor))
+                append(", prebolus ")
+                append(decimalFormatter.to2Decimal(decision.prebolusBonus))
+                append(" ед.<br/>")
+                append("Логика: базовая часть без carb-компонента + carb-компонент × factor + prebolus, затем ограничения болюса.<br/>")
+                append("Результат AIMI: <b>")
+                append(rh.gs(app.aaps.core.ui.R.string.format_insulin_units, decision.recommendedBolus))
+                append("</b>. Объяснение: ")
+                append(decision.explanation)
+            } else {
+                append("AIMI decision ещё не рассчитан.")
+            }
+        }
+        return HtmlHelper.fromHtml(summary)
     }
 
     override fun show(manager: FragmentManager, tag: String?) {
