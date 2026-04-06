@@ -60,6 +60,7 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventAcceptOpenLoopChange
+import app.aaps.core.interfaces.rx.events.EventAppInitialized
 import app.aaps.core.interfaces.rx.events.EventDismissNotification
 import app.aaps.core.interfaces.rx.events.EventLoopUpdateGui
 import app.aaps.core.interfaces.rx.events.EventMobileToWear
@@ -156,6 +157,19 @@ class LoopPlugin @Inject constructor(
             // Skip db change of ending previous TT
             .debounce(10L, TimeUnit.SECONDS)
             .subscribe({ invoke("EventTempTargetChange", true) }, fabricPrivacy::logException)
+        disposable += rxBus
+            .toObservable(EventAppInitialized::class.java)
+            .observeOn(aapsSchedulers.io)
+            .subscribe({
+                handler?.postDelayed({
+                    val glucoseValue = iobCobCalculator.ads.actualBg()
+                    if (glucoseValue != null && glucoseValue.timestamp > lastBgTriggeredRun) {
+                        lastBgTriggeredRun = glucoseValue.timestamp
+                    }
+                    aapsLogger.debug(LTag.APS, "Fast startup loop invoke after app init.")
+                    invoke("EventAppInitialized", true)
+                }, 1000L)
+            }, fabricPrivacy::logException)
         // Démarrage du déclenchement périodique
         startPeriodicLoop()
     }
@@ -500,8 +514,9 @@ class LoopPlugin @Inject constructor(
     override fun invoke(initiator: String, allowNotification: Boolean, tempBasalFallback: Boolean) {
         try {
             aapsLogger.debug(LTag.APS, "invoke from $initiator")
-            val currentMode = runningModeRecord
-            if (runningMode == RM.Mode.DISABLED_LOOP) {
+            val startupForecastOnly = initiator == "EventAppInitialized"
+            val currentMode = if (startupForecastOnly) persistenceLayer.getRunningModeActiveAt(dateUtil.now()) else runningModeRecord
+            if (currentMode.mode == RM.Mode.DISABLED_LOOP && !startupForecastOnly) {
                 val message = rh.gs(app.aaps.core.ui.R.string.loop_disabled) + "\n" + currentMode.reasons
                 aapsLogger.debug(LTag.APS, message)
                 rxBus.send(EventLoopSetLastRunGui(message))
@@ -517,14 +532,8 @@ class LoopPlugin @Inject constructor(
                 return
             }
 
-            if (!isEmptyQueue()) {
-                aapsLogger.debug(LTag.APS, rh.gs(app.aaps.core.ui.R.string.pump_busy))
-                rxBus.send(EventLoopSetLastRunGui(rh.gs(app.aaps.core.ui.R.string.pump_busy)))
-                return
-            }
-
             // Check if pump info is loaded
-            if (pump.baseBasalRate < 0.01) return
+            if (!startupForecastOnly && pump.baseBasalRate < 0.01) return
             val usedAPS = activePlugin.activeAPS
             if (usedAPS.isEnabled()) {
                 usedAPS.invoke(initiator, tempBasalFallback)
@@ -575,6 +584,18 @@ class LoopPlugin @Inject constructor(
                 lastRun.lastSMBEnact = 0
                 lastRun.lastSMBRequest = 0
                 scheduleBuildAndStoreDeviceStatus("APS result")
+
+                if (startupForecastOnly) {
+                    aapsLogger.debug(LTag.APS, "Startup forecast-only invoke finished; skipping enactment path")
+                    rxBus.send(EventLoopUpdateGui())
+                    return
+                }
+
+                if (!isEmptyQueue()) {
+                    aapsLogger.debug(LTag.APS, rh.gs(app.aaps.core.ui.R.string.pump_busy))
+                    rxBus.send(EventLoopSetLastRunGui(rh.gs(app.aaps.core.ui.R.string.pump_busy)))
+                    return
+                }
 
                 if (runningMode.isSuspended()) {
                     aapsLogger.debug(LTag.APS, rh.gs(app.aaps.core.ui.R.string.loopsuspended))

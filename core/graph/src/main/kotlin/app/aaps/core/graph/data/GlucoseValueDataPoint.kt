@@ -45,6 +45,7 @@ class GlucoseValueDataPoint(
             SourceSensor.UAM_PREDICTION   -> rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
             SourceSensor.ZT_PREDICTION    -> rh.gac(context, app.aaps.core.ui.R.attr.ztColor)
             SourceSensor.AIMI_FINAL_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.aimiFinalPredictionColor)
+            SourceSensor.AIMI_FINAL_PREDICTION_STALE -> rh.gac(context, app.aaps.core.ui.R.attr.lowColor)
             else                          -> rh.gac(context, app.aaps.core.ui.R.attr.defaultTextColor)
         }
     }
@@ -58,6 +59,7 @@ class GlucoseValueDataPoint(
             data.sourceSensor == SourceSensor.A_COB_PREDICTION ||
             data.sourceSensor == SourceSensor.UAM_PREDICTION ||
             data.sourceSensor == SourceSensor.ZT_PREDICTION ||
-            data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION
+            data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION ||
+            data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION_STALE
 
 }

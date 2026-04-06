@@ -135,6 +135,33 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     aapsLogger, rh
 ), APS, PluginConstraints {
 
+    private fun normalizeFinalReason(result: app.aaps.core.interfaces.aps.RT) {
+        val finalPredicted = result.predictedBG
+        val finalEventual = result.eventualBG
+        val finalMinGuard = result.minGuardBG
+        val finalUnits = result.units ?: 0.0
+        val finalRate = result.rate
+        val normalized = result.reason.toString()
+            .replace(Regex("""Predicted BG:\s*[-−]?\d+(?:[.,]\d+)?"""), "Predicted BG: ${"%.0f".format(finalPredicted)}")
+            .replace(Regex("""eventualBG=\s*[-−]?\d+(?:[.,]\d+)?"""), "eventualBG=${"%.0f".format(finalEventual)}")
+            .replace(Regex("""eventual=\s*[-−]?\d+(?:[.,]\d+)?"""), "eventual=${"%.0f".format(finalEventual)}")
+        val finalSummary = buildString {
+            append("🔚 Final decision-aware forecast: ")
+            append("Predicted BG: ${"%.0f".format(finalPredicted)} | ")
+            append("Eventual BG: ${"%.0f".format(finalEventual)} | ")
+            append("MinGuardBG: ${"%.0f".format(finalMinGuard)} | ")
+            append("SMB: ${"%.2f".format(finalUnits)} U | ")
+            append("TBR: ${"%.2f".format(finalRate)} U/h × ${result.duration}m")
+        }
+        result.reason = StringBuilder(
+            if (normalized.contains("🔚 Final decision-aware forecast:")) {
+                normalized.replace(Regex("""🔚 Final decision-aware forecast:.*"""), finalSummary)
+            } else {
+                normalized.trimEnd() + "\n" + finalSummary
+            }
+        )
+    }
+
     override fun onStart() {
         super.onStart()
         AimiUamHandler.clearCache(context)
@@ -421,6 +448,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
 
     override fun invoke(initiator: String, tempBasalFallback: Boolean) {
         aapsLogger.debug(LTag.APS, "invoke from $initiator tempBasalFallback: $tempBasalFallback")
+        val startupForecastOnly = initiator == "EventAppInitialized"
         val glucoseStatus = getGlucoseStatusData(false)
         if (glucoseStatus == null) {
             rxBus.send(EventResetOpenAPSGui(rh.gs(R.string.openapsma_no_glucose_data)))
@@ -435,6 +463,17 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
             aapsLogger.debug(LTag.APS, rh.gs(app.aaps.core.ui.R.string.no_profile_set))
             return
         }
+        val profileBasalFallback = profile.getBasal()
+        val currentBasalForInvoke =
+            if (startupForecastOnly && pump.baseBasalRate < 0.01) {
+                aapsLogger.debug(
+                    LTag.APS,
+                    "Startup invoke: pump base basal is unavailable, using profile basal fallback $profileBasalFallback U/h"
+                )
+                profileBasalFallback
+            } else {
+                pump.baseBasalRate
+            }
         if (!isEnabled()) {
             rxBus.send(EventResetOpenAPSGui(rh.gs(R.string.openapsma_disabled)))
             aapsLogger.debug(LTag.APS, rh.gs(R.string.openapsma_disabled))
@@ -453,7 +492,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         ) return
         if (!hardLimits.checkHardLimits(profile.getIsfMgdl("OpenAPSAIMIPlugin"), app.aaps.core.ui.R.string.profile_sensitivity_value, HardLimits.MIN_ISF, HardLimits.MAX_ISF)) return
         if (!hardLimits.checkHardLimits(profile.getMaxDailyBasal(), app.aaps.core.ui.R.string.profile_max_daily_basal_value, 0.02, hardLimits.maxBasal())) return
-        if (!hardLimits.checkHardLimits(pump.baseBasalRate, app.aaps.core.ui.R.string.current_basal_value, 0.01, hardLimits.maxBasal())) return
+        if (!hardLimits.checkHardLimits(currentBasalForInvoke, app.aaps.core.ui.R.string.current_basal_value, 0.01, hardLimits.maxBasal())) return
 
         // End of check, start gathering data
 
@@ -489,7 +528,9 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         val tddStatus: TddStatus?
         var variableSensitivity = 0.0
         var tdd = 0.0
-        if (dynIsfMode) {
+        run {
+            var tdd24Hrs = tddCalculator.calculateDaily(-24, 0)?.totalAmount ?: preferences.get(DoubleKey.OApsAIMITDD7)
+            if (dynIsfMode) {
             val tdd7P: Double = preferences.get(DoubleKey.OApsAIMITDD7)
 //
 // // Plancher pour éviter des TDD trop faibles au démarrage
@@ -522,7 +563,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 aapsLogger.info(LTag.APS, "TDD for 1 day limited to 10% increase. New TDDDaily: $tddDaily")
             }
 // // Calcul du TDD sur 24 heures
-            var tdd24Hrs = tddCalculator.calculateDaily(-24, 0)?.totalAmount ?: 0.0
+            tdd24Hrs = tddCalculator.calculateDaily(-24, 0)?.totalAmount ?: 0.0
             if (tdd24Hrs == 0.0) tdd24Hrs = tdd7P
             val tdd24HrsPerHour = tdd24Hrs / 24
             val tddLast8to4H = tdd24HrsPerHour * 4
@@ -554,6 +595,16 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 ratioFromTdd = tdd24Hrs / tdd2Days,
                 ratioFromCarbs = 1.0 // Peut être ajusté si nécessaire
             )
+            } else {
+                variableSensitivity = profile.getIsfMgdl("OpenAPSAIMIPlugin")
+                tdd = tdd24Hrs
+                autosensResult = AutosensResult(
+                    ratio = 1.0,
+                    ratioFromTdd = 1.0,
+                    ratioFromCarbs = 1.0
+                )
+                aapsLogger.debug(LTag.APS, "DynISF disabled, using profile sensitivity: $variableSensitivity")
+            }
 
             val iobArray = iobCobCalculator.calculateIobArrayForSMB(autosensResult, SMBDefaults.exercise_mode, SMBDefaults.half_basal_exercise_target, isTempTarget)
             val mealData = iobCobCalculator.getMealDataWithWaitingForCalculationFinish()
@@ -686,7 +737,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 maxUAMSMBBasalMinutes = preferences.get(IntKey.ApsUamMaxMinutesOfBasalToLimitSmb),
                 bolus_increment = pump.pumpDescription.bolusStep,
                 carbsReqThreshold = preferences.get(IntKey.ApsCarbsRequestThreshold),
-                current_basal = activePlugin.activePump.baseBasalRate,
+                current_basal = currentBasalForInvoke,
                 temptargetSet = isTempTarget,
                 autosens_max = preferences.get(DoubleKey.AutosensMax),
                 out_units = if (profileFunction.getUnits() == GlucoseUnit.MMOL) "mmol/L" else "mg/dl",
@@ -736,6 +787,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 determineBasalResult.currentTemp = currentTemp
                 determineBasalResult.oapsProfileAimi = oapsProfile
                 determineBasalResult.mealData = mealData
+                normalizeFinalReason(it)
                 lastAPSResult = determineBasalResult
                 lastAPSRun = now
                 aapsLogger.debug(LTag.APS, "Result: $it")

@@ -27,6 +27,14 @@ object AdvancedPredictionEngine {
         profile: OapsProfileAimi,
         selectedFoodType: String? = null,
         delta: Double = 0.0, // Innovation: Carb impact awareness
+        plannedSmbU: Double = 0.0,
+        plannedRateUph: Double? = null,
+        profileBasalUph: Double? = null,
+        mealFactorApplied: Double = 1.0,
+        mpcShare: Double = 0.0,
+        piShare: Double = 0.0,
+        highBgOverrideUsed: Boolean = false,
+        safetyMechanism: String? = null,
         horizonMinutes: Int = 240
     ): List<Double> {
         val predictions = mutableListOf(currentBG)
@@ -59,6 +67,32 @@ object AdvancedPredictionEngine {
             peakMinutes = carbParameters.peakMinutes,
             absorptionMinutes = carbParameters.absorptionMinutes
         )
+        val decisionWeights = CarbAbsorptionModel.buildWeights(
+            steps = steps,
+            peakMinutes = (carbParameters.peakMinutes * 0.8).coerceAtLeast(15.0),
+            absorptionMinutes = (carbParameters.absorptionMinutes * 0.75).coerceAtLeast(45.0)
+        )
+
+        val normalizedMealFactor = mealFactorApplied.coerceIn(0.7, 1.5)
+        val mealCurveBoost = 1.0 + (normalizedMealFactor - 1.0) * 0.8
+        val effectiveCarbEffectMgDl = totalCarbEffectMgDl * mealCurveBoost
+
+        val rateDeltaUph = ((plannedRateUph ?: profileBasalUph ?: 0.0) - (profileBasalUph ?: 0.0)).coerceAtLeast(0.0)
+        val plannedBasalUnits = rateDeltaUph * (horizonMinutes / 60.0)
+        val plannedInterventionUnits = plannedSmbU.coerceAtLeast(0.0) + plannedBasalUnits
+        val decisionTrust = (
+            0.35 +
+                0.30 * mpcShare.coerceIn(0.0, 1.0) +
+                0.15 * piShare.coerceIn(0.0, 1.0) +
+                0.15 * (normalizedMealFactor - 1.0).coerceAtLeast(0.0) +
+                if (highBgOverrideUsed) 0.15 else 0.0
+            ).coerceIn(0.0, 1.2)
+        val safetySuppression = when {
+            safetyMechanism?.contains("Hypo", ignoreCase = true) == true -> 0.25
+            safetyMechanism?.contains("guard", ignoreCase = true) == true -> 0.35
+            else -> 1.0
+        }
+        val decisionLiftTotalMgDl = plannedInterventionUnits * finalSensitivity * decisionTrust * safetySuppression
 
         var lastBg = currentBG
         val insulinPeak = profile.peakTime.toDouble().takeIf { it > 0 } ?: 60.0
@@ -86,11 +120,12 @@ object AdvancedPredictionEngine {
             insulinEffectMgDl *= stepIobDampingFactor
 
             val insulinImpactPer5min = insulinEffectMgDl / 12.0
-            val carbImpactPer5Min = totalCarbEffectMgDl * carbWeights[stepIndex]
+            val carbImpactPer5Min = effectiveCarbEffectMgDl * carbWeights[stepIndex]
+            val decisionLiftPer5Min = decisionLiftTotalMgDl * decisionWeights[stepIndex]
 
             // Apply Momentum
             // We add the current 'inertia' to the BG change, then decay it.
-            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + momentum).coerceIn(39.0, 401.0)
+            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + decisionLiftPer5Min + momentum).coerceIn(39.0, 401.0)
 
             // Linear/Exp decay of momentum
             momentum *= 0.85 // Decays to ~0 over 45-60 mins

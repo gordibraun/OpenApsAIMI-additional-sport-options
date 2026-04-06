@@ -2632,6 +2632,64 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         return PredictionResult(eventual, intsPredictions)
     }
 
+    private fun recomputeDecisionAwarePredictions(
+        currentBg: Double,
+        iobArray: Array<IobTotal>,
+        finalSensitivity: Double,
+        cobG: Double,
+        profile: OapsProfileAimi,
+        rT: RT,
+        delta: Double,
+        plannedSmbU: Double,
+        plannedRateUph: Double?,
+        profileBasalUph: Double,
+        mealFactorApplied: Double,
+        mpcShare: Double,
+        piShare: Double,
+        highBgOverrideUsed: Boolean
+    ): PredictionResult {
+        val selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
+        val advancedPredictions = try {
+            AdvancedPredictionEngine.predict(
+                currentBG = currentBg,
+                iobArray = iobArray,
+                finalSensitivity = finalSensitivity,
+                cobG = cobG,
+                profile = profile,
+                selectedFoodType = selectedFoodType,
+                delta = delta,
+                plannedSmbU = plannedSmbU,
+                plannedRateUph = plannedRateUph,
+                profileBasalUph = profileBasalUph,
+                mealFactorApplied = mealFactorApplied,
+                mpcShare = mpcShare,
+                piShare = piShare,
+                highBgOverrideUsed = highBgOverrideUsed,
+                safetyMechanism = rT.safetyMechanism
+            )
+        } catch (e: Exception) {
+            consoleLog.add("Error in decision-aware forecast: ${e.message}")
+            List(48) { currentBg }
+        }
+
+        val sanitizedPredictions = advancedPredictions.map { round(min(401.0, max(39.0, it)), 0) }
+        val intsPredictions = sanitizedPredictions.map { it.toInt() }
+        rT.predBGs = (rT.predBGs ?: Predictions()).apply {
+            AIMI_FINAL = intsPredictions
+            IOB = intsPredictions
+            COB = intsPredictions
+            ZT = intsPredictions
+            UAM = intsPredictions
+        }
+        val eventual = intsPredictions.lastOrNull()?.toDouble() ?: currentBg
+        consoleLog.add(
+            "Decision-aware forecast → eventual=${"%.0f".format(eventual)} mg/dL " +
+                "(SMB=${"%.2f".format(plannedSmbU)}U, rate=${"%.2f".format(plannedRateUph ?: profileBasalUph)}U/h, " +
+                "mealFactor=${"%.2f".format(mealFactorApplied)}, MPC=${"%.0f".format(mpcShare * 100)}%, PI=${"%.0f".format(piShare * 100)}%)"
+        )
+        return PredictionResult(eventual, intsPredictions)
+    }
+
     private fun determineNoteBasedOnBg(bg: Double): String {
         return when {
             //bg > 170 -> "more aggressive"
@@ -4332,9 +4390,48 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rt.toInt()
         }
 
+        fun finalizeDecisionAwareForecast(result: RT): RT {
+            val decisionAwarePredictions = recomputeDecisionAwarePredictions(
+                currentBg = bg,
+                iobArray = iob_data_array,
+                finalSensitivity = sens,
+                cobG = mealData.mealCOB,
+                profile = profile,
+                rT = result,
+                delta = delta.toDouble(),
+                plannedSmbU = result.units ?: 0.0,
+                plannedRateUph = result.rate,
+                profileBasalUph = profile_current_basal,
+                mealFactorApplied = smbExecution.mealFactorApplied,
+                mpcShare = smbExecution.mpcShare,
+                piShare = smbExecution.piShare,
+                highBgOverrideUsed = smbExecution.highBgOverrideUsed
+            )
+            eventualBG = decisionAwarePredictions.eventual
+            predictedBg = decisionAwarePredictions.eventual.toFloat()
+            result.eventualBG = eventualBG
+            result.predictedBG = predictedBg.toDouble()
+            result.minGuardBG = minOf(bg, predictedBg.toDouble(), eventualBG)
+            val sanitizedReason = result.reason.toString()
+                .replace(Regex("""Predicted BG:\s*[-−]?\d+(?:[.,]\d+)?"""), "Predicted BG: ${"%.0f".format(predictedBg)}")
+                .replace(Regex("""eventual=\s*[-−]?\d+(?:[.,]\d+)?"""), "eventual=${"%.0f".format(eventualBG)}")
+            result.reason = StringBuilder(sanitizedReason)
+            result.reason.appendLine()
+            result.reason.append(
+                "🔚 Final decision-aware forecast: " +
+                    "Predicted BG: ${"%.0f".format(predictedBg)} | " +
+                    "Eventual BG: ${"%.0f".format(eventualBG)} | " +
+                    "MinGuardBG: ${"%.0f".format(result.minGuardBG)} | " +
+                    "SMB: ${"%.2f".format(result.units ?: 0.0)} U | " +
+                    "TBR: ${"%.2f".format(result.rate)} U/h × ${result.duration}m"
+            )
+            return result
+        }
+
 // -------- 1) sécurité hypo dure, avant tout
         if (safetyDecision.stopBasal) {
-            return setTempBasal(0.0, 30, profile, rT, currenttemp)
+            val finalResult = setTempBasal(0.0, 30, profile, rT, currenttemp)
+            return finalizeDecisionAwareForecast(finalResult)
         }
 
 // -------- 2) forçage IMMEDIAT début de repas (<= 2 min), AVANT le test IOB
@@ -4359,10 +4456,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                         forced
                     )
                 )
-                return setTempBasal(
+                val finalResult = setTempBasal(
                     forced, 30, profile, rT, currenttemp,
                     overrideSafetyLimits = true    // bypass du plafond IOB pour le départ repas
                 )
+                return finalizeDecisionAwareForecast(finalResult)
             }
         }
         val ngrResult = nightGrowthResistanceMode.evaluate(
@@ -4489,7 +4587,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 flatBGsDetected = flatBGsDetected,
                 dynIsfMode = dynIsfMode
             )
-            return finalResult
+            return finalizeDecisionAwareForecast(finalResult)
         } else {
             var insulinReq = smbToGive.toDouble()
 
@@ -4654,6 +4752,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 currenttemp = currenttemp,
                 overrideSafetyLimits = basalDecision.overrideSafety
             )
+            finalizeDecisionAwareForecast(finalResult)
             comparator.compare(
                 aimiResult = finalResult,
                 glucoseStatus = glucose_status,

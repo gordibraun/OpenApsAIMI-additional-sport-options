@@ -104,7 +104,10 @@ object SmbInstructionExecutor {
         val basal: Double,
         val finalSmb: Float,
         val highBgOverrideUsed: Boolean,
-        val newSmbInterval: Int?
+        val newSmbInterval: Int?,
+        val mealFactorApplied: Double,
+        val mpcShare: Double,
+        val piShare: Double
     )
 
     fun execute(input: Input, hooks: Hooks): Result {
@@ -316,12 +319,14 @@ object SmbInstructionExecutor {
                 (1 - alpha) * 100
             )
         )
+        val mpcUsed = kotlin.math.max(0.0, alpha * optimalBasalMpc)
+        val piUsed  = kotlin.math.max(0.0, (1 - alpha) * finalInsulinDose)
+        val denom = mpcUsed + piUsed
+        val mpcShare = if (denom > 1e-6) mpcUsed / denom else 0.0
+        val piShare = if (denom > 1e-6) piUsed / denom else 0.0
         run {
-            val mpcUsed = kotlin.math.max(0.0, alpha * optimalBasalMpc)
-            val piUsed  = kotlin.math.max(0.0, (1 - alpha) * finalInsulinDose)
-            val denom = mpcUsed + piUsed
-            val mpcShare = if (denom > 1e-6) 100.0 * mpcUsed / denom else 0.0
-            input.rT.reason.append(" | MPC utile: %.0f%% (alpha=%.0f%%)".format(mpcShare, 100 * alpha))
+            val mpcSharePct = 100.0 * mpcShare
+            input.rT.reason.append(" | MPC utile: %.0f%% (alpha=%.0f%%)".format(mpcSharePct, 100 * alpha))
         }
         var smbDecision = (alpha * optimalBasalMpc + (1 - alpha) * finalInsulinDose).toFloat()
 
@@ -518,8 +523,10 @@ object SmbInstructionExecutor {
             basal = basal,
             finalSmb = finalSmb,
             highBgOverrideUsed = highBgOverrideUsed,
-            newSmbInterval = newInterval
+            newSmbInterval = newInterval,
+            mealFactorApplied = factors,
+            mpcShare = mpcShare,
+            piShare = piShare
         )
     }
 }
-

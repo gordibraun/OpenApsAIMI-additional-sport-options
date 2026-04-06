@@ -29,6 +29,7 @@ import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.Event
 import app.aaps.core.interfaces.rx.events.EventAppInitialized
+import app.aaps.core.interfaces.rx.events.EventAPSCalculationFinished
 import app.aaps.core.interfaces.rx.events.EventConfigBuilderChange
 import app.aaps.core.interfaces.rx.events.EventEffectiveProfileSwitchChanged
 import app.aaps.core.interfaces.rx.events.EventNewBG
@@ -161,6 +162,7 @@ class IobCobCalculatorPlugin @Inject constructor(
             .observeOn(aapsSchedulers.io)
             .subscribe(
                 {
+                    calculationWorkflow.runOnReceivedPredictions(overviewData)
                     calculationWorkflow.runCalculation(
                         CalculationWorkflow.MAIN_CALCULATION,
                         this,
@@ -170,6 +172,15 @@ class IobCobCalculatorPlugin @Inject constructor(
                         bgDataReload = true,
                         cause = it
                     )
+                },
+                fabricPrivacy::logException
+            )
+        disposable += rxBus
+            .toObservable(EventAPSCalculationFinished::class.java)
+            .observeOn(aapsSchedulers.io)
+            .subscribe(
+                {
+                    calculationWorkflow.runOnReceivedPredictions(overviewData)
                 },
                 fabricPrivacy::logException
             )

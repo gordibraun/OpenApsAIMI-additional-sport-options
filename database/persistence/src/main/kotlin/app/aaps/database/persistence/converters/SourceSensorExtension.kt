@@ -89,4 +89,5 @@ fun SourceSensor.toDb(): GlucoseValue.SourceSensor =
         SourceSensor.UAM_PREDICTION         -> GlucoseValue.SourceSensor.UAM_PREDICTION
         SourceSensor.ZT_PREDICTION          -> GlucoseValue.SourceSensor.ZT_PREDICTION
         SourceSensor.AIMI_FINAL_PREDICTION  -> GlucoseValue.SourceSensor.AIMI_FINAL_PREDICTION
+        SourceSensor.AIMI_FINAL_PREDICTION_STALE -> GlucoseValue.SourceSensor.AIMI_FINAL_PREDICTION
     }
