@@ -257,6 +257,12 @@
     <string name="openapsaimi_maxsmb_summary">Max SMB value when BG is below 120</string>
     <string name="openapsaimi_maxsmb_title">Max SMB LOW BG</string>
     <string name="description_openapsaimi">Small micro-boluses based on Artificial Intelligence and Machine Learning.</string>
+    <string name="decision_trace_title">Decision Trace</string>
+    <string name="decision_trace_shortname">TRACE</string>
+    <string name="decision_trace_description">Shows which prediction signals AIMI compared, which one became decisive, and how safety changed the final insulin request.</string>
+    <string name="carb_model_title">COB-модели</string>
+    <string name="carb_model_shortname">COB</string>
+    <string name="carb_model_description">Visualization of three carb absorption models and reference on how they influence AIMI forecast.</string>
     <!-- ❌ TIME-BASED REACTIVITY TITLES/SUMMARIES REMOVED -->
     <string name="DynISFAdjusthyper_summary"><![CDATA[Increasing this value will increase the speed to send SMB when BG > 120]]></string>
     <string name="DynISFAdjusthyper_title"><![CDATA[DynISF Adjustment factor % BG > 120]]></string>
@@ -1092,4 +1098,3 @@
     <string name="aimi_pref_openai_key_title">Clé API OpenAI</string>
     <string name="aimi_pref_openai_key_summary">Saisissez votre clé (sk-...) pour activer le Coach AIMI.</string>
 </resources>
-

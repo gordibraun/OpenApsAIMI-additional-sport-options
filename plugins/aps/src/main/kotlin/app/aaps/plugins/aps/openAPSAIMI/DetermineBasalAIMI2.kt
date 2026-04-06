@@ -9,6 +9,7 @@ import app.aaps.core.data.model.TE
 import app.aaps.core.data.model.UE
 import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.aps.APSResult
+import app.aaps.core.interfaces.aps.AimiMealAssist
 import app.aaps.core.interfaces.aps.AutosensResult
 import app.aaps.core.interfaces.aps.CurrentTemp
 import app.aaps.core.interfaces.aps.GlucoseStatusAIMI
@@ -109,6 +110,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
     private val pumpCapabilityValidator: app.aaps.plugins.aps.openAPSAIMI.validation.PumpCapabilityValidator,
     context: Context
 ) {
+    @Inject lateinit var aimiMealAssist: AimiMealAssist
     @Inject lateinit var persistenceLayer: PersistenceLayer
     @Inject lateinit var tddCalculator: TddCalculator
     @Inject lateinit var tirCalculator: TirCalculator
@@ -2595,6 +2597,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         delta: Double
     ): PredictionResult {
         consoleLog.add("Debug: computePkpdPredictions called with delta=$delta")
+        val selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
+        selectedFoodType?.let { consoleLog.add("Meal episode food type -> $it") }
         val advancedPredictions = try {
             AdvancedPredictionEngine.predict(
                 currentBG = currentBg,
@@ -2602,6 +2606,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 finalSensitivity = finalSensitivity,
                 cobG = cobG,
                 profile = profile,
+                selectedFoodType = selectedFoodType,
                 delta = delta
             )
         } catch (e: Exception) {
@@ -4217,8 +4222,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             iobArray = iob_data_array,
             finalSensitivity = sens,
             cobG = mealData.mealCOB,
-
             profile = profile,
+            selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType,
             delta = delta.toDouble()
         )
         val sanitizedPredictions = advancedPredictions.map { round(min(401.0, max(39.0, it)), 0) }

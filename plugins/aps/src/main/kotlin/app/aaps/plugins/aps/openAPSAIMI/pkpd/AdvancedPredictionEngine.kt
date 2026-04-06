@@ -25,6 +25,7 @@ object AdvancedPredictionEngine {
         finalSensitivity: Double,
         cobG: Double,
         profile: OapsProfileAimi,
+        selectedFoodType: String? = null,
         delta: Double = 0.0, // Innovation: Carb impact awareness
         horizonMinutes: Int = 240
     ): List<Double> {
@@ -35,27 +36,29 @@ object AdvancedPredictionEngine {
         val now = System.currentTimeMillis()
         val carbRatio = profile.carb_ratio.takeIf { it > 0 } ?: 10.0
         val csf = finalSensitivity / carbRatio
+        val totalCarbEffectMgDl = (cobG * csf).coerceAtLeast(0.0)
 
         // Innovation: Dynamic IOB Damping during active meal rise
         // If BG is rising while COB exists OR during unannounced meals (UAM), the "effective" insulin pulling down is dampened by the inflow of glucose.
         // We reduce the impact of IOB in the prediction to avoid false hypo alarms.
-        val iobDampingFactor = if (cobG > 0 || delta > 2.0) {
+        val baseIobDampingFactor = if (cobG > 0 || delta > 2.0) {
             when {
                 delta > 5.0 -> 0.50 // Intense rise: IOB 50% effective in prediction
                 delta > 2.0 -> 0.70 // Moderate rise
                 delta > 0.0 -> if (cobG > 0) 0.85 else 1.0 // Slight rise: damp only if explicit COB
+                cobG > 0 -> 0.92 // Even without visible rise, active COB should soften early insulin dominance a bit
                 else -> 1.0
             }
         } else {
             1.0
         }
 
-        val carbAbsorptionMinutes = 180.0
-        val carbImpactPer5Min = if (cobG > 0) {
-            (cobG * csf) / (carbAbsorptionMinutes / 5.0)
-        } else {
-            0.0
-        }
+        val carbParameters = CarbAbsorptionModel.resolveParameters(cobG = cobG, delta = delta, selectedFoodType = selectedFoodType)
+        val carbWeights = CarbAbsorptionModel.buildWeights(
+            steps = steps,
+            peakMinutes = carbParameters.peakMinutes,
+            absorptionMinutes = carbParameters.absorptionMinutes
+        )
 
         var lastBg = currentBG
         val insulinPeak = profile.peakTime.toDouble().takeIf { it > 0 } ?: 60.0
@@ -77,19 +80,21 @@ object AdvancedPredictionEngine {
                     insulinEffectMgDl += activity * iobEntry.iob * finalSensitivity
                 }
             }
-            
-            // Apply damping innovation
-            insulinEffectMgDl *= iobDampingFactor
+
+            val dampingProgress = (minutesInFuture / 90.0).coerceIn(0.0, 1.0)
+            val stepIobDampingFactor = baseIobDampingFactor + (1.0 - baseIobDampingFactor) * dampingProgress
+            insulinEffectMgDl *= stepIobDampingFactor
 
             val insulinImpactPer5min = insulinEffectMgDl / 12.0
-            
+            val carbImpactPer5Min = totalCarbEffectMgDl * carbWeights[stepIndex]
+
             // Apply Momentum
             // We add the current 'inertia' to the BG change, then decay it.
             val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + momentum).coerceIn(39.0, 401.0)
-            
+
             // Linear/Exp decay of momentum
             momentum *= 0.85 // Decays to ~0 over 45-60 mins
-            
+
             lastBg = nextBg
             predictions.add(lastBg)
         }

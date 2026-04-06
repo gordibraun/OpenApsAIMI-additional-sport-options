@@ -108,6 +108,10 @@
     <string name="missing_carbs">Missing %1$d g</string>
     <string name="a11y_current_bg">current blood glucose</string>
     <string name="carb_time_label">Carb time</string>
+    <string name="food_type_label">Тип еды</string>
+    <string name="food_type_fast">Быстрая</string>
+    <string name="food_type_balanced">Обычная</string>
+    <string name="food_type_slow">Медленная</string>
     <string name="a11y_set_carb_timer">set carb timer alarm</string>
     <string name="show_calculation">Show calcuation</string>
 

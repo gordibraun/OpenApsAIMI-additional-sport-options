@@ -136,6 +136,7 @@ class BolusWizard @Inject constructor(
     // Input
     lateinit var profile: Profile
     lateinit var profileName: String
+    var selectedFoodType: String = "balanced"
     var tempTarget: TT? = null
     var carbs: Int = 0
     var cob: Double = 0.0
@@ -176,6 +177,7 @@ class BolusWizard @Inject constructor(
         useAlarm: Boolean,
         notes: String = "",
         carbTime: Int = 0,
+        selectedFoodType: String = "balanced",
         usePercentage: Boolean = false,
         totalPercentage: Double = 100.0,
         quickWizard: Boolean = false,
@@ -200,6 +202,7 @@ class BolusWizard @Inject constructor(
         this.useAlarm = useAlarm
         this.notes = notes
         this.carbTime = carbTime
+        this.selectedFoodType = selectedFoodType
         this.quickWizard = quickWizard
         this.usePercentage = usePercentage
         this.totalPercentage = totalPercentage
@@ -300,6 +303,7 @@ class BolusWizard @Inject constructor(
         return AimiMealInput(
             timestamp = dateUtil.now(),
             profileName = profileName,
+            selectedFoodType = selectedFoodType,
             bg = bg,
             delta = glucoseStatus?.shortAvgDelta ?: 0.0,
             carbs = carbs,
@@ -348,6 +352,8 @@ class BolusWizard @Inject constructor(
             append(profileUtil.fromMgdlToStringInUnits(decision.targetBg, profile.units))
             append(" | factor ")
             append(decimalFormatter.to2Decimal(decision.modeFactor))
+            append(" | food ")
+            append(selectedFoodType)
             if (decision.prebolusBonus > 0.0) {
                 append(" | prebolus +")
                 append(decimalFormatter.to2Decimal(decision.prebolusBonus))

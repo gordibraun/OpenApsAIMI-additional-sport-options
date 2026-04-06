@@ -284,6 +284,53 @@
             layout="@layout/notes" />
 
         <LinearLayout
+            android:id="@+id/food_type_section"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="10dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/food_type_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/food_type_label"
+                android:textAppearance="@style/TextAppearance.AppCompat.Small"
+                android:textStyle="bold" />
+
+            <RadioGroup
+                android:id="@+id/food_type_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal">
+
+                <RadioButton
+                    android:id="@+id/food_type_fast"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/food_type_fast" />
+
+                <RadioButton
+                    android:id="@+id/food_type_balanced"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:text="@string/food_type_balanced" />
+
+                <RadioButton
+                    android:id="@+id/food_type_slow"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/food_type_slow" />
+
+            </RadioGroup>
+
+        </LinearLayout>
+
+        <LinearLayout
             android:id="@+id/checkbox_row"
             android:layout_width="match_parent"
             android:layout_height="40dp"

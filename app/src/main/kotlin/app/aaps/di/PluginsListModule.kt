@@ -2,6 +2,8 @@ package app.aaps.di
 
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.plugins.aps.autotune.AutotunePlugin
+import app.aaps.plugins.aps.carbmodel.CarbModelPlugin
+import app.aaps.plugins.aps.decisiontrace.DecisionTracePlugin
 import app.aaps.plugins.aps.loop.LoopPlugin
 import app.aaps.plugins.aps.openAPSAIMI.OpenAPSAIMIPlugin
 import app.aaps.plugins.aps.openAPSAMA.OpenAPSAMAPlugin
@@ -234,7 +236,7 @@ abstract class PluginsListModule {
     @Binds
     @APS
     @IntoMap
-    @IntKey(7)
+    @IntKey(9)
     abstract fun bindLoopPlugin(plugin: LoopPlugin): PluginBase
 
     @Binds
@@ -254,6 +256,18 @@ abstract class PluginsListModule {
     @IntoMap
     @IntKey(6)
     abstract fun bindOpenAPSAIMIPlugin(plugin: OpenAPSAIMIPlugin): PluginBase
+
+    @Binds
+    @AllConfigs
+    @IntoMap
+    @IntKey(7)
+    abstract fun bindDecisionTracePlugin(plugin: DecisionTracePlugin): PluginBase
+
+    @Binds
+    @AllConfigs
+    @IntoMap
+    @IntKey(8)
+    abstract fun bindCarbModelPlugin(plugin: CarbModelPlugin): PluginBase
 
     @Binds
     @APS

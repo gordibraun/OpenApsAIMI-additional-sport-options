@@ -7,7 +7,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.text.Editable
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.TextPaint
 import android.text.TextWatcher
+import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -50,6 +55,7 @@ import app.aaps.core.objects.profile.ProfileSealed
 import app.aaps.core.objects.wizard.BolusWizard
 import app.aaps.core.ui.extensions.runOnUiThread
 import app.aaps.core.ui.extensions.toVisibility
+import app.aaps.core.ui.dialogs.OKDialog
 import app.aaps.core.ui.toast.ToastUtils
 import app.aaps.core.utils.HtmlHelper
 import app.aaps.ui.R
@@ -133,6 +139,7 @@ class WizardDialog : DaggerDialogFragment() {
         savedInstanceState.putDouble("carbs_input", binding.carbsInput.value)
         savedInstanceState.putDouble("correction_input", binding.correctionInput.value)
         savedInstanceState.putDouble("carb_time_input", binding.carbTimeInput.value)
+        savedInstanceState.putString("food_type", currentSelectedFoodType())
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -293,6 +300,27 @@ class WizardDialog : DaggerDialogFragment() {
             .subscribe({ calculateInsulin() }, fabricPrivacy::logException)
         setA11yLabels()
         binding.wizardTitle.paintFlags = binding.wizardTitle.paintFlags or Paint.UNDERLINE_TEXT_FLAG
+        binding.foodTypeTitle.paintFlags = binding.foodTypeTitle.paintFlags or Paint.UNDERLINE_TEXT_FLAG
+        binding.foodTypeTitle.setOnClickListener {
+            OKDialog.show(
+                requireContext(),
+                rh.gs(R.string.food_type_label),
+                "Тип еды влияет на carb-модель AIMI. Быстрая еда усиливает ранний вклад углеводов и prebolus, обычная оставляет базовый режим, медленная растягивает вклад еды и делает ранний bolus осторожнее."
+            )
+        }
+        binding.wizardAimiLogic.setOnClickListener {
+            OKDialog.show(
+                requireContext(),
+                "AIMI в Мастере Болюса",
+                "AIMI использует ГК, углеводы, время углеводов, target, IC, ISF, COB, IOB, тренд и выбранный тип еды. Тип еды теперь реально влияет на bolus через carb factor и prebolus, а также на прогноз через форму carb-кривой."
+            )
+        }
+        binding.foodTypeGroup.setOnCheckedChangeListener { _, _ -> calculateInsulin() }
+        when (savedInstanceState?.getString("food_type")) {
+            "fast" -> binding.foodTypeFast.isChecked = true
+            "slow" -> binding.foodTypeSlow.isChecked = true
+            else -> binding.foodTypeBalanced.isChecked = true
+        }
     }
 
     private fun setA11yLabels() {
@@ -380,6 +408,20 @@ class WizardDialog : DaggerDialogFragment() {
     private fun valueToUnitsToString(value: Double, units: String): String =
         if (units == GlucoseUnit.MGDL.asText) decimalFormatter.to0Decimal(value)
         else decimalFormatter.to1Decimal(value * Constants.MGDL_TO_MMOLL)
+
+    private fun currentSelectedFoodType(): String =
+        when (binding.foodTypeGroup.checkedRadioButtonId) {
+            binding.foodTypeFast.id -> "fast"
+            binding.foodTypeSlow.id -> "slow"
+            else -> "balanced"
+        }
+
+    private fun currentSelectedFoodTypeLabel(): String =
+        when (currentSelectedFoodType()) {
+            "fast" -> rh.gs(R.string.food_type_fast)
+            "slow" -> rh.gs(R.string.food_type_slow)
+            else -> rh.gs(R.string.food_type_balanced)
+        }
 
     private fun initDialog() {
         val profile = profileFunction.getProfile()
@@ -489,12 +531,15 @@ class WizardDialog : DaggerDialogFragment() {
             binding.alarm.isChecked,
             binding.notesLayout.notes.text.toString(),
             carbTime,
+            currentSelectedFoodType(),
             usePercentage = usePercentage,
             totalPercentage = percentageCorrection.toDouble()
         )
 
         wizard?.let { wizard ->
-            binding.wizardAimiLogic.text = buildAimiLogicSummary(wizard, specificProfile, bg, carbsAfterConstraint, cob, carbTime)
+            binding.wizardAimiLogic.text = makeInteractiveGlossary(buildAimiLogicSummary(wizard, specificProfile, bg, carbsAfterConstraint, cob, carbTime))
+            binding.wizardAimiLogic.movementMethod = LinkMovementMethod.getInstance()
+            binding.wizardAimiLogic.highlightColor = Color.TRANSPARENT
             binding.bg.text = rh.gs(R.string.format_bg_isf, valueToUnitsToString(profileUtil.convertToMgdl(bg, profileFunction.getUnits()), profileFunction.getUnits().asText), wizard.sens)
             binding.bgInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, wizard.insulinFromBG)
 
@@ -587,7 +632,9 @@ class WizardDialog : DaggerDialogFragment() {
             append(decimalFormatter.to2Decimal(-(wizard.insulinFromBolusIOB + wizard.insulinFromBasalIOB)))
             append(" ед, тренд ")
             append(decimalFormatter.to2Decimal(wizard.insulinFromTrend))
-            append(" ед.<br/>")
+            append(" ед, тип еды ")
+            append(currentSelectedFoodTypeLabel())
+            append(".<br/>")
             if (decision != null) {
                 append("AIMI meal mode: <b>")
                 append(decision.mealMode)
@@ -596,7 +643,7 @@ class WizardDialog : DaggerDialogFragment() {
                 append(", prebolus ")
                 append(decimalFormatter.to2Decimal(decision.prebolusBonus))
                 append(" ед.<br/>")
-                append("Логика: базовая часть без carb-компонента + carb-компонент × factor + prebolus, затем ограничения болюса.<br/>")
+                append("Логика: базовая часть без carb-компонента + carb-компонент × factor + prebolus, затем ограничения болюса. Тип еды меняет factor/prebolus и форму COB-кривой в прогнозе.<br/>")
                 append("Результат AIMI: <b>")
                 append(rh.gs(app.aaps.core.ui.R.string.format_insulin_units, decision.recommendedBolus))
                 append("</b>. Объяснение: ")
@@ -606,6 +653,50 @@ class WizardDialog : DaggerDialogFragment() {
             }
         }
         return HtmlHelper.fromHtml(summary)
+    }
+
+    private data class GlossaryDefinition(val title: String, val body: String)
+
+    private val glossary by lazy {
+        linkedMapOf(
+            "COB" to GlossaryDefinition("COB", "Carbs On Board — ещё не отыгравшие углеводы, которые система считает остающимися в усвоении."),
+            "IOB" to GlossaryDefinition("IOB", "Insulin On Board — ещё действующий инсулин, который продолжает влиять на глюкозу."),
+            "ISF" to GlossaryDefinition("ISF", "Insulin Sensitivity Factor — насколько 1 единица инсулина, по оценке системы, снижает глюкозу."),
+            "IC" to GlossaryDefinition("IC", "Insulin to Carb ratio — сколько граммов углеводов покрывает 1 единица инсулина."),
+            "prebolus" to GlossaryDefinition("prebolus", "Часть стратегии до еды. Для быстрой еды он усиливается, для медленной ослабляется."),
+            "factor" to GlossaryDefinition("factor", "Множитель carb-компонента. Теперь на него влияет и meal mode AIMI, и выбранный тип еды."),
+            "тип еды" to GlossaryDefinition("Тип еды", "Переключатель carb-модели. Быстрая еда усиливает ранний углеводный вклад, обычная оставляет базовую форму, медленная растягивает влияние углеводов во времени."),
+            "meal mode" to GlossaryDefinition("meal mode", "Контекст еды, который AIMI определяет по размеру приёма пищи и времени суток: snack, breakfast, lunch, dinner, meal, highcarb."),
+            "target" to GlossaryDefinition("Target", "Целевая зона глюкозы, к которой AIMI старается вести расчёт.")
+        )
+    }
+
+    private fun makeInteractiveGlossary(content: CharSequence): CharSequence {
+        val spannable = SpannableStringBuilder(content)
+        val occupied = mutableListOf<IntRange>()
+        glossary.keys.sortedByDescending { it.length }.forEach { term ->
+            val regex = Regex(Regex.escape(term), RegexOption.IGNORE_CASE)
+            regex.findAll(spannable).forEach { match ->
+                val range = match.range
+                val overlaps = occupied.any { existing -> range.first <= existing.last && existing.first <= range.last }
+                if (!overlaps) {
+                    val definition = glossary[term] ?: return@forEach
+                    val span = object : ClickableSpan() {
+                        override fun onClick(widget: View) {
+                            OKDialog.show(requireContext(), definition.title, definition.body)
+                        }
+
+                        override fun updateDrawState(ds: TextPaint) {
+                            super.updateDrawState(ds)
+                            ds.isUnderlineText = true
+                        }
+                    }
+                    spannable.setSpan(span, range.first, range.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    occupied += range
+                }
+            }
+        }
+        return spannable
     }
 
     override fun show(manager: FragmentManager, tag: String?) {
