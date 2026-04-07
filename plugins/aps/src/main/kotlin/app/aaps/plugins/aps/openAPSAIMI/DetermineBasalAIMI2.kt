@@ -2646,7 +2646,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         mealFactorApplied: Double,
         mpcShare: Double,
         piShare: Double,
-        highBgOverrideUsed: Boolean
+        highBgOverrideUsed: Boolean,
+        observedCarbImpactMgdlPer5m: Double,
+        remainingCiPeakMgdlPer5m: Double
     ): PredictionResult {
         val selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
         val advancedPredictions = try {
@@ -2665,7 +2667,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 mpcShare = mpcShare,
                 piShare = piShare,
                 highBgOverrideUsed = highBgOverrideUsed,
-                safetyMechanism = rT.safetyMechanism
+                safetyMechanism = rT.safetyMechanism,
+                observedCarbImpactMgdlPer5m = observedCarbImpactMgdlPer5m,
+                remainingCiPeakMgdlPer5m = remainingCiPeakMgdlPer5m
             )
         } catch (e: Exception) {
             consoleLog.add("Error in decision-aware forecast: ${e.message}")
@@ -4405,7 +4409,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 mealFactorApplied = smbExecution.mealFactorApplied,
                 mpcShare = smbExecution.mpcShare,
                 piShare = smbExecution.piShare,
-                highBgOverrideUsed = smbExecution.highBgOverrideUsed
+                highBgOverrideUsed = smbExecution.highBgOverrideUsed,
+                observedCarbImpactMgdlPer5m = ci,
+                remainingCiPeakMgdlPer5m = remainingCIpeak
             )
             eventualBG = decisionAwarePredictions.eventual
             predictedBg = decisionAwarePredictions.eventual.toFloat()
@@ -4414,6 +4420,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             result.minGuardBG = minOf(bg, predictedBg.toDouble(), eventualBG)
             val sanitizedReason = result.reason.toString()
                 .replace(Regex("""Predicted BG:\s*[-−]?\d+(?:[.,]\d+)?"""), "Predicted BG: ${"%.0f".format(predictedBg)}")
+                .replace(Regex("""minBG=\s*[-−]?\d+(?:[.,]\d+)?"""), "minBG=${"%.0f".format(result.minGuardBG)}")
+                .replace(Regex("""predicted=\s*[-−]?\d+(?:[.,]\d+)?"""), "predicted=${"%.0f".format(predictedBg)}")
                 .replace(Regex("""eventual=\s*[-−]?\d+(?:[.,]\d+)?"""), "eventual=${"%.0f".format(eventualBG)}")
             result.reason = StringBuilder(sanitizedReason)
             result.reason.appendLine()

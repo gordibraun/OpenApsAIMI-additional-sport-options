@@ -2,7 +2,6 @@ package app.aaps.plugins.aps.openAPSAIMI.pkpd
 
 import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.aps.OapsProfileAimi
-import kotlin.math.pow
 
 /**
  * Provides a unified prediction model that mirrors the same parameters used during SMB/basal decisions.
@@ -30,11 +29,14 @@ object AdvancedPredictionEngine {
         plannedSmbU: Double = 0.0,
         plannedRateUph: Double? = null,
         profileBasalUph: Double? = null,
+        plannedDurationMin: Int = 30,
         mealFactorApplied: Double = 1.0,
         mpcShare: Double = 0.0,
         piShare: Double = 0.0,
         highBgOverrideUsed: Boolean = false,
         safetyMechanism: String? = null,
+        observedCarbImpactMgdlPer5m: Double = 0.0,
+        remainingCiPeakMgdlPer5m: Double = 0.0,
         horizonMinutes: Int = 240
     ): List<Double> {
         val predictions = mutableListOf(currentBG)
@@ -76,10 +78,16 @@ object AdvancedPredictionEngine {
         val normalizedMealFactor = mealFactorApplied.coerceIn(0.7, 1.5)
         val mealCurveBoost = 1.0 + (normalizedMealFactor - 1.0) * 0.8
         val effectiveCarbEffectMgDl = totalCarbEffectMgDl * mealCurveBoost
+        val observedCarbImpact = observedCarbImpactMgdlPer5m.coerceAtLeast(0.0)
+        val remainingObservedPeak = remainingCiPeakMgdlPer5m.coerceAtLeast(0.0)
 
-        val rateDeltaUph = ((plannedRateUph ?: profileBasalUph ?: 0.0) - (profileBasalUph ?: 0.0)).coerceAtLeast(0.0)
-        val plannedBasalUnits = rateDeltaUph * (horizonMinutes / 60.0)
-        val plannedInterventionUnits = plannedSmbU.coerceAtLeast(0.0) + plannedBasalUnits
+        val effectivePlannedRate = plannedRateUph ?: profileBasalUph ?: 0.0
+        val effectiveProfileBasal = profileBasalUph ?: 0.0
+        val effectiveDurationHours = (plannedDurationMin.coerceAtLeast(0) / 60.0)
+        val rateDeltaUph = effectivePlannedRate - effectiveProfileBasal
+        val plannedBasalUnits = rateDeltaUph * effectiveDurationHours
+        val additionalInsulinUnits = plannedSmbU.coerceAtLeast(0.0) + plannedBasalUnits.coerceAtLeast(0.0)
+        val reducedInsulinUnits = (-plannedBasalUnits).coerceAtLeast(0.0)
         val decisionTrust = (
             0.35 +
                 0.30 * mpcShare.coerceIn(0.0, 1.0) +
@@ -87,16 +95,22 @@ object AdvancedPredictionEngine {
                 0.15 * (normalizedMealFactor - 1.0).coerceAtLeast(0.0) +
                 if (highBgOverrideUsed) 0.15 else 0.0
             ).coerceIn(0.0, 1.2)
-        val safetySuppression = when {
-            safetyMechanism?.contains("Hypo", ignoreCase = true) == true -> 0.25
-            safetyMechanism?.contains("guard", ignoreCase = true) == true -> 0.35
+        val additionalInsulinSuppression = when {
+            safetyMechanism?.contains("Hypo", ignoreCase = true) == true -> 0.0
+            safetyMechanism?.contains("guard", ignoreCase = true) == true -> 0.15
             else -> 1.0
         }
-        val decisionLiftTotalMgDl = plannedInterventionUnits * finalSensitivity * decisionTrust * safetySuppression
+        val reducedInsulinSupport = when {
+            safetyMechanism?.contains("Hypo", ignoreCase = true) == true -> 1.0
+            safetyMechanism?.contains("guard", ignoreCase = true) == true -> 0.9
+            else -> 0.75
+        }
+        val decisionDropTotalMgDl = additionalInsulinUnits * finalSensitivity * decisionTrust * additionalInsulinSuppression
+        val decisionLiftTotalMgDl = reducedInsulinUnits * finalSensitivity * decisionTrust.coerceAtLeast(0.6) * reducedInsulinSupport
 
         var lastBg = currentBG
-        val insulinPeak = profile.peakTime.toDouble().takeIf { it > 0 } ?: 60.0
-        val maxActivity = getInsulinActivity(insulinPeak, insulinPeak)
+        val sortedIob = iobArray.sortedBy { it.time }
+        val baselineTime = sortedIob.firstOrNull()?.time ?: now
 
         // Innovation: Momentum (Delta Decay)
         // If BG is rising, assume it continues to rise for a while (inertia).
@@ -105,27 +119,34 @@ object AdvancedPredictionEngine {
 
         repeat(steps) { stepIndex ->
             val minutesInFuture = (stepIndex + 1) * 5
-            var insulinEffectMgDl = 0.0
-
-            if (maxActivity > 0) {
-                for (iobEntry in iobArray) {
-                    val minutesSinceBolus = ((now - iobEntry.time) / 60000.0) + minutesInFuture
-                    val activity = getInsulinActivity(minutesSinceBolus, insulinPeak) / maxActivity
-                    insulinEffectMgDl += activity * iobEntry.iob * finalSensitivity
-                }
-            }
+            val targetTime = baselineTime + minutesInFuture * 60_000L
+            val futureIobEntry = sortedIob.minByOrNull { kotlin.math.abs(it.time - targetTime) } ?: sortedIob.lastOrNull()
+            var insulinImpactPer5min = ((futureIobEntry?.activity ?: 0.0).coerceAtLeast(0.0) * finalSensitivity * 5.0)
 
             val dampingProgress = (minutesInFuture / 90.0).coerceIn(0.0, 1.0)
             val stepIobDampingFactor = baseIobDampingFactor + (1.0 - baseIobDampingFactor) * dampingProgress
-            insulinEffectMgDl *= stepIobDampingFactor
-
-            val insulinImpactPer5min = insulinEffectMgDl / 12.0
-            val carbImpactPer5Min = effectiveCarbEffectMgDl * carbWeights[stepIndex]
+            insulinImpactPer5min *= stepIobDampingFactor
+            val baseCarbImpactPer5Min = effectiveCarbEffectMgDl * carbWeights[stepIndex]
+            val liveDecay = kotlin.math.exp(-(minutesInFuture.toDouble() / 45.0))
+            val residualRamp = when {
+                carbParameters.peakMinutes <= 0.0 -> 1.0
+                minutesInFuture <= carbParameters.peakMinutes ->
+                    (0.55 + 0.45 * (minutesInFuture / carbParameters.peakMinutes)).coerceIn(0.55, 1.0)
+                else -> kotlin.math.exp(-((minutesInFuture - carbParameters.peakMinutes) / 90.0))
+            }
+            val liveCarbImpactPer5Min = observedCarbImpact * liveDecay
+            val residualCarbImpactPer5Min = remainingObservedPeak * residualRamp
+            val carbImpactPer5Min = maxOf(
+                baseCarbImpactPer5Min,
+                liveCarbImpactPer5Min,
+                residualCarbImpactPer5Min
+            )
             val decisionLiftPer5Min = decisionLiftTotalMgDl * decisionWeights[stepIndex]
+            val decisionDropPer5Min = decisionDropTotalMgDl * decisionWeights[stepIndex]
 
             // Apply Momentum
             // We add the current 'inertia' to the BG change, then decay it.
-            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + decisionLiftPer5Min + momentum).coerceIn(39.0, 401.0)
+            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + decisionLiftPer5Min - decisionDropPer5Min + momentum).coerceIn(39.0, 401.0)
 
             // Linear/Exp decay of momentum
             momentum *= 0.85 // Decays to ~0 over 45-60 mins
@@ -137,11 +158,4 @@ object AdvancedPredictionEngine {
         return predictions
     }
 
-    private fun getInsulinActivity(minutesSinceBolus: Double, peakTime: Double): Double {
-        if (minutesSinceBolus < 0 || peakTime <= 0) return 0.0
-        val shape = 3.5
-        val scale = peakTime / ((shape - 1) / shape).pow(1 / shape)
-        return (shape / scale) * (minutesSinceBolus / scale).pow(shape - 1) *
-            kotlin.math.exp(-(minutesSinceBolus / scale).pow(shape))
-    }
 }
