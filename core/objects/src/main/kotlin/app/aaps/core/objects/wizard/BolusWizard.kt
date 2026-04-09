@@ -370,6 +370,8 @@ class BolusWizard @Inject constructor(
         }
     }
 
+    private fun wizardBgToMgdl(): Double = profileUtil.convertToMgdl(bg, profileFunction.getUnits())
+
     fun createBolusCalculatorResult(): BCR {
         val unit = profileFunction.getUnits()
         return BCR(
@@ -488,7 +490,7 @@ class BolusWizard @Inject constructor(
                 automation.removeAutomationEventBolusReminder()
             if (carbs > 0.0)
                 automation.removeAutomationEventEatReminder()
-            if (preferences.get(BooleanKey.OverviewUseBolusAdvisor) && profileUtil.convertToMgdl(bg, profile.units) > 180 && carbs > 0 && carbTime >= 0)
+            if (preferences.get(BooleanKey.OverviewUseBolusAdvisor) && wizardBgToMgdl() > 180 && carbs > 0 && carbTime >= 0)
                 OKDialog.showYesNoCancel(
                     ctx, rh.gs(app.aaps.core.ui.R.string.bolus_advisor), rh.gs(app.aaps.core.ui.R.string.bolus_advisor_message),
                     { bolusAdvisorProcessing(ctx) },
@@ -509,7 +511,7 @@ class BolusWizard @Inject constructor(
                 insulin = insulinAfterConstraints
                 carbs = 0.0
                 context = ctx
-                mgdlGlucose = profileUtil.convertToMgdl(bg, profile.units)
+                mgdlGlucose = wizardBgToMgdl()
                 glucoseType = TE.MeterType.MANUAL
                 carbTime = 0
                 bolusCalculatorResult = createBolusCalculatorResult()
@@ -607,7 +609,7 @@ class BolusWizard @Inject constructor(
                     insulin = insulinAfterConstraints
                     carbs = this@BolusWizard.carbs.toDouble()
                     context = ctx
-                    mgdlGlucose = profileUtil.convertToMgdl(bg, profile.units)
+                    mgdlGlucose = wizardBgToMgdl()
                     glucoseType = TE.MeterType.MANUAL
                     carbsTimestamp = now + T.mins(this@BolusWizard.carbTime.toLong()).msecs()
                     bolusCalculatorResult = createBolusCalculatorResult()
