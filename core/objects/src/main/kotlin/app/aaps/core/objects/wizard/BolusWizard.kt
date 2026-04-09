@@ -300,6 +300,13 @@ class BolusWizard @Inject constructor(
 
     private fun buildAimiMealInput(): AimiMealInput {
         val units = profileFunction.getUnits()
+        // Use the wizard's own non-carb baseline as the protective-carb source so
+        // AIMI meal logic matches the "Не хватает X г" behavior the user sees.
+        val wizardProtectiveCarbs = ((-(totalBeforePercentageAdjustment - insulinFromCarbs)).coerceAtLeast(0.0) * ic).toInt()
+        aapsLogger.debug(
+            LTag.APS,
+            "AIMI wizard protective carbs: entered=$carbs required=$wizardProtectiveCarbs totalBeforePct=${"%.2f".format(totalBeforePercentageAdjustment)} insulinFromCarbs=${"%.2f".format(insulinFromCarbs)} ic=${"%.2f".format(ic)}"
+        )
         return AimiMealInput(
             timestamp = dateUtil.now(),
             profileName = profileName,
@@ -307,6 +314,7 @@ class BolusWizard @Inject constructor(
             bg = bg,
             delta = glucoseStatus?.shortAvgDelta ?: 0.0,
             carbs = carbs,
+            requiredCarbs = wizardProtectiveCarbs,
             cob = cob,
             carbTimeMinutes = carbTime,
             targetBgLow = profileUtil.convertToMgdl(targetBGLow, units),
