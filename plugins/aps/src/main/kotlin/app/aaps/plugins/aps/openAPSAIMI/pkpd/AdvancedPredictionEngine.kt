@@ -37,6 +37,10 @@ object AdvancedPredictionEngine {
         safetyMechanism: String? = null,
         observedCarbImpactMgdlPer5m: Double = 0.0,
         remainingCiPeakMgdlPer5m: Double = 0.0,
+        rescueFastActive: Boolean = false,
+        uamConfidence: Double = 1.0,
+        explicitCarbEntry: Boolean = false,
+        freshSmbPressureU: Double = 0.0,
         horizonMinutes: Int = 240
     ): List<Double> {
         val predictions = mutableListOf(currentBG)
@@ -51,19 +55,28 @@ object AdvancedPredictionEngine {
         // Innovation: Dynamic IOB Damping during active meal rise
         // If BG is rising while COB exists OR during unannounced meals (UAM), the "effective" insulin pulling down is dampened by the inflow of glucose.
         // We reduce the impact of IOB in the prediction to avoid false hypo alarms.
-        val baseIobDampingFactor = if (cobG > 0 || delta > 2.0) {
-            when {
+        val normalizedUamConfidence = uamConfidence.coerceIn(0.0, 1.0)
+        val baseIobDampingFactor = if (rescueFastActive) {
+            0.95
+        } else if (cobG > 0 || delta > 2.0) {
+            val normalDamping = when {
                 delta > 5.0 -> 0.50 // Intense rise: IOB 50% effective in prediction
                 delta > 2.0 -> 0.70 // Moderate rise
                 delta > 0.0 -> if (cobG > 0) 0.85 else 1.0 // Slight rise: damp only if explicit COB
                 cobG > 0 -> 0.92 // Even without visible rise, active COB should soften early insulin dominance a bit
                 else -> 1.0
             }
+            if (cobG <= 0.0 && !explicitCarbEntry) {
+                1.0 - ((1.0 - normalDamping) * normalizedUamConfidence)
+            } else {
+                normalDamping
+            }
         } else {
             1.0
         }
 
-        val carbParameters = CarbAbsorptionModel.resolveParameters(cobG = cobG, delta = delta, selectedFoodType = selectedFoodType)
+        val effectiveFoodType = if (rescueFastActive && selectedFoodType == null) "fast" else selectedFoodType
+        val carbParameters = CarbAbsorptionModel.resolveParameters(cobG = cobG, delta = delta, selectedFoodType = effectiveFoodType)
         val carbWeights = CarbAbsorptionModel.buildWeights(
             steps = steps,
             peakMinutes = carbParameters.peakMinutes,
@@ -79,7 +92,13 @@ object AdvancedPredictionEngine {
         val mealCurveBoost = 1.0 + (normalizedMealFactor - 1.0) * 0.8
         val effectiveCarbEffectMgDl = totalCarbEffectMgDl * mealCurveBoost
         val observedCarbImpact = observedCarbImpactMgdlPer5m.coerceAtLeast(0.0)
-        val remainingObservedPeak = remainingCiPeakMgdlPer5m.coerceAtLeast(0.0)
+        val remainingObservedPeak = if (rescueFastActive) {
+            remainingCiPeakMgdlPer5m.coerceIn(0.0, observedCarbImpact * 0.6)
+        } else if (cobG <= 0.0 && !explicitCarbEntry) {
+            remainingCiPeakMgdlPer5m.coerceAtLeast(0.0) * normalizedUamConfidence
+        } else {
+            remainingCiPeakMgdlPer5m.coerceAtLeast(0.0)
+        }
 
         val effectivePlannedRate = plannedRateUph ?: profileBasalUph ?: 0.0
         val effectiveProfileBasal = profileBasalUph ?: 0.0
@@ -106,6 +125,7 @@ object AdvancedPredictionEngine {
             else -> 0.75
         }
         val decisionDropTotalMgDl = additionalInsulinUnits * finalSensitivity * decisionTrust * additionalInsulinSuppression
+        val freshSmbPressureDropMgDl = freshSmbPressureU.coerceAtLeast(0.0) * finalSensitivity * 0.35
         val decisionLiftTotalMgDl = reducedInsulinUnits * finalSensitivity * decisionTrust.coerceAtLeast(0.6) * reducedInsulinSupport
 
         var lastBg = currentBG
@@ -115,7 +135,9 @@ object AdvancedPredictionEngine {
         // Innovation: Momentum (Delta Decay)
         // If BG is rising, assume it continues to rise for a while (inertia).
         // This is crucial for UAM where no COB is entered.
-        var momentum = if (delta > 0) delta else 0.0
+        var momentum = if (delta > 0) {
+            if (rescueFastActive) delta.coerceAtMost(2.0) else delta * normalizedUamConfidence.coerceAtLeast(if (explicitCarbEntry) 1.0 else 0.0)
+        } else 0.0
 
         repeat(steps) { stepIndex ->
             val minutesInFuture = (stepIndex + 1) * 5
@@ -127,12 +149,14 @@ object AdvancedPredictionEngine {
             val stepIobDampingFactor = baseIobDampingFactor + (1.0 - baseIobDampingFactor) * dampingProgress
             insulinImpactPer5min *= stepIobDampingFactor
             val baseCarbImpactPer5Min = effectiveCarbEffectMgDl * carbWeights[stepIndex]
-            val liveDecay = kotlin.math.exp(-(minutesInFuture.toDouble() / 45.0))
+            val liveDecayMinutes = if (rescueFastActive) 12.0 else 45.0
+            val residualDecayMinutes = if (rescueFastActive) 18.0 else 90.0
+            val liveDecay = kotlin.math.exp(-(minutesInFuture.toDouble() / liveDecayMinutes))
             val residualRamp = when {
                 carbParameters.peakMinutes <= 0.0 -> 1.0
                 minutesInFuture <= carbParameters.peakMinutes ->
                     (0.55 + 0.45 * (minutesInFuture / carbParameters.peakMinutes)).coerceIn(0.55, 1.0)
-                else -> kotlin.math.exp(-((minutesInFuture - carbParameters.peakMinutes) / 90.0))
+                else -> kotlin.math.exp(-((minutesInFuture - carbParameters.peakMinutes) / residualDecayMinutes))
             }
             val liveCarbImpactPer5Min = observedCarbImpact * liveDecay
             val residualCarbImpactPer5Min = remainingObservedPeak * residualRamp
@@ -143,13 +167,14 @@ object AdvancedPredictionEngine {
             )
             val decisionLiftPer5Min = decisionLiftTotalMgDl * decisionWeights[stepIndex]
             val decisionDropPer5Min = decisionDropTotalMgDl * decisionWeights[stepIndex]
+            val freshSmbDropPer5Min = freshSmbPressureDropMgDl * decisionWeights[stepIndex]
 
             // Apply Momentum
             // We add the current 'inertia' to the BG change, then decay it.
-            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + decisionLiftPer5Min - decisionDropPer5Min + momentum).coerceIn(39.0, 401.0)
+            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + decisionLiftPer5Min - decisionDropPer5Min - freshSmbDropPer5Min + momentum).coerceIn(39.0, 401.0)
 
             // Linear/Exp decay of momentum
-            momentum *= 0.85 // Decays to ~0 over 45-60 mins
+            momentum *= if (rescueFastActive) 0.35 else 0.85 // Быстрые спасательные углеводы не должны давать длинный хвост роста.
 
             lastBg = nextBg
             predictions.add(lastBg)

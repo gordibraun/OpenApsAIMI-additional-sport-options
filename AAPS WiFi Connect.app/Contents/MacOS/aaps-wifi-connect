@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT="/Users/alexeydedeshko/StudioProjects/OpenApsAIMI-additional-sport-options"
+SCRIPT="$ROOT/scripts/aaps_adb_wifi_connect.sh"
+LOG="$HOME/.aaps-phone-collector/aaps-wifi-connect-app.log"
+LAST="$HOME/.aaps-phone-collector/aaps-wifi-connect-last.log"
+STATUS_FILE="$HOME/.aaps-phone-collector/aaps-wifi-connect-status.txt"
+APP_LOCK_DIR="$HOME/.aaps-phone-collector/aaps-wifi-connect-app.lock"
+ADB="${ADB:-/Users/alexeydedeshko/Library/Android/sdk/platform-tools/adb}"
+AAPS_ADB_WIFI_PORT="${AAPS_ADB_WIFI_PORT:-5555}"
+
+mkdir -p "$(dirname "$LOG")"
+
+write_status() {
+  {
+    echo "AAPS WiFi Connect"
+    echo
+    printf '%s\n' "$1"
+    if [ -f "$LAST" ]; then
+      echo
+      echo "Last run:"
+      cat "$LAST"
+    fi
+  } > "$STATUS_FILE"
+}
+
+finish_existing_run() {
+  if mkdir "$APP_LOCK_DIR" 2>/dev/null; then
+    echo "$$" > "$APP_LOCK_DIR/pid"
+    trap 'rm -rf "$APP_LOCK_DIR"' EXIT INT TERM
+    return 0
+  fi
+
+  write_status "Подключение уже проверяется.
+
+Подожди завершения текущей проверки. Если окно не появилось, открой этот статус еще раз через несколько секунд."
+  open -a TextEdit "$STATUS_FILE" >/dev/null 2>&1 || open "$STATUS_FILE" >/dev/null 2>&1 || true
+  exit 0
+}
+
+local_ipv4s() {
+  local ifaces
+  ifaces="$(ifconfig -l 2>/dev/null || true)"
+  for iface in $ifaces; do
+    case "$iface" in
+      en*|bridge*)
+        ipconfig getifaddr "$iface" 2>/dev/null || true
+        ;;
+    esac
+  done | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $0 !~ /^127\./ { print }' | sort -u | paste -sd ', ' -
+}
+
+connected_wifi_target() {
+  "$ADB" devices 2>/dev/null \
+    | awk -v port=":$AAPS_ADB_WIFI_PORT" '$1 ~ port "$" && $2 == "device" { print $1; exit }'
+}
+
+show_dialog() {
+  local dialog_message="$1"
+  local dialog_icon="$2"
+
+  if ! command -v osascript >/dev/null 2>&1; then
+    return 0
+  fi
+
+  /usr/bin/osascript - "$dialog_message" "$dialog_icon" >> "$LOG" 2>&1 <<'OSA' || true
+on run argv
+  set dialogMessage to item 1 of argv
+  set dialogIcon to item 2 of argv
+
+  try
+    tell application "System Events"
+      activate
+      if dialogIcon is "caution" then
+        display dialog dialogMessage buttons {"OK"} default button "OK" with title "AAPS WiFi Connect" with icon caution giving up after 90
+      else
+        display dialog dialogMessage buttons {"OK"} default button "OK" with title "AAPS WiFi Connect" with icon note giving up after 90
+      end if
+    end tell
+  on error firstError
+    try
+      tell application "Finder"
+        activate
+        if dialogIcon is "caution" then
+          display dialog dialogMessage buttons {"OK"} default button "OK" with title "AAPS WiFi Connect" with icon caution giving up after 90
+        else
+          display dialog dialogMessage buttons {"OK"} default button "OK" with title "AAPS WiFi Connect" with icon note giving up after 90
+        end if
+      end tell
+    on error secondError
+      error "Could not show dialog: " & firstError & " / " & secondError
+    end try
+  end try
+end run
+OSA
+}
+
+finish_existing_run
+
+write_status "Подключаю телефон по Wi-Fi ADB...
+
+Если сеть изменилась, я попробую найти телефон заново. Это может занять до минуты."
+open -a TextEdit "$STATUS_FILE" >/dev/null 2>&1 || open "$STATUS_FILE" >/dev/null 2>&1 || true
+
+if command -v osascript >/dev/null 2>&1; then
+  /usr/bin/osascript >/dev/null 2>&1 <<'OSA' || true
+display notification "Проверяю подключение телефона..." with title "AAPS WiFi Connect"
+OSA
+fi
+
+"$SCRIPT" > "$LAST.tmp" 2>&1
+status=$?
+{
+  echo "==== $(date '+%Y-%m-%d %H:%M:%S %z') ===="
+  cat "$LAST.tmp"
+  echo "exit_status=$status"
+} > "$LAST"
+rm -f "$LAST.tmp"
+
+cat "$LAST" >> "$LOG"
+
+actual_target="$(connected_wifi_target)"
+if [ -n "$actual_target" ] || grep -Eq "ADB Wi-Fi connected|ADB Wi-Fi is already connected|already connected to|connected to .*:5555" "$LAST"; then
+  target="${actual_target:-$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}:5555' "$LAST" | tail -1)}"
+  message="Подключено по Wi-Fi ADB${target:+: $target}.
+
+Можно отключить USB. Сборщик данных сможет работать через Wi-Fi."
+  icon="note"
+elif grep -q "Could not read phone Wi-Fi IP" "$LAST"; then
+  message="Не удалось подключить ADB по Wi-Fi: телефон не получил Wi-Fi IP.
+
+Что сделать:
+1. Подключи телефон к Wi-Fi.
+2. Убедись, что Mac подключен к той же Wi-Fi сети.
+3. Оставь телефон разблокированным и нажми кнопку снова."
+  icon="caution"
+elif grep -Eq "Wi-Fi client isolation|ADB port .* is not reachable|Phone does not answer ping" "$LAST"; then
+  message="В этой Wi-Fi сети запрещено прямое соединение устройств.
+
+USB подключен, но Wi-Fi ADB сейчас недоступен.
+
+Что найдено:
+1. Телефон и Mac получили адреса в одной подсети.
+2. ADB over Wi-Fi на телефоне включен.
+3. Но Wi-Fi сеть не пропускает прямое соединение Mac ↔ телефон.
+
+Это обычно называется AP isolation, client isolation или guest isolation.
+
+Что сделать для стабильного Wi-Fi:
+1. В роутере отключить AP/client isolation или гостевую изоляцию.
+2. Не использовать гостевую Wi-Fi сеть.
+3. Закрепить IP телефона в DHCP роутера.
+
+Сбор данных уже может работать через USB, Wi-Fi для этого сейчас не обязателен."
+  icon="caution"
+elif grep -q "is not online as device" "$LAST"; then
+  message="ADB Wi-Fi адрес найден, но телефон не вышел в статус device.
+
+Что сделать:
+1. Убедись, что телефон и Mac в одной Wi-Fi сети.
+2. Оставь телефон разблокированным и нажми кнопку снова.
+3. Если Wi-Fi сеть изменилась, программа попробует найти новый IP автоматически."
+  icon="caution"
+elif grep -q "is not on the current local network" "$LAST"; then
+  message="Телефон был сохранен в другой Wi-Fi сети, а в текущей сети ADB не найден.
+
+Что это значит:
+1. Mac сейчас видит свои IP: $(local_ipv4s).
+2. Старый IP телефона недоступен из этой подсети.
+3. Одинаковое имя Wi-Fi не всегда означает одну подсеть: роутер/VPN/гостевая сеть могут изолировать устройства.
+4. На телефоне может быть выключен ADB over Wi-Fi после перезагрузки/смены сети.
+
+Что сделать:
+1. Разблокируй телефон.
+2. Проверь IP телефона в Wi-Fi настройках. Он должен начинаться так же, как IP Mac, например 10.1.1.x.
+3. Если IP совпадает по подсети, нажми кнопку снова.
+
+Подтверждение на телефоне нужно только один раз: выбери Всегда разрешать с этого компьютера."
+  icon="caution"
+elif grep -q "No USB device and no working saved Wi-Fi connection" "$LAST"; then
+  message="Не найдено рабочее подключение к телефону.
+
+Что сделать:
+1. Подключи телефон и Mac к одной Wi-Fi сети.
+2. Разблокируй телефон.
+3. Нажми кнопку снова.
+
+USB нужен только если ADB по Wi-Fi еще ни разу не включался на этом телефоне."
+  icon="caution"
+elif grep -q "unauthorized" "$LAST"; then
+  message="Телефон виден, но ADB не авторизован.
+
+Что сделать:
+1. Разблокируй телефон.
+2. Подтверди окно Разрешить USB-отладку.
+3. Обязательно включи Всегда разрешать с этого компьютера.
+4. Нажми кнопку снова."
+  icon="caution"
+else
+  message="ADB Wi-Fi не подключился.
+
+Что сделать:
+1. Телефон и Mac должны быть в одной Wi-Fi сети.
+2. Разблокируй телефон.
+3. Нажми кнопку снова.
+
+USB нужен только если ADB по Wi-Fi еще ни разу не включался на этом телефоне.
+
+Подробности: $LOG"
+  icon="caution"
+fi
+
+write_status "$message"
+
+show_dialog "$message" "$icon"
+
+if command -v osascript >/dev/null 2>&1; then
+  /usr/bin/osascript >/dev/null 2>&1 <<'OSA' || true
+display notification "Готово. Открываю статус." with title "AAPS WiFi Connect"
+OSA
+fi
+
+open -a TextEdit "$STATUS_FILE" >/dev/null 2>&1 || open "$STATUS_FILE" >/dev/null 2>&1 || true
+
+exit "$status"

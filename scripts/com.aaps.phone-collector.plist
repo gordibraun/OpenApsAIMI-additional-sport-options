@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aaps.phone-collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/alexeydedeshko/StudioProjects/OpenApsAIMI-additional-sport-options/scripts/aaps_watch_phone.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/alexeydedeshko/StudioProjects/OpenApsAIMI-additional-sport-options</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/alexeydedeshko/.aaps-phone-collector/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/alexeydedeshko/.aaps-phone-collector/launchd.err.log</string>
+</dict>
+</plist>

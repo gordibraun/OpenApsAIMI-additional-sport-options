@@ -182,8 +182,14 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
         val minGuard = raw?.minGuardBG
         val threshold = raw?.hypoThreshold
         val decisive = detectDecisiveSignal(bg, predicted, eventual, minGuard)
+        val smbMismatch = detectSmbRecommendationMismatch(lastAPSResult, raw)
 
         return buildString {
+            if (smbMismatch != null) {
+                append("<b>Внимание: возможная ошибка SMB</b><br>")
+                append(smbMismatch.simpleText)
+                append("<br><br>")
+            }
             append("<b>Что система реально сравнила</b><br>")
             append("BG сейчас: ${formatMgdl(bg)}")
             append("<br>")
@@ -215,6 +221,7 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
         val primaryRequest = extractPrimaryRequest(raw, lastAPSResult)
         val safetyLines = extractSafetyLines(lastAPSResult, raw)
         val finalAction = buildFinalAction(lastAPSResult, raw)
+        val smbMismatch = detectSmbRecommendationMismatch(lastAPSResult, raw)
 
         return buildString {
             append("<b>Этап 1. Прогнозные сигналы</b><br>")
@@ -237,10 +244,16 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
 
             append("<b>Этап 5. Итоговое действие</b><br>")
             append(finalAction)
+            if (smbMismatch != null) {
+                append("<br><br>")
+                append("<b>Диагностика несостыковки</b><br>")
+                append(smbMismatch.detailText)
+            }
         }
     }
 
     private fun buildRawTrace(lastAPSResult: APSResult, raw: RT?): String {
+        val smbMismatch = detectSmbRecommendationMismatch(lastAPSResult, raw)
         val filteredReason = lastAPSResult.reason
             .split('\n')
             .map { it.trim() }
@@ -276,6 +289,11 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
         val lines = (filteredReason + filteredConsole).distinct()
         if (lines.isEmpty()) return "Подходящих строк для Decision Trace пока нет."
         return buildString {
+            if (smbMismatch != null) {
+                append("<b>Быстрая диагностика</b><br>")
+                append(smbMismatch.detailText)
+                append("<br><br>")
+            }
             append("<b>Ключевые строки</b><br>")
             append(lines.joinToString("<br><br>") { HtmlHelper.fromHtml(it).toString() })
         }
@@ -348,6 +366,37 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
         }
     }
 
+    private fun detectSmbRecommendationMismatch(lastAPSResult: APSResult, raw: RT?): SmbRecommendationMismatch? {
+        val reason = lastAPSResult.reason
+        val internalFinalSmb = extractLastNumber(reason, """Final SMB:\s*([0-9]+(?:[,.][0-9]+)?)""")
+        val quantizedSmb = extractLastNumber(reason, """quantized=([0-9]+(?:[,.][0-9]+)?)""")
+        val internalRecommended = listOfNotNull(internalFinalSmb, quantizedSmb).maxOrNull() ?: return null
+        val finalSmb = lastAPSResult.smb
+        val finalInsulinReq = raw?.insulinReq ?: 0.0
+        val finalIsZero = finalSmb <= 0.01 && finalInsulinReq <= 0.01
+
+        if (internalRecommended <= 0.05 || !finalIsZero) return null
+
+        val simple = "AIMI внутри рассчитал SMB ${formatUnits(internalRecommended)} Е, но финально к подаче ушло 0.00 Е."
+        val detail = buildString {
+            append(simple)
+            append("<br>")
+            append("Это не похоже на обычный safety-стоп: проверь, почему положительный SMB не дошел до итогового `units`.")
+            append("<br>")
+            append("Внутри: Final SMB=${formatUnits(internalFinalSmb)} Е")
+            append(" | quantized=${formatUnits(quantizedSmb)} Е")
+            append(" | итоговый SMB=${formatUnits(finalSmb)} Е")
+            append(" | итоговый insulinReq=${formatUnits(finalInsulinReq)} Е")
+        }
+        return SmbRecommendationMismatch(simple, detail)
+    }
+
+    private fun extractLastNumber(text: String, pattern: String): Double? =
+        Regex(pattern, setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE))
+            .findAll(text)
+            .mapNotNull { match -> match.groupValues.getOrNull(1)?.replace(',', '.')?.toDoubleOrNull() }
+            .lastOrNull()
+
     private fun normalizeNumber(value: String): String = value.replace(',', '.')
 
     private fun formatMgdl(value: Double?): String =
@@ -359,6 +408,11 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
     private fun formatTempBasal(rate: Double, duration: Int): String =
         if (rate < 0 || duration < 0) "без запроса"
         else String.format(Locale.US, "%.2f Е/ч на %d мин", rate, duration)
+
+    private data class SmbRecommendationMismatch(
+        val simpleText: String,
+        val detailText: String
+    )
 
     private data class GlossaryDefinition(
         val title: String,

@@ -13,9 +13,9 @@ object CarbAbsorptionModel {
     ) {
         FAST(
             displayName = "Быстрые углеводы",
-            description = "Ранний пик и короткий хвост. Подходит для сахара, сока и быстрых перекусов.",
-            peakMinutes = 30.0,
-            absorptionMinutes = 120.0
+            description = "Очень ранний пик и короткий хвост. Подходит для сахара, сока и rescue-углеводов после низкой глюкозы.",
+            peakMinutes = 15.0,
+            absorptionMinutes = 45.0
         ),
         BALANCED(
             displayName = "Обычная еда",
@@ -79,7 +79,9 @@ object CarbAbsorptionModel {
         }
         return Parameters(
             peakMinutes = (foodType.peakMinutes + peakShift).coerceAtLeast(20.0),
-            absorptionMinutes = (foodType.absorptionMinutes + absorptionShift).coerceAtLeast(90.0)
+            absorptionMinutes = (foodType.absorptionMinutes + absorptionShift).coerceAtLeast(
+                if (foodType == FoodType.FAST) 35.0 else 90.0
+            )
         )
     }
 

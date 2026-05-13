@@ -33,3 +33,8 @@ wear/full/
 *.preferences_pb
 /buildSrc/.kotlin
 .claude/settings.local.json
+aaps-data-exports/
+aaps-effectiveness-monitor/
+tmp-current-check/
+scripts/__pycache__/
+*.pyc

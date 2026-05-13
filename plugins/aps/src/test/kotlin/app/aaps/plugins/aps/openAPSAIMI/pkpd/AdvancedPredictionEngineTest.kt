@@ -29,7 +29,7 @@ class AdvancedPredictionEngineTest {
     fun `test predict flat with no IOB or COB`() {
         val profile = mockk<OapsProfileAimi>(relaxed = true)
         every { profile.carb_ratio } returns 10.0
-        every { profile.peakTime } returns 75
+        every { profile.peakTime } returns 75.0
 
         val result = AdvancedPredictionEngine.predict(
             currentBG = 100.0,
@@ -47,7 +47,7 @@ class AdvancedPredictionEngineTest {
     fun `test predict drop with IOB`() {
         val profile = mockk<OapsProfileAimi>(relaxed = true)
         every { profile.carb_ratio } returns 10.0
-        every { profile.peakTime } returns 75
+        every { profile.peakTime } returns 75.0
 
         val iobEntry = mockk<IobTotal>()
         every { iobEntry.iob } returns 1.0
@@ -63,5 +63,38 @@ class AdvancedPredictionEngineTest {
         )
         // Should drop
         assertTrue(result.last() < 200.0)
+    }
+
+    @Test
+    fun `rescue fast forecast has shorter rebound tail than normal UAM`() {
+        val profile = mockk<OapsProfileAimi>(relaxed = true)
+        every { profile.carb_ratio } returns 10.0
+        every { profile.peakTime } returns 75.0
+
+        val normalUam = AdvancedPredictionEngine.predict(
+            currentBG = 100.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 50.0,
+            cobG = 0.0,
+            profile = profile,
+            delta = 5.0,
+            observedCarbImpactMgdlPer5m = 10.0,
+            remainingCiPeakMgdlPer5m = 10.0,
+            horizonMinutes = 60
+        )
+        val rescueFast = AdvancedPredictionEngine.predict(
+            currentBG = 100.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 50.0,
+            cobG = 0.0,
+            profile = profile,
+            delta = 5.0,
+            observedCarbImpactMgdlPer5m = 10.0,
+            remainingCiPeakMgdlPer5m = 10.0,
+            rescueFastActive = true,
+            horizonMinutes = 60
+        )
+
+        assertTrue(rescueFast.last() < normalUam.last())
     }
 }

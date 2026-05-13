@@ -821,6 +821,116 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         return recentBGs
     }
+
+    private fun isRescueFastRebound(mealData: MealData): Boolean {
+        val recentBgValues = getRecentBGs()
+        val recentLow = bg < 80.0 ||
+            recentBgValues.any { it < 80f } ||
+            lastHourTIRLow > 0.0 ||
+            (lastHourTIRLow100 > 0.0 && bg < 125.0)
+        val risingAfterLow = delta >= 2.0f || shortAvgDelta >= 1.0f
+        val explicitFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
+        val userTypedCarbsHavePriority = explicitFoodType != null && mealData.mealCOB > 0.0
+        val noActiveMealMode = !mealTime &&
+            !bfastTime &&
+            !lunchTime &&
+            !dinnerTime &&
+            !highCarbTime &&
+            !snackTime
+
+        return recentLow && risingAfterLow && noActiveMealMode && !userTypedCarbsHavePriority
+    }
+
+    private fun freshSmbPressureUnits(): Double =
+        if (lastsmbtime in 0..60 && lastBolusSMBUnit > 0f) lastBolusSMBUnit.toDouble() else 0.0
+
+    private fun unannouncedFoodConfidence(mealData: MealData, rescueFastRebound: Boolean): Double {
+        val explicitFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
+        if (mealData.mealCOB > 0.0 && explicitFoodType != null) return 1.0
+        if (rescueFastRebound) return 0.15
+
+        val sustainedRiseScore = listOf(
+            if (delta >= 2.0f) 0.25 else 0.0,
+            if (shortAvgDelta >= 1.0f) 0.25 else 0.0,
+            if (longAvgDelta >= 0.7f) 0.20 else 0.0,
+            if (mealData.slopeFromMinDeviation >= 0.8) 0.20 else 0.0,
+            if (decceleratingUp == 0 && acceleratingDown == 0) 0.10 else 0.0
+        ).sum()
+        val recentLowPenalty = if (bg < 95.0 || lastHourTIRLow > 0.0 || lastHourTIRLow100 > 0.0) 0.35 else 0.0
+        val freshSmbPenalty = if (freshSmbPressureUnits() >= 0.2) 0.25 else 0.0
+        val cobSupport = if (mealData.mealCOB > 0.0) 0.20 else 0.0
+
+        return (sustainedRiseScore + cobSupport - recentLowPenalty - freshSmbPenalty).coerceIn(0.0, 1.0)
+    }
+
+    private fun explicitCarbEntryActive(mealData: MealData): Boolean =
+        mealData.mealCOB > 0.0 || aimiMealAssist.activeEpisode()?.selectedFoodType != null
+
+    private fun rescueFastSmbCap(): Float = when {
+        bg < 140.0 -> 0f
+        bg < 180.0 -> 0.3f
+        else -> 0.5f
+    }
+
+    private fun earlyOverdeliverySmbCap(mealData: MealData): Double? {
+        val noActiveMealMode = !mealTime &&
+            !bfastTime &&
+            !lunchTime &&
+            !dinnerTime &&
+            !highCarbTime &&
+            !snackTime
+        val noVisibleCarbTail = mealData.mealCOB <= 5.0
+        val smallActiveCarbTail = mealData.mealCOB > 0.0 && mealData.mealCOB <= 6.0
+        val freshSmb = lastsmbtime in 0..35 && lastBolusSMBUnit >= 0.3f
+        val strongRecentSmb = lastsmbtime in 0..60 && lastBolusSMBUnit >= 0.8f
+        val insulinPressure = iob >= 1.0f || freshSmb || strongRecentSmb
+        val fallingOrTurningDown = delta <= -1.0f ||
+            shortAvgDelta <= -0.5f ||
+            decceleratingUp == 1 ||
+            acceleratingDown == 1
+        val forecastNearLow = minOf(predictedBg.toDouble(), eventualBG) < 125.0
+        val notYetLowButVulnerable = bg in 90.0..170.0
+        val explicitFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType?.lowercase()
+        val explicitlySlowCarbs = explicitFoodType == "slow"
+        val sharpSmallTailRise = noActiveMealMode &&
+            smallActiveCarbTail &&
+            !explicitlySlowCarbs &&
+            bg in 100.0..170.0 &&
+            delta >= 3.0f &&
+            shortAvgDelta >= 2.0f
+        val repeatSmbOnSmallTail = noActiveMealMode &&
+            smallActiveCarbTail &&
+            !explicitlySlowCarbs &&
+            strongRecentSmb &&
+            bg < 180.0 &&
+            (delta >= 0.0f || shortAvgDelta >= 0.0f)
+
+        if (noActiveMealMode &&
+            noVisibleCarbTail &&
+            insulinPressure &&
+            notYetLowButVulnerable &&
+            (fallingOrTurningDown || forecastNearLow)
+        ) {
+            return 0.0
+        }
+
+        if (repeatSmbOnSmallTail) {
+            return 0.0
+        }
+
+        if (sharpSmallTailRise) {
+            return 0.3
+        }
+
+        return null
+    }
+
+    private fun isEarlyOverdeliveryRisk(mealData: MealData): Boolean =
+        earlyOverdeliverySmbCap(mealData) != null
+
+    private fun earlyOverdeliveryBasalRate(profileCurrentBasal: Double): Double =
+        if (delta < 0.0f || minOf(predictedBg.toDouble(), eventualBG) < 120.0) 0.0 else profileCurrentBasal
+
     fun appendCompactLog(
         reason: StringBuilder,
         peakTime: Double,
@@ -2591,14 +2701,23 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         iobArray: Array<IobTotal>,
         finalSensitivity: Double,
         cobG: Double,
+        mealData: MealData,
 
         profile: OapsProfileAimi,
         rT: RT,
-        delta: Double
+        delta: Double,
+        rescueFastActive: Boolean = false
     ): PredictionResult {
-        consoleLog.add("Debug: computePkpdPredictions called with delta=$delta")
+        consoleLog.add("Расчет прогноза PKPD: delta=$delta")
         val selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
-        selectedFoodType?.let { consoleLog.add("Meal episode food type -> $it") }
+        val uamConfidence = unannouncedFoodConfidence(mealData, rescueFastActive)
+        val freshSmbPressure = freshSmbPressureUnits()
+        selectedFoodType?.let { consoleLog.add("Тип углеводов, выбранный пользователем: $it. Введенные углеводы имеют приоритет.") }
+        if (rescueFastActive) consoleLog.add("Распознано: быстрый спасательный отскок. Рост будет считаться коротким, без длинного хвоста обычной невведенной еды.")
+        consoleLog.add(
+            "Уверенность в невведенной еде: ${"%.0f".format(uamConfidence * 100)}% | " +
+                "свежий SMB за 60 мин: ${"%.2f".format(freshSmbPressure)} U"
+        )
         val advancedPredictions = try {
             AdvancedPredictionEngine.predict(
                 currentBG = currentBg,
@@ -2607,10 +2726,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 cobG = cobG,
                 profile = profile,
                 selectedFoodType = selectedFoodType,
-                delta = delta
+                delta = delta,
+                rescueFastActive = rescueFastActive,
+                uamConfidence = uamConfidence,
+                explicitCarbEntry = explicitCarbEntryActive(mealData),
+                freshSmbPressureU = freshSmbPressure
             )
         } catch (e: Exception) {
-            consoleLog.add("Error in AdvancedPredictionEngine: ${e.message}")
+            consoleLog.add("Ошибка расширенного прогноза: ${e.message}")
             // Fallback: flat prediction
             List(48) { currentBg }
         }
@@ -2627,7 +2750,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 
         val eventual = intsPredictions.lastOrNull()?.toDouble() ?: currentBg
         consoleLog.add(
-            "PKPD predictions → eventual=${"%.0f".format(eventual)} mg/dL from ${intsPredictions.size} steps"
+            "Прогноз PKPD → итог=${"%.0f".format(eventual)} mg/dL, шагов=${intsPredictions.size}"
         )
         return PredictionResult(eventual, intsPredictions)
     }
@@ -2637,6 +2760,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         iobArray: Array<IobTotal>,
         finalSensitivity: Double,
         cobG: Double,
+        mealData: MealData,
         profile: OapsProfileAimi,
         rT: RT,
         delta: Double,
@@ -2648,9 +2772,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         piShare: Double,
         highBgOverrideUsed: Boolean,
         observedCarbImpactMgdlPer5m: Double,
-        remainingCiPeakMgdlPer5m: Double
+        remainingCiPeakMgdlPer5m: Double,
+        rescueFastActive: Boolean = false
     ): PredictionResult {
         val selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
+        val uamConfidence = unannouncedFoodConfidence(mealData, rescueFastActive)
+        val freshSmbPressure = freshSmbPressureUnits()
         val advancedPredictions = try {
             AdvancedPredictionEngine.predict(
                 currentBG = currentBg,
@@ -2669,10 +2796,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 highBgOverrideUsed = highBgOverrideUsed,
                 safetyMechanism = rT.safetyMechanism,
                 observedCarbImpactMgdlPer5m = observedCarbImpactMgdlPer5m,
-                remainingCiPeakMgdlPer5m = remainingCiPeakMgdlPer5m
+                remainingCiPeakMgdlPer5m = remainingCiPeakMgdlPer5m,
+                rescueFastActive = rescueFastActive,
+                uamConfidence = uamConfidence,
+                explicitCarbEntry = explicitCarbEntryActive(mealData),
+                freshSmbPressureU = freshSmbPressure
             )
         } catch (e: Exception) {
-            consoleLog.add("Error in decision-aware forecast: ${e.message}")
+            consoleLog.add("Ошибка прогноза после SMB: ${e.message}")
             List(48) { currentBg }
         }
 
@@ -2687,9 +2818,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         val eventual = intsPredictions.lastOrNull()?.toDouble() ?: currentBg
         consoleLog.add(
-            "Decision-aware forecast → eventual=${"%.0f".format(eventual)} mg/dL " +
-                "(SMB=${"%.2f".format(plannedSmbU)}U, rate=${"%.2f".format(plannedRateUph ?: profileBasalUph)}U/h, " +
-                "mealFactor=${"%.2f".format(mealFactorApplied)}, MPC=${"%.0f".format(mpcShare * 100)}%, PI=${"%.0f".format(piShare * 100)}%)"
+            "Прогноз после SMB → итог=${"%.0f".format(eventual)} mg/dL " +
+                "(SMB=${"%.2f".format(plannedSmbU)}U, базал=${"%.2f".format(plannedRateUph ?: profileBasalUph)}U/h, " +
+                "еда=${"%.2f".format(mealFactorApplied)}, MPC=${"%.0f".format(mpcShare * 100)}%, PI=${"%.0f".format(piShare * 100)}%, " +
+                "уверенность в невведенной еде=${"%.0f".format(uamConfidence * 100)}%, свежий SMB=${"%.2f".format(freshSmbPressure)}U)"
         )
         return PredictionResult(eventual, intsPredictions)
     }
@@ -3189,6 +3321,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val pbolusAS: Double = preferences.get(DoubleKey.OApsAIMIautodrivesmallPrebolus)
         val reason = StringBuilder()
         val recentBGs = getRecentBGs()
+        val rescueFastRebound = isRescueFastRebound(mealData)
+        if (rescueFastRebound) {
+            consoleLog.add("Распознано: быстрый спасательный отскок. Включена короткая модель быстрых углеводов.")
+            rT.reason.append(" | Быстрый спасательный отскок")
+        }
         val bgTrend = calculateBgTrend(recentBGs, reason)
         val autodriveCondition = adjustAutodriveCondition(bgTrend, predictedBg, combinedDelta.toFloat(),reason)
         if (bg > 100 && predictedBg > 140 && !nightbis && !hasReceivedPbolusMInLastHour(pbolusAS) && autodrive && detectMealOnset(delta, predicted.toFloat(), bgAcceleration.toFloat(), predictedBg, targetBg) && modesCondition) {
@@ -3852,15 +3989,30 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             iobArray = iob_data_array,
             finalSensitivity = sens,
             cobG = mealData.mealCOB,
+            mealData = mealData,
 
             profile = profile,
             rT = rT,
-            delta = delta.toDouble()
+            delta = delta.toDouble(),
+            rescueFastActive = rescueFastRebound
         )
         this.eventualBG = pkpdPredictions.eventual
         this.predictedBg = pkpdPredictions.eventual.toFloat()
         rT.eventualBG = pkpdPredictions.eventual
         rT.predictedBG = predictedBg.toDouble()
+        val earlyOverdeliverySmbCap = earlyOverdeliverySmbCap(mealData)
+        val earlyOverdeliveryRisk = earlyOverdeliverySmbCap != null
+        if (earlyOverdeliveryRisk) {
+            consoleLog.add(
+                "Защита от раннего перелива активна: BG=${"%.0f".format(bg)}, " +
+                    "delta=${"%.1f".format(delta)}, short=${"%.1f".format(shortAvgDelta)}, " +
+                    "IOB=${"%.2f".format(iob)}, свежий SMB=${"%.2f".format(lastBolusSMBUnit)}U/${lastsmbtime}м, " +
+                    "COB=${"%.1f".format(mealData.mealCOB)}, " +
+                    "лимит SMB=${"%.2f".format(earlyOverdeliverySmbCap ?: 0.0)}U, " +
+                    "прогноз=${"%.0f".format(predictedBg)}, итог=${"%.0f".format(eventualBG)}"
+            )
+            rT.reason.append(" | Защита от раннего перелива")
+        }
         //calculate BG impact: the amount BG "should" be rising or falling based on insulin activity alone
         val bgi = round((-iob_data.activity * sens * 5), 2)
         // project deviations for 30 minutes
@@ -4116,15 +4268,27 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         
         // 🔒 SAFETY CHECK FINAL : On applique le cap strict après le potentiel boost de Reactivité
-        val currentMaxSmb = if (bg > 120 && !honeymoon && mealData.slopeFromMinDeviation >= 1.0) maxSMBHB else maxSMB
+        val currentMaxSmb = if (bg > 120 && !honeymoon && mealData.slopeFromMinDeviation >= 1.0 && !rescueFastRebound) maxSMBHB else maxSMB
+        val rescueAdjustedMaxSmb = if (rescueFastRebound) min(currentMaxSmb.toFloat(), rescueFastSmbCap()).toDouble() else currentMaxSmb
+        val safetyAdjustedMaxSmb = earlyOverdeliverySmbCap ?: rescueAdjustedMaxSmb
         val beforeCap = smbToGive
         smbToGive = capSmbDose(
             proposedSmb = smbToGive,
             bg = bg,
-            maxSmbConfig = currentMaxSmb,
+            maxSmbConfig = safetyAdjustedMaxSmb,
             iob = iob.toDouble(),
             maxIob = preferences.get(DoubleKey.ApsSmbMaxIob)
         )
+        if (earlyOverdeliveryRisk && smbToGive < beforeCap) {
+            rT.reason.append(
+                " | SMB ограничен защитой от раннего перелива: " +
+                    "${"%.2f".format(beforeCap)} -> ${"%.2f".format(smbToGive)} " +
+                    "(лимит ${"%.2f".format(earlyOverdeliverySmbCap ?: 0.0)}U)"
+            )
+        }
+        if (rescueFastRebound && smbToGive < beforeCap) {
+            rT.reason.append(" | SMB ограничен быстрым спасательным отскоком: ${"%.2f".format(beforeCap)} -> ${"%.2f".format(smbToGive)}")
+        }
         if (smbToGive < beforeCap) {
             rT.reason.append(" | 🛡️ Cap: ${"%.2f".format(beforeCap)} → ${"%.2f".format(smbToGive)}")
         }
@@ -4158,6 +4322,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         )
         rT.reason.append(savedReason)
         rT.predBGs = savedPredBGs
+        if (earlyOverdeliveryRisk) {
+            val guardRate = earlyOverdeliveryBasalRate(profile_current_basal)
+            rT.rate = guardRate
+            rT.deliverAt = deliverAt
+            rT.duration = 30
+            rT.reason.append(" | Базал ограничен защитой от раннего перелива: ${"%.2f".format(guardRate)} U/h")
+            return rT
+        }
         var rate = when {
             snackTime && snackrunTime in 0..30 && delta < 15 -> calculateRate(basal, profile_current_basal, 4.0, "AI Force basal because mealTime $snackrunTime.", currenttemp, rT)
             mealTime && mealruntime in 0..30 && delta < 15 -> calculateRate(basal, profile_current_basal, 10.0, "AI Force basal because mealTime $mealruntime.", currenttemp, rT)
@@ -4191,6 +4363,13 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             // 🔥 General Hyper Kicker (Non-Meal)
             // Catch-all for late rises outside specific meal windows
             (bg > target_bg + 30 && (delta >= 0.3 || shortAvgDelta >= 0.2)) -> {
+                val hyperForecastFloor = minOf(predictedBg.toDouble(), eventualBG, rT.minGuardBG ?: bg)
+                if (hyperForecastFloor <= target_bg || rT.safetyMechanism?.contains("Hypo", ignoreCase = true) == true) {
+                    rT.reason.appendLine(
+                        "Global Hyper Kicker заблокирован: прогноз/MinGuard=${"%.0f".format(hyperForecastFloor)} ≤ цель=${"%.0f".format(target_bg)}"
+                    )
+                    null
+                } else {
                 val maxBasalPref = preferences.get(DoubleKey.autodriveMaxBasal) // Absolute max
                 val safeMax = if (maxBasalPref > 0) maxBasalPref else profile_current_basal * 3.0
                 
@@ -4206,6 +4385,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 if (boostedRate > profile_current_basal * 1.1) {
                     calculateRate(basal, profile_current_basal, boostedRate/profile_current_basal, "Global Hyper Kicker (Active)", currenttemp, rT)
                 } else null
+                }
             }
 
             fastingTime -> calculateRate(profile_current_basal, profile_current_basal, delta.toDouble(), "AI Force basal because fastingTime", currenttemp, rT)
@@ -4216,7 +4396,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             rT.rate = it
             rT.deliverAt = deliverAt
             rT.duration = 30
-            return rT
+            consoleLog.add(
+                "Предварительно выбран временный базал ${"%.2f".format(it)} U/h; расчет SMB продолжается."
+            )
         }
 
         rT.reason.appendLine( //"🚗 Autodrive: $autodrive | Mode actif: ${isAutodriveModeCondition(delta, autodrive, mealData.slopeFromMinDeviation, bg.toFloat(), predictedBg, reason)} | " +
@@ -4286,7 +4468,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             cobG = mealData.mealCOB,
             profile = profile,
             selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType,
-            delta = delta.toDouble()
+            delta = delta.toDouble(),
+            rescueFastActive = rescueFastRebound,
+            uamConfidence = unannouncedFoodConfidence(mealData, rescueFastRebound),
+            explicitCarbEntry = explicitCarbEntryActive(mealData),
+            freshSmbPressureU = freshSmbPressureUnits()
         )
         val sanitizedPredictions = advancedPredictions.map { round(min(401.0, max(39.0, it)), 0) }
         val intsPredictions = sanitizedPredictions.map { it.toInt() }
@@ -4297,7 +4483,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             ZT  = intsPredictions
             UAM = intsPredictions
         }
-        consoleLog.add("Prédiction avancée avec ISF final de ${"%.1f".format(sens)} (PKPD cache reused)")
+        consoleLog.add("Расширенный прогноз с итоговым ISF ${"%.1f".format(sens)}")
 //fin predictions
 ////////////////////////////////////////////
 //estimation des glucides nécessaires si risque hypo
@@ -4395,29 +4581,121 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
 
         fun finalizeDecisionAwareForecast(result: RT): RT {
-            val decisionAwarePredictions = recomputeDecisionAwarePredictions(
-                currentBg = bg,
-                iobArray = iob_data_array,
-                finalSensitivity = sens,
-                cobG = mealData.mealCOB,
-                profile = profile,
-                rT = result,
-                delta = delta.toDouble(),
-                plannedSmbU = result.units ?: 0.0,
-                plannedRateUph = result.rate,
-                profileBasalUph = profile_current_basal,
-                mealFactorApplied = smbExecution.mealFactorApplied,
-                mpcShare = smbExecution.mpcShare,
-                piShare = smbExecution.piShare,
-                highBgOverrideUsed = smbExecution.highBgOverrideUsed,
-                observedCarbImpactMgdlPer5m = ci,
-                remainingCiPeakMgdlPer5m = remainingCIpeak
-            )
-            eventualBG = decisionAwarePredictions.eventual
-            predictedBg = decisionAwarePredictions.eventual.toFloat()
-            result.eventualBG = eventualBG
-            result.predictedBG = predictedBg.toDouble()
-            result.minGuardBG = minOf(bg, predictedBg.toDouble(), eventualBG)
+            fun recomputeForCurrentDecision(): PredictionResult =
+                recomputeDecisionAwarePredictions(
+                    currentBg = bg,
+                    iobArray = iob_data_array,
+                    finalSensitivity = sens,
+                    cobG = mealData.mealCOB,
+                    mealData = mealData,
+                    profile = profile,
+                    rT = result,
+                    delta = delta.toDouble(),
+                    plannedSmbU = result.units ?: 0.0,
+                    plannedRateUph = result.rate,
+                    profileBasalUph = profile_current_basal,
+                    mealFactorApplied = smbExecution.mealFactorApplied,
+                    mpcShare = smbExecution.mpcShare,
+                    piShare = smbExecution.piShare,
+                    highBgOverrideUsed = smbExecution.highBgOverrideUsed,
+                    observedCarbImpactMgdlPer5m = ci,
+                    remainingCiPeakMgdlPer5m = remainingCIpeak,
+                    rescueFastActive = rescueFastRebound
+                )
+
+            fun applyDecisionAwarePredictions(predictions: PredictionResult) {
+                eventualBG = predictions.eventual
+                predictedBg = predictions.eventual.toFloat()
+                result.eventualBG = eventualBG
+                result.predictedBG = predictedBg.toDouble()
+                result.minGuardBG = minOf(bg, predictedBg.toDouble(), eventualBG)
+            }
+
+            applyDecisionAwarePredictions(recomputeForCurrentDecision())
+            var decisionChangedAfterForecast = false
+            val decisionMinGuardBG = result.minGuardBG ?: minOf(bg, predictedBg.toDouble(), eventualBG)
+            val postDecisionForecast = minOf(predictedBg.toDouble(), eventualBG)
+            if (postDecisionForecast < target_bg && bg < 180.0) {
+                val beforeUnits = result.units ?: 0.0
+                val beforeRate = result.rate ?: 0.0
+                if (beforeUnits > 0.0 || beforeRate > profile_current_basal) {
+                    result.units = 0.0
+                    result.insulinReq = 0.0
+                    if (beforeRate > profile_current_basal) {
+                        result.rate = profile_current_basal
+                        result.duration = 30
+                    }
+                    decisionChangedAfterForecast = true
+                    result.safetyMechanism = "Прогноз после SMB ниже цели"
+                    result.reason.append(
+                        " | SMB уменьшен: прогноз после подачи ${"%.0f".format(postDecisionForecast)} ниже цели ${"%.0f".format(target_bg)}, " +
+                            "SMB ${"%.2f".format(beforeUnits)} -> 0.00, " +
+                            "базал ${"%.2f".format(beforeRate)} -> ${"%.2f".format(result.rate ?: beforeRate)}"
+                    )
+                    consoleLog.add(
+                        "SMB уменьшен: прогноз после подачи ${"%.0f".format(postDecisionForecast)} ниже цели ${"%.0f".format(target_bg)}, " +
+                            "SMB ${"%.2f".format(beforeUnits)} -> 0.00, базал ${"%.2f".format(beforeRate)} -> ${"%.2f".format(result.rate ?: beforeRate)}"
+                    )
+                }
+            }
+            if (decisionMinGuardBG < 100.0 && bg < 180.0) {
+                val beforeUnits = result.units ?: 0.0
+                val beforeRate = result.rate ?: 0.0
+                if (beforeUnits > 0.0 || beforeRate > profile_current_basal) {
+                    result.units = 0.0
+                    result.rate = 0.0
+                    result.duration = 30
+                    result.insulinReq = 0.0
+                    decisionChangedAfterForecast = true
+                    result.safetyMechanism = "Жесткая защита прогноза после подачи"
+                    result.reason.append(
+                        " | Жесткая защита прогноза после подачи: minGuardBG=${"%.0f".format(decisionMinGuardBG)}, " +
+                            "SMB ${"%.2f".format(beforeUnits)} -> 0.00, " +
+                            "базал ${"%.2f".format(beforeRate)} -> 0.00"
+                    )
+                    consoleLog.add(
+                        "Жесткая защита прогноза после подачи: minGuardBG=${"%.0f".format(decisionMinGuardBG)}, " +
+                            "SMB ${"%.2f".format(beforeUnits)} -> 0.00, базал ${"%.2f".format(beforeRate)} -> 0.00"
+                    )
+                }
+            }
+            if (decisionChangedAfterForecast) {
+                applyDecisionAwarePredictions(recomputeForCurrentDecision())
+            }
+            val refreshedMinGuardBG = result.minGuardBG ?: minOf(bg, predictedBg.toDouble(), eventualBG)
+            val refreshedPostDecisionForecast = minOf(predictedBg.toDouble(), eventualBG)
+            val forecastBelowTarget =
+                refreshedMinGuardBG < target_bg - 10.0 || refreshedPostDecisionForecast < target_bg - 10.0
+            val currentBelowWorkingTarget = bg < target_bg - 15.0 || bg < 90.0
+            val noConfidentRecovery = delta.toDouble() <= 0.5 || shortAvgDelta.toDouble() <= 0.5
+            val beforeBasalGuardRate = result.rate ?: profile_current_basal
+            val basalStillActive = beforeBasalGuardRate > profile_current_basal * 0.50
+            if (forecastBelowTarget && currentBelowWorkingTarget && noConfidentRecovery && basalStillActive && bg < 180.0) {
+                val cappedRate =
+                    if (bg < 90.0 && (delta.toDouble() <= -1.0 || refreshedMinGuardBG < 90.0)) {
+                        0.0
+                    } else {
+                        roundBasal(profile_current_basal * 0.35)
+                    }
+                if (beforeBasalGuardRate > cappedRate + 0.01) {
+                    result.rate = cappedRate
+                    result.duration = 30
+                    result.safetyMechanism = "Защита базала по прогнозной линии"
+                    result.reason.append(
+                        " | Защита базала по прогнозной линии: BG=${"%.0f".format(bg)}, " +
+                            "delta=${"%.1f".format(delta.toDouble())}, прогноз=${"%.0f".format(refreshedPostDecisionForecast)}, " +
+                            "MinGuardBG=${"%.0f".format(refreshedMinGuardBG)}, цель=${"%.0f".format(target_bg)}, " +
+                            "базал ${"%.2f".format(beforeBasalGuardRate)} -> ${"%.2f".format(cappedRate)}"
+                    )
+                    consoleLog.add(
+                        "Защита базала по прогнозной линии: BG=${"%.0f".format(bg)}, " +
+                            "delta=${"%.1f".format(delta.toDouble())}, прогноз=${"%.0f".format(refreshedPostDecisionForecast)}, " +
+                            "MinGuardBG=${"%.0f".format(refreshedMinGuardBG)}, цель=${"%.0f".format(target_bg)}, " +
+                            "базал ${"%.2f".format(beforeBasalGuardRate)} -> ${"%.2f".format(cappedRate)}"
+                    )
+                    applyDecisionAwarePredictions(recomputeForCurrentDecision())
+                }
+            }
             val sanitizedReason = result.reason.toString()
                 .replace(Regex("""Predicted BG:\s*[-−]?\d+(?:[.,]\d+)?"""), "Predicted BG: ${"%.0f".format(predictedBg)}")
                 .replace(Regex("""minBG=\s*[-−]?\d+(?:[.,]\d+)?"""), "minBG=${"%.0f".format(result.minGuardBG)}")
@@ -4426,12 +4704,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             result.reason = StringBuilder(sanitizedReason)
             result.reason.appendLine()
             result.reason.append(
-                "🔚 Final decision-aware forecast: " +
-                    "Predicted BG: ${"%.0f".format(predictedBg)} | " +
-                    "Eventual BG: ${"%.0f".format(eventualBG)} | " +
+                "🔚 Итоговый прогноз после решения: " +
+                    "прогноз: ${"%.0f".format(predictedBg)} | " +
+                    "итог: ${"%.0f".format(eventualBG)} | " +
                     "MinGuardBG: ${"%.0f".format(result.minGuardBG)} | " +
                     "SMB: ${"%.2f".format(result.units ?: 0.0)} U | " +
-                    "TBR: ${"%.2f".format(result.rate)} U/h × ${result.duration}m"
+                    "базал: ${"%.2f".format(result.rate)} U/h × ${result.duration}m"
             )
             return result
         }
