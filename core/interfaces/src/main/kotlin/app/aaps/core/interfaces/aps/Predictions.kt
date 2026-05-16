@@ -10,5 +10,6 @@ data class Predictions(
     var aCOB: List<Int>? = null, // AMA only
     var UAM: List<Int>? = null,
     var AIMI_FINAL: List<Int>? = null,
+    var AIMI_BEFORE_DECISION: List<Int>? = null,
     var AIMI_MOMENTUM_SOFT: List<Int>? = null
 )

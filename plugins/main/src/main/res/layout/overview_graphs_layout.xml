@@ -7,13 +7,12 @@
     android:orientation="vertical">
 
     <RelativeLayout
-        android:layout_width="wrap_content"
-        android:layout_height="0dp"
-        android:layout_weight="1">
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
 
         <com.jjoe64.graphview.GraphView
             android:id="@+id/bg_graph"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="200dp"
             android:contentDescription="@string/a11y_graph" />
 
@@ -41,6 +40,13 @@
             app:srcCompat="@drawable/ic_arrow_drop_down_white_24dp" />
 
     </RelativeLayout>
+
+    <com.jjoe64.graphview.GraphView
+        android:id="@+id/full_prediction_graph"
+        android:layout_width="match_parent"
+        android:layout_height="96dp"
+        android:visibility="gone"
+        android:contentDescription="@string/a11y_graph" />
 
     <LinearLayout
         android:id="@+id/secondary_graphs"

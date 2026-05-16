@@ -60,6 +60,8 @@ class OverviewDataImpl @Inject constructor(
         bgReadingGraphSeries = PointsWithLabelGraphSeries<DataPointWithLabelInterface>()
         predictionsGraphSeries = PointsWithLabelGraphSeries<DataPointWithLabelInterface>()
         finalAimiPredictionGraphSeries = PointsWithLabelGraphSeries<DataPointWithLabelInterface>()
+        predictionValues = emptyList()
+        finalAimiPredictionValues = emptyList()
         baseBasalGraphSeries = LineGraphSeries<ScaledDataPoint>()
         tempBasalGraphSeries = LineGraphSeries<ScaledDataPoint>()
         basalLineGraphSeries = LineGraphSeries<ScaledDataPoint>()
@@ -192,6 +194,8 @@ class OverviewDataImpl @Inject constructor(
     override var bgReadingGraphSeries: SeriesData = PointsWithLabelGraphSeries<DataPointWithLabelInterface>()
     override var predictionsGraphSeries: SeriesData = PointsWithLabelGraphSeries<DataPointWithLabelInterface>()
     override var finalAimiPredictionGraphSeries: SeriesData = PointsWithLabelGraphSeries<DataPointWithLabelInterface>()
+    override var predictionValues: List<GV> = emptyList()
+    override var finalAimiPredictionValues: List<GV> = emptyList()
 
     override val basalScale = Scale()
     override var baseBasalGraphSeries: SeriesData = LineGraphSeries<ScaledDataPoint>()

@@ -26,6 +26,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import app.aaps.core.data.configuration.Constants
 import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.RM
+import app.aaps.core.data.time.T
 import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
@@ -118,6 +119,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.min
 import app.aaps.core.objects.wizard.BolusWizard
 import javax.inject.Provider
@@ -228,6 +230,10 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         binding.graphsLayout.bgGraph.gridLabelRenderer?.reloadStyles()
         binding.graphsLayout.bgGraph.gridLabelRenderer?.labelVerticalWidth = axisWidth
         binding.graphsLayout.bgGraph.layoutParams?.height = rh.dpToPx(skinProvider.activeSkin().mainGraphHeight)
+        binding.graphsLayout.fullPredictionGraph.gridLabelRenderer?.gridColor = rh.gac(context, app.aaps.core.ui.R.attr.graphGrid)
+        binding.graphsLayout.fullPredictionGraph.gridLabelRenderer?.reloadStyles()
+        binding.graphsLayout.fullPredictionGraph.gridLabelRenderer?.labelVerticalWidth = axisWidth
+        binding.graphsLayout.fullPredictionGraph.layoutParams?.height = rh.dpToPx(96)
 
         carbAnimation = binding.infoLayout.carbsIcon.background as AnimationDrawable?
         carbAnimation?.setEnterFadeDuration(1200)
@@ -404,6 +410,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             graph.setOnLongClickListener(null)
             graph.removeAllSeries()
         }
+        _binding?.graphsLayout?.fullPredictionGraph?.removeAllSeries()
         for (graph in secondaryGraphs) {
             graph.setOnLongClickListener(null)
             graph.removeAllSeries()
@@ -1162,6 +1169,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         graphData.formatAxis(overviewData.fromTime, overviewData.endTime)
 
         graphData.performUpdate()
+        updateFullPredictionGraph()
 
         // 2nd graphs
         prepareGraphsIfNeeded(menuChartSettings.size)
@@ -1230,6 +1238,37 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                 ).toVisibility()
             secondaryGraphsData[g].performUpdate()
         }
+    }
+
+    private fun updateFullPredictionGraph() {
+        val predictionBounds = fullPredictionBounds()
+        binding.graphsLayout.fullPredictionGraph.visibility = (predictionBounds != null).toVisibility()
+        if (predictionBounds == null) {
+            binding.graphsLayout.fullPredictionGraph.removeAllSeries()
+            return
+        }
+
+        val fullPredictionGraphData = graphDataProvider.get().with(binding.graphsLayout.fullPredictionGraph, overviewData)
+        fullPredictionGraphData.addInRangeArea(
+            predictionBounds.first,
+            predictionBounds.second,
+            preferences.get(UnitDoubleKey.OverviewLowMark),
+            preferences.get(UnitDoubleKey.OverviewHighMark)
+        )
+        fullPredictionGraphData.addFullPredictionReadings(context)
+        fullPredictionGraphData.addNowLine(dateUtil.now())
+        fullPredictionGraphData.setNumVerticalLabels()
+        fullPredictionGraphData.formatAxis(predictionBounds.first, predictionBounds.second)
+        fullPredictionGraphData.performUpdate()
+    }
+
+    private fun fullPredictionBounds(): Pair<Long, Long>? {
+        val points = overviewData.predictionValues + overviewData.finalAimiPredictionValues
+        if (points.isEmpty()) return null
+
+        val start = min(points.minOf { it.timestamp }, dateUtil.now()) - T.mins(5).msecs()
+        val end = max(points.maxOf { it.timestamp }, dateUtil.now()) + T.mins(5).msecs()
+        return start to end
     }
 
     private fun updateCalcProgress() {

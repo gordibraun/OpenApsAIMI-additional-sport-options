@@ -53,6 +53,8 @@ interface OverviewData {
     var bgReadingGraphSeries: SeriesData
     var predictionsGraphSeries: SeriesData
     var finalAimiPredictionGraphSeries: SeriesData
+    var predictionValues: List<GV>
+    var finalAimiPredictionValues: List<GV>
 
     val basalScale: Scale
     var baseBasalGraphSeries: SeriesData

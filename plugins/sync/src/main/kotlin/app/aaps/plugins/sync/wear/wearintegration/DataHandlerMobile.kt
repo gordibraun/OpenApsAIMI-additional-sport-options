@@ -1286,6 +1286,7 @@ class DataHandlerMobile @Inject constructor(
             SourceSensor.UAM_PREDICTION   -> rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
             SourceSensor.ZT_PREDICTION    -> rh.gac(context, app.aaps.core.ui.R.attr.ztColor)
             SourceSensor.AIMI_FINAL_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.aimiFinalPredictionColor)
+            SourceSensor.AIMI_BEFORE_DECISION_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.carbsColor)
             SourceSensor.AIMI_MOMENTUM_SOFT_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
             else                          -> rh.gac(context, app.aaps.core.ui.R.attr.defaultTextColor)
         }

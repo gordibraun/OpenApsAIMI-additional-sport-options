@@ -21,6 +21,8 @@ import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.utils.DateUtil
+import app.aaps.core.keys.UnitDoubleKey
+import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.target
 import app.aaps.core.objects.workflow.LoggingWorker
 import app.aaps.core.utils.receivers.DataWorkerStorage
@@ -28,7 +30,6 @@ import kotlinx.coroutines.Dispatchers
 import java.util.Calendar
 import javax.inject.Inject
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
@@ -50,6 +51,7 @@ class PreparePredictionsWorker(
     @Inject lateinit var profileUtil: ProfileUtil
     @Inject lateinit var rh: ResourceHelper
     @Inject lateinit var dateUtil: DateUtil
+    @Inject lateinit var preferences: Preferences
 
     class PreparePredictionsData(
         val overviewData: OverviewData
@@ -75,27 +77,42 @@ class PreparePredictionsWorker(
             it[Calendar.MINUTE] = 0
             it.add(Calendar.HOUR, 1)
         }
+        val graphCurrentEndTime = calendar.timeInMillis + 100000 // little bit more to avoid wrong rounding - GraphView specific
         if (predictionsAvailable && apsResult != null && menuChartSettings[0][OverviewMenus.CharType.PRE.ordinal]) {
-            var predictionHours = (ceil(apsResult.latestPredictionsTime - System.currentTimeMillis().toDouble()) / (60 * 60 * 1000)).toInt()
-            predictionHours = min(2, predictionHours)
-            predictionHours = max(0, predictionHours)
-            val hoursToFetch = data.overviewData.rangeToDisplay - predictionHours
-            data.overviewData.toTime = calendar.timeInMillis + 100000 // little bit more to avoid wrong rounding - GraphView specific
-            data.overviewData.fromTime = data.overviewData.toTime - T.hours(hoursToFetch.toLong()).msecs()
-            data.overviewData.endTime = data.overviewData.toTime + T.hours(predictionHours.toLong()).msecs()
+            val latestPredictionTime = latestVisiblePredictionTime(apsResult)
+            val predictionEndTime = max(graphCurrentEndTime, latestPredictionTime + T.mins(5).msecs())
+            val selectedRangeMs = T.hours(data.overviewData.rangeToDisplay.toLong()).msecs()
+            val futureWindowMs = max(0L, predictionEndTime - graphCurrentEndTime)
+            val minHistoryMs = min(T.hours(2).msecs(), selectedRangeMs)
+            val historyWindowMs = max(minHistoryMs, selectedRangeMs - futureWindowMs)
+
+            data.overviewData.toTime = graphCurrentEndTime
+            data.overviewData.fromTime = data.overviewData.toTime - historyWindowMs
+            data.overviewData.endTime = predictionEndTime
+
+            aapsLogger.debug(
+                LTag.WORKER,
+                "AIMI prediction graph axis shows full forecast: history=${historyWindowMs / T.hours(1).msecs()}h " +
+                    "future=${futureWindowMs / T.hours(1).msecs()}h " +
+                    "latest=${dateUtil.dateAndTimeString(latestPredictionTime)} " +
+                    "end=${dateUtil.dateAndTimeString(predictionEndTime)}"
+            )
         } else {
-            data.overviewData.toTime = calendar.timeInMillis + 100000 // little bit more to avoid wrong rounding - GraphView specific
+            data.overviewData.toTime = graphCurrentEndTime
             data.overviewData.fromTime = data.overviewData.toTime - T.hours(data.overviewData.rangeToDisplay.toLong()).msecs()
             data.overviewData.endTime = data.overviewData.toTime
         }
 
         val bgListArray: MutableList<DataPointWithLabelInterface> = ArrayList()
         val finalAimiListArray: MutableList<DataPointWithLabelInterface> = ArrayList()
+        val predictionValues = mutableListOf<app.aaps.core.data.model.GV>()
+        val finalAimiPredictionValues = mutableListOf<app.aaps.core.data.model.GV>()
+        val lowPredictionMarkMgdl = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), profileUtil.units)
         val predictions: MutableList<GlucoseValueDataPoint>? = if (predictionsAreStale) {
             mutableListOf()
         } else apsResult?.predictionsAsGv
             ?.map { bg ->
-                GlucoseValueDataPoint(bg, profileUtil, rh, dateUtil)
+                GlucoseValueDataPoint(bg, profileUtil, rh, dateUtil, lowPredictionMarkMgdl)
             }
             ?.toMutableList()
         if (predictions != null) {
@@ -106,12 +123,18 @@ class PreparePredictionsWorker(
                     prediction.data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION_STALE
                 ) {
                     finalAimiListArray.add(prediction)
+                    finalAimiPredictionValues.add(prediction.data)
                 }
-                else bgListArray.add(prediction)
+                else {
+                    bgListArray.add(prediction)
+                    predictionValues.add(prediction.data)
+                }
             }
         }
         data.overviewData.predictionsGraphSeries = PointsWithLabelGraphSeries(Array(bgListArray.size) { i -> bgListArray[i] })
         data.overviewData.finalAimiPredictionGraphSeries = PointsWithLabelGraphSeries(Array(finalAimiListArray.size) { i -> finalAimiListArray[i] })
+        data.overviewData.predictionValues = predictionValues
+        data.overviewData.finalAimiPredictionValues = finalAimiPredictionValues
         val firstFinalPoint = finalAimiListArray.firstOrNull() as? GlucoseValueDataPoint
         val lastFinalPoint = finalAimiListArray.lastOrNull() as? GlucoseValueDataPoint
         aapsLogger.debug(
@@ -211,5 +234,11 @@ class PreparePredictionsWorker(
 
     private fun predictionTimestamp(apsResult: app.aaps.core.interfaces.aps.APSResult): Long =
         apsResult.glucoseStatus?.date ?: apsResult.date
+
+    private fun latestVisiblePredictionTime(apsResult: app.aaps.core.interfaces.aps.APSResult): Long =
+        max(
+            apsResult.latestPredictionsTime,
+            apsResult.predictionsAsGv.maxOfOrNull { it.timestamp } ?: apsResult.latestPredictionsTime
+        )
 
 }

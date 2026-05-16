@@ -2619,6 +2619,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val intsPredictions = sanitizePredictionInts(advancedPredictions)
         rT.predBGs = Predictions().apply {
             AIMI_FINAL = intsPredictions
+            AIMI_BEFORE_DECISION = intsPredictions
             IOB = intsPredictions
             COB = intsPredictions
             ZT = intsPredictions
@@ -2689,8 +2690,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             List(48) { currentBg }
         }
         val intsPredictions = sanitizePredictionInts(advancedPredictions)
+        val beforeDecisionPrediction = rT.predBGs?.AIMI_BEFORE_DECISION
         rT.predBGs = (rT.predBGs ?: Predictions()).apply {
             AIMI_FINAL = intsPredictions
+            AIMI_BEFORE_DECISION = beforeDecisionPrediction?.takeIf { it.isNotEmpty() } ?: AIMI_BEFORE_DECISION ?: intsPredictions
             IOB = intsPredictions
             COB = intsPredictions
             ZT = intsPredictions
@@ -2706,6 +2709,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         consoleLog.add(
             "Единый momentum после решения: +60=${intsPredictions.getOrNull(12) ?: intsPredictions.lastOrNull()} " +
                 "| SMB=${"%.2f".format(plannedSmbU)}U | быстрый отскок=${if (rescueFastActive) "да" else "нет"}"
+        )
+        consoleLog.add(
+            "Честный график: AIMI до новой подачи сохранен отдельно, AIMI_FINAL показывает прогноз после финального решения."
         )
         return PredictionResult(eventual, intsPredictions)
     }

@@ -19,7 +19,9 @@ import app.aaps.core.graph.data.ScaledDataPoint
 import app.aaps.core.graph.data.TimeAsXAxisLabelFormatter
 import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.profile.ProfileFunction
+import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.resources.ResourceHelper
+import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.Round
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
@@ -34,8 +36,10 @@ import kotlin.math.max
 @Suppress("UNCHECKED_CAST")
 class GraphData @Inject constructor(
     private val profileFunction: ProfileFunction,
+    private val profileUtil: ProfileUtil,
     private val preferences: Preferences,
-    private val rh: ResourceHelper
+    private val rh: ResourceHelper,
+    private val dateUtil: DateUtil
 ) {
 
     private var maxY = Double.MIN_VALUE
@@ -60,16 +64,53 @@ class GraphData @Inject constructor(
             if (units == GlucoseUnit.MGDL) 180.0 else 10.0
         } else overviewData.maxBgValue
         minY = 0.0
-        addSeries(overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-        addSeries(overviewData.finalAimiPredictionGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-        if (addPredictions) addSeries(overviewData.predictionsGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-        (overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).setOnDataPointTapListener { _, dataPoint ->
+        val bgSeries = overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
+        val finalAimiSeries = overviewData.finalAimiPredictionGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
+        val predictionSeries = overviewData.predictionsGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
+
+        maxY = max(maxY, finalAimiSeries.highestValueY)
+        if (addPredictions) maxY = max(maxY, predictionSeries.highestValueY)
+
+        addSeries(bgSeries)
+        addSeries(finalAimiSeries)
+        if (addPredictions) addSeries(predictionSeries)
+        bgSeries.setOnDataPointTapListener { _, dataPoint ->
             if (dataPoint is GlucoseValueDataPoint) ToastUtils.infoToast(context, dataPoint.label)
         }
-        (overviewData.finalAimiPredictionGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).setOnDataPointTapListener { _, dataPoint ->
+        finalAimiSeries.setOnDataPointTapListener { _, dataPoint ->
             if (dataPoint is GlucoseValueDataPoint) ToastUtils.infoToast(context, dataPoint.label)
         }
     }
+
+    fun addFullPredictionReadings(context: Context?) {
+        val lowMarkMgdl = lowPredictionMarkMgdl()
+        val predictionPoints = overviewData.predictionValues.map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
+        val finalAimiPoints = overviewData.finalAimiPredictionValues.map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
+        val allPoints = predictionPoints + finalAimiPoints
+        if (allPoints.isEmpty()) {
+            maxY = if (units == GlucoseUnit.MGDL) 180.0 else 10.0
+            minY = 0.0
+            return
+        }
+
+        val padding = if (units == GlucoseUnit.MGDL) 10.0 else 0.5
+        maxY = maxOf(allPoints.maxOf { it.y }, preferences.get(UnitDoubleKey.OverviewHighMark)) + padding
+        minY = maxOf(0.0, minOf(allPoints.minOf { it.y }, preferences.get(UnitDoubleKey.OverviewLowMark)) - padding)
+
+        val predictionSeries = PointsWithLabelGraphSeries(Array(predictionPoints.size) { i -> predictionPoints[i] })
+        val finalAimiSeries = PointsWithLabelGraphSeries(Array(finalAimiPoints.size) { i -> finalAimiPoints[i] })
+        addSeries(predictionSeries)
+        addSeries(finalAimiSeries)
+        predictionSeries.setOnDataPointTapListener { _, dataPoint ->
+            if (dataPoint is GlucoseValueDataPoint) ToastUtils.infoToast(context, dataPoint.label)
+        }
+        finalAimiSeries.setOnDataPointTapListener { _, dataPoint ->
+            if (dataPoint is GlucoseValueDataPoint) ToastUtils.infoToast(context, dataPoint.label)
+        }
+    }
+
+    private fun lowPredictionMarkMgdl(): Double =
+        profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), units)
 
     fun addInRangeArea(fromTime: Long, toTime: Long, lowLine: Double, highLine: Double) {
         val inRangeAreaDataPoints = arrayOf(

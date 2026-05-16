@@ -3,7 +3,9 @@ package app.aaps.plugins.main.di
 import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.overview.OverviewMenus
 import app.aaps.core.interfaces.profile.ProfileFunction
+import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.resources.ResourceHelper
+import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.plugins.main.general.dashboard.AdjustmentDetailsActivity
 import app.aaps.plugins.main.general.dashboard.DashboardFragment
@@ -42,9 +44,11 @@ abstract class OverviewModule {
         @Provides
         fun providesGraphData(
             profileFunction: ProfileFunction,
+            profileUtil: ProfileUtil,
             preferences: Preferences,
-            rh: ResourceHelper
-        ): GraphData = GraphData(profileFunction, preferences, rh)
+            rh: ResourceHelper,
+            dateUtil: DateUtil
+        ): GraphData = GraphData(profileFunction, profileUtil, preferences, rh, dateUtil)
     }
 
     @Module
