@@ -191,6 +191,20 @@ class DetermineBasalResult @Inject constructor(
                     )
                 }
             }
+            predictions?.AIMI_MOMENTUM_SOFT?.let { softMomentum ->
+                for (i in 1 until softMomentum.size) {
+                    array.add(
+                        GV(
+                            raw = 0.0,
+                            noise = 0.0,
+                            value = softMomentum[i].toDouble(),
+                            timestamp = startTime + i * 5 * 60 * 1000L,
+                            sourceSensor = SourceSensor.AIMI_MOMENTUM_SOFT_PREDICTION,
+                            trendArrow = TrendArrow.NONE
+                        )
+                    )
+                }
+            }
             predictions?.IOB?.let { iob ->
                 for (i in 1 until iob.size) {
                     array.add(
@@ -271,6 +285,7 @@ class DetermineBasalResult @Inject constructor(
             val startTime = date
             val preds = predictions()
             preds?.AIMI_FINAL?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
+            preds?.AIMI_MOMENTUM_SOFT?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
             preds?.IOB?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
             preds?.aCOB?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }
             preds?.COB?.let { if (it.isNotEmpty()) latest = max(latest, startTime + (it.size - 1) * 5 * 60 * 1000L) }

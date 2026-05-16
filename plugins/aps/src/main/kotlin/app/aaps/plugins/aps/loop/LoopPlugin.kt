@@ -545,6 +545,12 @@ class LoopPlugin @Inject constructor(
                 rxBus.send(EventLoopSetLastRunGui(rh.gs(R.string.no_aps_selected)))
                 return
             }
+            staleApsResultReason(apsResult, profile)?.let { staleReason ->
+                aapsLogger.debug(LTag.APS, staleReason)
+                rxBus.send(EventLoopSetLastRunGui(staleReason))
+                rxBus.send(EventLoopUpdateGui())
+                return
+            }
 
             // Store calculations to DB
             disposable += persistenceLayer.insertOrUpdateApsResult(apsResult).subscribe()
@@ -834,6 +840,11 @@ class LoopPlugin @Inject constructor(
      * TODO: update pump drivers to support APS request in %
      */
     private fun applyTBRRequest(request: APSResult, profile: Profile, callback: Callback?) {
+        staleApsResultReason(request, profile)?.let { staleReason ->
+            aapsLogger.debug(LTag.APS, "applyAPSRequest blocked: $staleReason")
+            callback?.result(pumpEnactResultProvider.get().comment(staleReason).enacted(false).success(false))?.run()
+            return
+        }
         if (!request.isTempBasalRequested) {
             callback?.result(pumpEnactResultProvider.get().enacted(false).success(true).comment(app.aaps.core.ui.R.string.nochangerequested))?.run()
             return
@@ -930,6 +941,11 @@ class LoopPlugin @Inject constructor(
     }
 
     private fun applySMBRequest(request: APSResult, callback: Callback?) {
+        staleApsResultReason(request, null)?.let { staleReason ->
+            aapsLogger.debug(LTag.APS, "applySMBRequest blocked: $staleReason")
+            callback?.result(pumpEnactResultProvider.get().comment(staleReason).enacted(false).success(false))?.run()
+            return
+        }
         val pump = activePlugin.activePump
         val lastBolusTime = persistenceLayer.getNewestBolus()?.timestamp ?: 0L
         if (lastBolusTime != 0L && lastBolusTime + T.mins(preferences.get(IntKey.ApsMaxSmbFrequency).toLong()).msecs() > dateUtil.now()) {
@@ -968,6 +984,35 @@ class LoopPlugin @Inject constructor(
 
     private fun allowPercentage(): Boolean {
         return virtualPump.isEnabled()
+    }
+
+    private fun staleApsResultReason(request: APSResult, profile: Profile?): String? {
+        val now = dateUtil.now()
+        val requestBgTime = request.glucoseStatus?.date ?: request.date
+        val requestBg = request.glucoseStatus?.glucose
+        val latestBg = persistenceLayer.getLastGlucoseValue()
+        val newerBg = latestBg?.takeIf { it.timestamp > requestBgTime + T.secs(30).msecs() }
+        val requestAge = now - request.date
+        val staleByAge = requestAge > T.mins(2).msecs()
+
+        if (newerBg == null && !staleByAge) return null
+
+        val insulinIncreasing = request.smb > 0.0 || (
+            request.isTempBasalRequested &&
+                request.duration > 0 &&
+                profile != null &&
+                request.rate > profile.getBasal() * 1.05
+            )
+        if (newerBg == null && !insulinIncreasing) return null
+
+        val valueGap = if (latestBg != null && requestBg != null) abs(latestBg.value - requestBg) else 0.0
+        val latestText = latestBg?.let {
+            "${dateUtil.dateAndTimeAndSecondsString(it.timestamp)} ${it.value.toInt()}mg/dL"
+        } ?: "нет свежей CGM-точки"
+        val requestText = "${dateUtil.dateAndTimeAndSecondsString(requestBgTime)} " +
+            "${requestBg?.toInt()?.toString() ?: "?"}mg/dL"
+        return "Расчет APS устарел и не применен: расчет=$requestText, свежая CGM=$latestText, " +
+            "возраст=${requestAge / 1000}s, расхождение=${valueGap.toInt()}mg/dL"
     }
 
     /**

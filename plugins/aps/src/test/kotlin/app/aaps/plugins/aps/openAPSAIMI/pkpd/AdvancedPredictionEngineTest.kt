@@ -97,4 +97,121 @@ class AdvancedPredictionEngineTest {
 
         assertTrue(rescueFast.last() < normalUam.last())
     }
+
+    @Test
+    fun `unified momentum is shorter for fast carbs than slow carbs`() {
+        val profile = mockk<OapsProfileAimi>(relaxed = true)
+        every { profile.carb_ratio } returns 10.0
+        every { profile.peakTime } returns 75.0
+
+        val fast = AdvancedPredictionEngine.predict(
+            currentBG = 107.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 43.0,
+            cobG = 15.0,
+            profile = profile,
+            selectedFoodType = "fast",
+            delta = 14.0,
+            explicitCarbEntry = true,
+            horizonMinutes = 60
+        )
+        val slow = AdvancedPredictionEngine.predict(
+            currentBG = 107.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 43.0,
+            cobG = 15.0,
+            profile = profile,
+            selectedFoodType = "slow",
+            delta = 14.0,
+            explicitCarbEntry = true,
+            horizonMinutes = 60
+        )
+
+        assertTrue(fast.last() < slow.last())
+    }
+
+    @Test
+    fun `protective zero basal decision lifts falling forecast without adding insulin`() {
+        val profile = mockk<OapsProfileAimi>(relaxed = true)
+        every { profile.carb_ratio } returns 10.0
+        every { profile.peakTime } returns 75.0
+
+        val now = System.currentTimeMillis()
+        val iob = Array(49) { index ->
+            IobTotal(
+                time = now + index * 5 * 60_000L,
+                iob = 1.8,
+                activity = (0.020 - index * 0.00025).coerceAtLeast(0.006)
+            )
+        }
+
+        val withoutDecision = AdvancedPredictionEngine.predict(
+            currentBG = 139.0,
+            iobArray = iob,
+            finalSensitivity = 35.0,
+            cobG = 0.0,
+            profile = profile,
+            delta = -6.0,
+            horizonMinutes = 120
+        )
+        val withProtectiveZeroBasal = AdvancedPredictionEngine.predict(
+            currentBG = 139.0,
+            iobArray = iob,
+            finalSensitivity = 35.0,
+            cobG = 0.0,
+            profile = profile,
+            delta = -6.0,
+            plannedSmbU = 0.0,
+            plannedRateUph = 0.0,
+            profileBasalUph = 1.0,
+            plannedDurationMin = 30,
+            mpcShare = 0.6,
+            piShare = 0.4,
+            safetyMechanism = "Защита от раннего перелива",
+            horizonMinutes = 120
+        )
+
+        assertTrue(withProtectiveZeroBasal.last() > withoutDecision.last())
+    }
+
+    @Test
+    fun `final SMB is fully reflected in post decision forecast`() {
+        val profile = mockk<OapsProfileAimi>(relaxed = true)
+        every { profile.carb_ratio } returns 10.0
+        every { profile.peakTime } returns 75.0
+
+        val withoutDecision = AdvancedPredictionEngine.predict(
+            currentBG = 121.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 39.0,
+            cobG = 0.0,
+            profile = profile,
+            selectedFoodType = "balanced",
+            delta = 0.3,
+            observedCarbImpactMgdlPer5m = 1.0,
+            uamConfidence = 0.0,
+            horizonMinutes = 240
+        )
+        val withFinalSmbAndBasal = AdvancedPredictionEngine.predict(
+            currentBG = 121.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 39.0,
+            cobG = 0.0,
+            profile = profile,
+            selectedFoodType = "balanced",
+            delta = 0.3,
+            plannedSmbU = 0.55,
+            plannedRateUph = 1.56,
+            profileBasalUph = 1.20,
+            plannedDurationMin = 30,
+            mpcShare = 0.52,
+            piShare = 0.48,
+            observedCarbImpactMgdlPer5m = 1.0,
+            uamConfidence = 0.0,
+            horizonMinutes = 240
+        )
+
+        assertTrue(withFinalSmbAndBasal.last() <= withoutDecision.last() - 20.0)
+        assertTrue(withFinalSmbAndBasal.minOrNull()!! < 110.0)
+    }
 }

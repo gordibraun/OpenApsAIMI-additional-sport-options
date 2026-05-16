@@ -108,6 +108,7 @@ data class GlucoseValue(
         UAM_PREDICTION,
         ZT_PREDICTION,
         AIMI_FINAL_PREDICTION,
+        AIMI_MOMENTUM_SOFT_PREDICTION,
         ;
     }
 }

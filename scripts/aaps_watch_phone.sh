@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SERIAL="${AAPS_SERIAL:-RRCX807YMBY}"
+PACKAGE="${AAPS_PACKAGE:-info.nightscout.androidaps}"
 INTERVAL_SECONDS="${AAPS_WATCH_INTERVAL_SECONDS:-10}"
 ADB_WIFI_PORT="${AAPS_ADB_WIFI_PORT:-5555}"
 
@@ -82,6 +83,40 @@ release_adb_lock() {
 
 trap release_adb_lock EXIT INT TERM
 
+target_has_aaps_package() {
+  local target="$1"
+  "$ADB" -s "$target" shell pm path "$PACKAGE" 2>/dev/null \
+    | tr -d '\r' \
+    | grep -q '^package:'
+}
+
+target_matches_phone() {
+  local target="$1"
+  local actual
+  actual="$("$ADB" -s "$target" shell 'getprop ro.serialno; getprop ro.boot.serialno' 2>/dev/null | tr -d '\r' | awk 'NF { print; exit }')"
+  if [ "$actual" = "$SERIAL" ]; then
+    return 0
+  fi
+  if target_has_aaps_package "$target"; then
+    log "ADB target $target has AAPS package $PACKAGE; accepting it for $SERIAL."
+    return 0
+  fi
+  log "Ignoring ADB target $target: device serial is '${actual:-unknown}', expected '$SERIAL', and AAPS package $PACKAGE was not found."
+  return 1
+}
+
+wifi_device_for_phone() {
+  local target
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    if target_matches_phone "$target" >/dev/null; then
+      printf '%s\n' "$target"
+      return 0
+    fi
+  done < <("$ADB" devices | awk -v port=":$ADB_WIFI_PORT" '$1 ~ port "$" && $2 == "device" { print $1 }')
+  return 1
+}
+
 is_connected_locked() {
   if "$ADB" devices | awk -v serial="$SERIAL" '$1 == serial && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'; then
     return 0
@@ -97,15 +132,21 @@ is_connected_locked() {
         return 1
       fi
       connect_saved_wifi_locked "$target" >/dev/null 2>&1 || true
-      "$ADB" devices | awk -v target="$target" '$1 == target && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'
-      return $?
+      if "$ADB" devices | awk -v target="$target" '$1 == target && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }' \
+        && target_matches_phone "$target"; then
+        return 0
+      fi
+      "$ADB" disconnect "$target" >/dev/null 2>&1 || true
+      return 1
     fi
   fi
 
   log "Saved ADB Wi-Fi address is not connected. Searching current network."
   if AAPS_ADB_LOCK_HELD=1 "$CONNECTOR" >> "$LOG_FILE" 2>&1; then
-    "$ADB" devices | awk -v port=":$ADB_WIFI_PORT" '$1 ~ port "$" && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'
-    return $?
+    if wifi_device_for_phone >/dev/null; then
+      return 0
+    fi
+    return 1
   fi
 
   return 1
@@ -147,6 +188,7 @@ while true; do
       if "$COLLECTOR" >> "$LOG_FILE" 2>&1; then
         log "Export completed."
       else
+        rm -f "$STATE_FILE"
         log "Export failed. See log above."
       fi
     fi

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SERIAL="${AAPS_SERIAL:-RRCX807YMBY}"
+PACKAGE="${AAPS_PACKAGE:-info.nightscout.androidaps}"
 ADB_WIFI_PORT="${AAPS_ADB_WIFI_PORT:-5555}"
 INTERVAL_SECONDS="${AAPS_EFFECTIVENESS_INTERVAL_SECONDS:-60}"
 EXPORT_INTERVAL_SECONDS="${AAPS_EFFECTIVENESS_EXPORT_INTERVAL_SECONDS:-1800}"
@@ -38,10 +39,42 @@ ensure_start_marker() {
 }
 
 connected_target() {
-  "$ADB" devices | awk -v serial="$SERIAL" -v port=":$ADB_WIFI_PORT" '
-    $1 == serial && $2 == "device" { print $1; exit }
-    $1 ~ port "$" && $2 == "device" { print $1; exit }
-  '
+  if "$ADB" devices | awk -v serial="$SERIAL" '$1 == serial && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'; then
+    printf '%s\n' "$SERIAL"
+    return 0
+  fi
+
+  local target
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    if target_matches_phone "$target" >/dev/null; then
+      printf '%s\n' "$target"
+      return 0
+    fi
+  done < <("$ADB" devices | awk -v port=":$ADB_WIFI_PORT" '$1 ~ port "$" && $2 == "device" { print $1 }')
+  return 1
+}
+
+target_has_aaps_package() {
+  local target="$1"
+  "$ADB" -s "$target" shell pm path "$PACKAGE" 2>/dev/null \
+    | tr -d '\r' \
+    | grep -q '^package:'
+}
+
+target_matches_phone() {
+  local target="$1"
+  local actual
+  actual="$("$ADB" -s "$target" shell 'getprop ro.serialno; getprop ro.boot.serialno' 2>/dev/null | tr -d '\r' | awk 'NF { print; exit }')"
+  if [ "$actual" = "$SERIAL" ]; then
+    return 0
+  fi
+  if target_has_aaps_package "$target"; then
+    log "ADB target $target has AAPS package $PACKAGE; accepting it for $SERIAL."
+    return 0
+  fi
+  log "Ignoring ADB target $target: device serial is '${actual:-unknown}', expected '$SERIAL', and AAPS package $PACKAGE was not found."
+  return 1
 }
 
 latest_export_db() {
@@ -61,14 +94,14 @@ latest_export_db() {
 
 run_collection_and_analysis() {
   local target db since_ms
-  target="$(connected_target)"
+  target="$(connected_target || true)"
   if [ -z "$target" ]; then
     log "Телефон не подключен; сбор пропущен."
     return 1
   fi
 
   log "Телефон подключен ($target). Собираю данные для мониторинга эффективности."
-  if AAPS_EXPORT_DAYS=7 "$COLLECTOR" >> "$LOG_FILE" 2>&1; then
+  if AAPS_SERIAL="$SERIAL" AAPS_PACKAGE="$PACKAGE" AAPS_EXPORT_DAYS=7 "$COLLECTOR" >> "$LOG_FILE" 2>&1; then
     date +%s > "$LAST_EXPORT_FILE"
     log "Сбор данных завершен."
   else
@@ -95,7 +128,7 @@ ensure_start_marker
 log "Монитор эффективности AIMI запущен. Отчеты: $REPORT_DIR"
 
 while true; do
-  target="$(connected_target)"
+  target="$(connected_target || true)"
   if [ -n "$target" ]; then
     if [ ! -f "$CONNECTED_FILE" ]; then
       date '+%Y-%m-%d %H:%M:%S %z' > "$CONNECTED_FILE"
@@ -114,7 +147,7 @@ while true; do
       rm -f "$CONNECTED_FILE"
       log "Телефон отключился. При следующем подключении будет быстрый сбор и новый вывод."
     fi
-    "$CONNECTOR" >/dev/null 2>&1 || true
+    AAPS_SERIAL="$SERIAL" AAPS_PACKAGE="$PACKAGE" "$CONNECTOR" >/dev/null 2>&1 || true
   fi
 
   sleep "$INTERVAL_SECONDS"

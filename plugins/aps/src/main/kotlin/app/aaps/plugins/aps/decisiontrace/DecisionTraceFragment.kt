@@ -22,13 +22,16 @@ import androidx.core.view.MenuProvider
 import androidx.lifecycle.Lifecycle
 import app.aaps.core.interfaces.aps.APSResult
 import app.aaps.core.interfaces.aps.RT
+import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.plugin.ActivePlugin
+import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
+import app.aaps.core.objects.extensions.target
 import app.aaps.core.ui.dialogs.OKDialog
 import app.aaps.core.utils.HtmlHelper
 import app.aaps.plugins.aps.R
@@ -52,6 +55,8 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
     @Inject lateinit var rh: ResourceHelper
     @Inject lateinit var fabricPrivacy: FabricPrivacy
     @Inject lateinit var activePlugin: ActivePlugin
+    @Inject lateinit var persistenceLayer: PersistenceLayer
+    @Inject lateinit var profileFunction: ProfileFunction
     @Inject lateinit var dateUtil: DateUtil
 
     @Suppress("PrivatePropertyName")
@@ -158,12 +163,46 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
             return
         }
         val raw = lastAPSResult.rawData() as? RT
+        val contextWarning = buildContextWarning(lastAPSResult)
 
         binding.lastrun.text = dateUtil.dateAndTimeString(lastAPSResult.date)
-        setInteractiveText(binding.summaryMain, HtmlHelper.fromHtml(buildDecisionSummary(lastAPSResult, raw)))
-        setInteractiveText(binding.traceStages, HtmlHelper.fromHtml(buildDecisionStages(lastAPSResult, raw)))
-        setInteractiveText(binding.rawTrace, HtmlHelper.fromHtml(buildRawTrace(lastAPSResult, raw)))
+        setInteractiveText(binding.summaryMain, HtmlHelper.fromHtml(withContextWarning(contextWarning, buildDecisionSummary(lastAPSResult, raw))))
+        setInteractiveText(binding.traceStages, HtmlHelper.fromHtml(withContextWarning(contextWarning, buildDecisionStages(lastAPSResult, raw))))
+        setInteractiveText(binding.rawTrace, HtmlHelper.fromHtml(withContextWarning(contextWarning, buildRawTrace(lastAPSResult, raw))))
         binding.swipeRefresh.isRefreshing = false
+    }
+
+    private fun withContextWarning(contextWarning: String?, body: String): String =
+        if (contextWarning == null) body else "$contextWarning<br><br>$body"
+
+    private fun buildContextWarning(lastAPSResult: APSResult): String? {
+        val resultProfile = lastAPSResult.oapsProfileAimi ?: return null
+        val now = dateUtil.now()
+        val currentProfile = profileFunction.getProfile(now)
+        val currentProfileSwitch = persistenceLayer.getEffectiveProfileSwitchActiveAt(now)
+        val currentPercentage = currentProfileSwitch?.originalPercentage ?: currentProfile?.percentage
+        val currentTempTarget = persistenceLayer.getTemporaryTargetActiveAt(now)
+        val currentTempTargetSet = currentTempTarget != null
+        val currentTarget = currentTempTarget?.target() ?: currentProfile?.getTargetMgdl()
+
+        val issues = mutableListOf<String>()
+        if (resultProfile.temptargetSet != currentTempTargetSet) {
+            issues += "временная цель в расчете: ${yesNo(resultProfile.temptargetSet)}, сейчас: ${yesNo(currentTempTargetSet)}"
+        }
+        if (currentTarget != null && abs(currentTarget - resultProfile.target_bg) >= 2.0) {
+            issues += "цель в расчете: ${formatMgdl(resultProfile.target_bg)}, сейчас: ${formatMgdl(currentTarget)}"
+        }
+        if (currentPercentage != null && currentPercentage != resultProfile.profile_percentage) {
+            issues += "профиль в расчете: ${resultProfile.profile_percentage}%, сейчас: ${currentPercentage}%"
+        }
+
+        if (issues.isEmpty()) return null
+        return buildString {
+            append("<b>Внимание: расчет не от текущего контекста</b><br>")
+            append(issues.joinToString("<br>"))
+            append("<br>")
+            append("Ниже показан старый след решения; дождись нового цикла или запусти расчет из меню Decision Trace.")
+        }
     }
 
     private fun resetGUI(text: String) {
@@ -404,6 +443,9 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
 
     private fun formatUnits(value: Double?): String =
         value?.let { String.format(Locale.US, "%.2f", it) } ?: "0.00"
+
+    private fun yesNo(value: Boolean): String =
+        if (value) "да" else "нет"
 
     private fun formatTempBasal(rate: Double, duration: Int): String =
         if (rate < 0 || duration < 0) "без запроса"

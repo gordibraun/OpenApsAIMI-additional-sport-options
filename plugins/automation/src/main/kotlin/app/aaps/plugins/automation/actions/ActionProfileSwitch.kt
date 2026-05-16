@@ -31,32 +31,41 @@ class ActionProfileSwitch(injector: HasAndroidInjector) : Action(injector) {
     @DrawableRes override fun icon(): Int = app.aaps.core.ui.R.drawable.ic_actions_profileswitch_24dp
 
     override fun doAction(callback: Callback) {
+        val profileStore = activePlugin.activeProfileSource.profile ?: return
+        val requestedProfileName = inputProfileName.value
+        val profileName = resolveProfileName()
+        if (profileName == null) {
+            aapsLogger.error(LTag.AUTOMATION, "Selected profile does not exist! - $requestedProfileName")
+            callback.result(pumpEnactResultProvider.get().success(false).comment(app.aaps.core.ui.R.string.notexists)).run()
+            return
+        }
+        if (requestedProfileName != profileName) {
+            aapsLogger.warn(
+                LTag.AUTOMATION,
+                "Selected profile '$requestedProfileName' does not exist, falling back to '$profileName'"
+            )
+        }
         val activeProfileName = profileFunction.getProfileName()
+        val activeProfile = profileFunction.getProfile()
         //Check for uninitialized profileName
-        if (inputProfileName.value == "") {
+        if (profileName == "") {
             aapsLogger.error(LTag.AUTOMATION, "Selected profile not initialized")
             callback.result(pumpEnactResultProvider.get().success(false).comment(app.aaps.core.validators.R.string.error_field_must_not_be_empty)).run()
             return
         }
-        if (profileFunction.getProfile() == null) {
+        if (activeProfile == null) {
             aapsLogger.error(LTag.AUTOMATION, "ProfileFunctions not initialized")
             callback.result(pumpEnactResultProvider.get().success(false).comment(app.aaps.core.ui.R.string.noprofile)).run()
             return
         }
-        if (inputProfileName.value == activeProfileName) {
+        if (profileName == activeProfileName && activeProfile.percentage == 100) {
             aapsLogger.debug(LTag.AUTOMATION, "Profile is already switched")
             callback.result(pumpEnactResultProvider.get().success(true).comment(R.string.alreadyset)).run()
             return
         }
-        val profileStore = activePlugin.activeProfileSource.profile ?: return
-        if (profileStore.getSpecificProfile(inputProfileName.value) == null) {
-            aapsLogger.error(LTag.AUTOMATION, "Selected profile does not exist! - ${inputProfileName.value}")
-            callback.result(pumpEnactResultProvider.get().success(false).comment(app.aaps.core.ui.R.string.notexists)).run()
-            return
-        }
         val result = profileFunction.createProfileSwitch(
             profileStore = profileStore,
-            profileName = inputProfileName.value,
+            profileName = profileName,
             durationInMinutes = 0,
             percentage = 100,
             timeShiftInHours = 0,
@@ -64,11 +73,23 @@ class ActionProfileSwitch(injector: HasAndroidInjector) : Action(injector) {
             source = Sources.Automation,
             note = title,
             listValues = listOf(
-                ValueWithUnit.SimpleString(inputProfileName.value),
+                ValueWithUnit.SimpleString(profileName),
                 ValueWithUnit.Percent(100)
             )
         )
         callback.result(pumpEnactResultProvider.get().success(result).comment(app.aaps.core.ui.R.string.ok)).run()
+    }
+
+    private fun resolveProfileName(): String? {
+        val profileStore = activePlugin.activeProfileSource.profile ?: return null
+        val requested = inputProfileName.value
+        if (requested.isNotBlank() && profileStore.getSpecificProfile(requested) != null) return requested
+
+        val original = profileFunction.getOriginalProfileName()
+        if (!original.isNullOrBlank() && profileStore.getSpecificProfile(original) != null) return original
+
+        val active = profileFunction.getProfileName()
+        return active.takeIf { profileStore.getSpecificProfile(it) != null }
     }
 
     override fun generateDialog(root: LinearLayout) {
@@ -93,5 +114,5 @@ class ActionProfileSwitch(injector: HasAndroidInjector) : Action(injector) {
         return this
     }
 
-    override fun isValid(): Boolean = activePlugin.activeProfileSource.profile?.getSpecificProfile(inputProfileName.value) != null
+    override fun isValid(): Boolean = resolveProfileName() != null
 }

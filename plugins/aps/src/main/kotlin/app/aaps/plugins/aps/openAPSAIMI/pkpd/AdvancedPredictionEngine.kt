@@ -114,19 +114,29 @@ object AdvancedPredictionEngine {
                 0.15 * (normalizedMealFactor - 1.0).coerceAtLeast(0.0) +
                 if (highBgOverrideUsed) 0.15 else 0.0
             ).coerceIn(0.0, 1.2)
+        val protectiveSafety = isProtectiveSafety(safetyMechanism)
+        val hypoSafety = isHypoSafety(safetyMechanism)
+        val hasFinalDeliveryDecision = plannedSmbU > 0.0 || plannedRateUph != null
         val additionalInsulinSuppression = when {
-            safetyMechanism?.contains("Hypo", ignoreCase = true) == true -> 0.0
-            safetyMechanism?.contains("guard", ignoreCase = true) == true -> 0.15
+            hypoSafety -> 0.0
+            protectiveSafety -> 0.15
             else -> 1.0
         }
+        val finalDeliveryVisibility = when {
+            !hasFinalDeliveryDecision -> decisionTrust
+            hypoSafety -> 0.0
+            protectiveSafety -> 0.50
+            else -> 1.0
+        }
+        val finalBasalVisibility = if (hasFinalDeliveryDecision) 1.0 else decisionTrust.coerceAtLeast(0.6)
         val reducedInsulinSupport = when {
-            safetyMechanism?.contains("Hypo", ignoreCase = true) == true -> 1.0
-            safetyMechanism?.contains("guard", ignoreCase = true) == true -> 0.9
+            hypoSafety -> 1.0
+            protectiveSafety || hasFinalDeliveryDecision -> 1.0
             else -> 0.75
         }
-        val decisionDropTotalMgDl = additionalInsulinUnits * finalSensitivity * decisionTrust * additionalInsulinSuppression
+        val decisionDropTotalMgDl = additionalInsulinUnits * finalSensitivity * finalDeliveryVisibility * additionalInsulinSuppression
         val freshSmbPressureDropMgDl = freshSmbPressureU.coerceAtLeast(0.0) * finalSensitivity * 0.35
-        val decisionLiftTotalMgDl = reducedInsulinUnits * finalSensitivity * decisionTrust.coerceAtLeast(0.6) * reducedInsulinSupport
+        val decisionLiftTotalMgDl = reducedInsulinUnits * finalSensitivity * finalBasalVisibility * reducedInsulinSupport
 
         var lastBg = currentBG
         val sortedIob = iobArray.sortedBy { it.time }
@@ -135,9 +145,13 @@ object AdvancedPredictionEngine {
         // Innovation: Momentum (Delta Decay)
         // If BG is rising, assume it continues to rise for a while (inertia).
         // This is crucial for UAM where no COB is entered.
-        var momentum = if (delta > 0) {
-            if (rescueFastActive) delta.coerceAtMost(2.0) else delta * normalizedUamConfidence.coerceAtLeast(if (explicitCarbEntry) 1.0 else 0.0)
-        } else 0.0
+        var momentum = initialMomentum(
+            delta = delta,
+            rescueFastActive = rescueFastActive,
+            explicitCarbEntry = explicitCarbEntry || cobG > 0.0,
+            selectedFoodType = effectiveFoodType,
+            normalizedUamConfidence = normalizedUamConfidence
+        )
 
         repeat(steps) { stepIndex ->
             val minutesInFuture = (stepIndex + 1) * 5
@@ -174,13 +188,80 @@ object AdvancedPredictionEngine {
             val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + decisionLiftPer5Min - decisionDropPer5Min - freshSmbDropPer5Min + momentum).coerceIn(39.0, 401.0)
 
             // Linear/Exp decay of momentum
-            momentum *= if (rescueFastActive) 0.35 else 0.85 // Быстрые спасательные углеводы не должны давать длинный хвост роста.
+            momentum *= momentumDecay(
+                rescueFastActive = rescueFastActive,
+                explicitCarbEntry = explicitCarbEntry || cobG > 0.0,
+                selectedFoodType = effectiveFoodType,
+                normalizedUamConfidence = normalizedUamConfidence
+            )
 
             lastBg = nextBg
             predictions.add(lastBg)
         }
 
         return predictions
+    }
+
+    private fun initialMomentum(
+        delta: Double,
+        rescueFastActive: Boolean,
+        explicitCarbEntry: Boolean,
+        selectedFoodType: String?,
+        normalizedUamConfidence: Double
+    ): Double {
+        if (delta <= 0.0) return 0.0
+        if (rescueFastActive) return delta.coerceAtMost(2.0)
+
+        if (explicitCarbEntry) {
+            val foodType = selectedFoodType?.lowercase()
+            val cap = when (foodType) {
+                "fast" -> 2.5
+                "slow" -> 4.0
+                else -> 3.0
+            }
+            return delta.coerceAtMost(cap)
+        }
+
+        val confidenceCap = when {
+            normalizedUamConfidence >= 0.75 -> 8.0
+            normalizedUamConfidence >= 0.40 -> 5.0
+            else -> 2.5
+        }
+        return (delta * normalizedUamConfidence).coerceAtMost(confidenceCap)
+    }
+
+    private fun momentumDecay(
+        rescueFastActive: Boolean,
+        explicitCarbEntry: Boolean,
+        selectedFoodType: String?,
+        normalizedUamConfidence: Double
+    ): Double {
+        if (rescueFastActive) return 0.35
+
+        if (explicitCarbEntry) {
+            return when (selectedFoodType?.lowercase()) {
+                "fast" -> 0.40
+                "slow" -> 0.70
+                else -> 0.55
+            }
+        }
+
+        return if (normalizedUamConfidence >= 0.75) 0.75 else 0.55
+    }
+
+    private fun isProtectiveSafety(safetyMechanism: String?): Boolean {
+        val safety = safetyMechanism?.lowercase() ?: return false
+        return safety.contains("guard") ||
+            safety.contains("защит") ||
+            safety.contains("перелив") ||
+            safety.contains("early overdelivery")
+    }
+
+    private fun isHypoSafety(safetyMechanism: String?): Boolean {
+        val safety = safetyMechanism?.lowercase() ?: return false
+        return safety.contains("hypo") ||
+            safety.contains("гипо") ||
+            safety.contains("низк")
     }
 
 }

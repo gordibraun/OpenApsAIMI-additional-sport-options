@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SERIAL="${AAPS_SERIAL:-RRCX807YMBY}"
+PACKAGE="${AAPS_PACKAGE:-info.nightscout.androidaps}"
 PORT="${AAPS_ADB_WIFI_PORT:-5555}"
 ADB="${ADB:-/Users/alexeydedeshko/Library/Android/sdk/platform-tools/adb}"
 STATE_DIR="${AAPS_WATCH_STATE_DIR:-$HOME/.aaps-phone-collector}"
@@ -78,6 +79,28 @@ device_state() {
   "$ADB" devices | awk -v serial="$1" '$1 == serial { print $2; found = 1 } END { if (!found) print "" }'
 }
 
+target_has_aaps_package() {
+  local target="$1"
+  "$ADB" -s "$target" shell pm path "$PACKAGE" 2>/dev/null \
+    | tr -d '\r' \
+    | grep -q '^package:'
+}
+
+target_matches_phone() {
+  local target="$1"
+  local actual
+  actual="$("$ADB" -s "$target" shell 'getprop ro.serialno; getprop ro.boot.serialno' 2>/dev/null | tr -d '\r' | awk 'NF { print; exit }')"
+  if [ "$actual" = "$SERIAL" ]; then
+    return 0
+  fi
+  if target_has_aaps_package "$target"; then
+    log "ADB target $target has AAPS package $PACKAGE; accepting it for $SERIAL."
+    return 0
+  fi
+  log "Ignoring ADB target $target: device serial is '${actual:-unknown}', expected '$SERIAL', and AAPS package $PACKAGE was not found."
+  return 1
+}
+
 first_usb_device() {
   "$ADB" devices | awk -v serial="$SERIAL" '$1 == serial && $2 == "device" { print $1; exit }'
 }
@@ -119,19 +142,29 @@ connect_ip() {
   fi
   cat /tmp/aaps_adb_wifi_connect.out
   sleep 1
-  if "$ADB" devices | awk -v target="$target" '$1 == target && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'; then
+  if "$ADB" devices | awk -v target="$target" '$1 == target && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }' \
+    && target_matches_phone "$target"; then
     echo "$ip" > "$IP_FILE"
     log "ADB Wi-Fi connected: $ip:$PORT"
     "$ADB" devices -l
     return 0
   fi
+  "$ADB" disconnect "$target" >/dev/null 2>&1 || true
   log "ADB Wi-Fi target $target is not online as device."
   "$ADB" devices -l
   return 1
 }
 
 known_wifi_device_ip() {
-  "$ADB" devices | awk -v port=":$PORT" '$1 ~ port "$" && $2 == "device" { sub(port "$", "", $1); print $1; exit }'
+  local target
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    if target_matches_phone "$target" >/dev/null; then
+      printf '%s\n' "${target%:$PORT}"
+      return 0
+    fi
+  done < <("$ADB" devices | awk -v port=":$PORT" '$1 ~ port "$" && $2 == "device" { print $1 }')
+  return 1
 }
 
 local_ipv4s() {
@@ -191,7 +224,9 @@ connect_mdns_services() {
     "$ADB" connect "$target" || true
     sleep 1
     "$ADB" devices -l
-    if "$ADB" devices | awk -v target="$target" '$1 == target && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'; then
+	if "$ADB" devices | awk -v target="$target" '$1 == target && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }' \
+	  && target_matches_phone "$target"; then
+      printf '%s\n' "${target%:*}" > "$IP_FILE"
       log "ADB Wi-Fi connected via Android Wireless Debugging: $target"
       return 0
     fi
@@ -231,14 +266,14 @@ find_phone_on_current_network() {
 
 enable_wifi_from_usb() {
   log "USB device is available. Enabling ADB over TCP/IP on port $PORT..."
-  "$ADB" -s "$SERIAL" tcpip "$PORT"
-  sleep 2
-
-  IP="$(phone_ip_from_usb)"
+  IP="$(phone_ip_from_usb || true)"
   if [ -z "$IP" ]; then
     log "Could not read phone Wi-Fi IP. Make sure the phone is connected to Wi-Fi."
     return 2
   fi
+
+  "$ADB" -s "$SERIAL" tcpip "$PORT"
+  sleep 2
 
   log "Phone Wi-Fi IP: $IP"
   echo "$IP" > "$IP_FILE"
@@ -252,7 +287,7 @@ enable_wifi_from_usb() {
 
 log "AAPS ADB Wi-Fi connector for $SERIAL"
 
-IP="$(known_wifi_device_ip)"
+IP="$(known_wifi_device_ip || true)"
 if [ -n "$IP" ]; then
   log "ADB Wi-Fi is already connected: $IP:$PORT"
   echo "$IP" > "$IP_FILE"
@@ -264,7 +299,7 @@ acquire_adb_lock
 preserve_adb_key
 log "Mac local IPv4 addresses: $(local_ipv4s | tr '\n' ' ')"
 
-IP="$(known_wifi_device_ip)"
+IP="$(known_wifi_device_ip || true)"
 if [ -n "$IP" ]; then
   log "ADB Wi-Fi is already connected: $IP:$PORT"
   echo "$IP" > "$IP_FILE"

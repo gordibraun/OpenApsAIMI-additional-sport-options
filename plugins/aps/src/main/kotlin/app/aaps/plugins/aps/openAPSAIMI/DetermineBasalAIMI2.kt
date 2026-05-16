@@ -2251,167 +2251,25 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         predictedSMB: Float,
         profile: OapsProfileAimi
     ): Float {
-        val recentDeltas = getRecentDeltas()
-        val predicted = predictedDelta(recentDeltas)
-        val combinedDelta = (delta + predicted) / 2.0f
-        // Définir un nombre maximal d'itérations plus bas en cas de montée rapide
-        val maxIterations = if (combinedDelta > 15f) 25 else 50
-        var finalRefinedSMB: Float = calculateSMBFromModel()
-
-        val allLines = csvfile.readLines()
-        //println("CSV file path: \${csvfile.absolutePath}")
-        println(context.getString(R.string.csv_file_path, csvfile.absolutePath))
-        if (allLines.isEmpty()) {
-            //println("CSV file is empty.")
-            println(context.getString(R.string.csv_file_empty))
-            return predictedSMB
+        // Live APS must never train a network: training here made decisions stale and
+        // could finish after a newer CGM point had already arrived.
+        val modelSmb = calculateSMBFromModel()
+        val falling = delta < -0.5f || shortAvgDelta < -0.25f || longAvgDelta < -0.25f
+        val uncertainRise = delta <= 2f || shortAvgDelta <= 0f || longAvgDelta < -0.5f
+        val confirmedStrongRise = delta >= 5f && shortAvgDelta >= 1f && longAvgDelta >= 0f
+        val alpha = when {
+            falling -> 0.20f
+            uncertainRise -> 0.35f
+            confirmedStrongRise -> 0.70f
+            else -> 0.50f
         }
-
-        val headerLine = allLines.first()
-        val headers = headerLine.split(",").map { it.trim() }
-        val requiredColumns = listOf(
-            "bg", "iob", "cob", "delta", "shortAvgDelta", "longAvgDelta",
-            "tdd7DaysPerHour", "tdd2DaysPerHour", "tddPerHour", "tdd24HrsPerHour",
-            "predictedSMB", "smbGiven"
-        )
-        if (!requiredColumns.all { headers.contains(it) }) {
-            //println("CSV file is missing required columns.")
-            println(context.getString(R.string.csv_missing_columns))
-            return predictedSMB
+        val blendedSMB = alpha * modelSmb + (1f - alpha) * predictedSMB
+        val trendBoundedSMB = if (falling) {
+            min(blendedSMB, min(modelSmb, predictedSMB))
+        } else {
+            blendedSMB
         }
-
-        val colIndices = requiredColumns.map { headers.indexOf(it) }
-        val targetColIndex = headers.indexOf("smbGiven")
-        val inputs = mutableListOf<FloatArray>()
-        val targets = mutableListOf<DoubleArray>()
-        var lastEnhancedInput: FloatArray? = null
-
-        for (line in allLines.drop(1)) {
-            val cols = line.split(",").map { it.trim() }
-            val rawInput = colIndices.mapNotNull { idx -> cols.getOrNull(idx)?.toFloatOrNull() }.toFloatArray()
-
-            val trendIndicator = calculateTrendIndicator(
-                delta, shortAvgDelta, longAvgDelta,
-                bg.toFloat(), iob, variableSensitivity, cob, normalBgThreshold,
-                recentSteps180Minutes, averageBeatsPerMinute.toFloat(), averageBeatsPerMinute10.toFloat(),
-                profile.insulinDivisor.toFloat(), recentSteps5Minutes, recentSteps10Minutes
-            )
-
-            val enhancedInput = rawInput.copyOf(rawInput.size + 1)
-            enhancedInput[rawInput.size] = trendIndicator.toFloat()
-            lastEnhancedInput = enhancedInput
-
-            val targetValue = cols.getOrNull(targetColIndex)?.toDoubleOrNull()
-            if (targetValue != null) {
-                inputs.add(enhancedInput)
-                targets.add(doubleArrayOf(targetValue))
-            }
-        }
-
-        if (inputs.isEmpty() || targets.isEmpty()) {
-            //println("Insufficient data for training.")
-            println(context.getString(R.string.insufficient_data_training))
-            return predictedSMB
-        }
-
-        val maxK = 10
-        val adjustedK = minOf(maxK, inputs.size)
-        val foldSize = maxOf(1, inputs.size / adjustedK)
-        var bestNetwork: AimiNeuralNetwork? = null
-        var bestFoldValLoss = Double.MAX_VALUE
-
-        for (k in 0 until adjustedK) {
-            val validationInputs = inputs.subList(k * foldSize, minOf((k + 1) * foldSize, inputs.size))
-            val validationTargets = targets.subList(k * foldSize, minOf((k + 1) * foldSize, targets.size))
-            val trainingInputs = inputs.minus(validationInputs)
-            val trainingTargets = targets.minus(validationTargets)
-            if (validationInputs.isEmpty()) continue
-
-            val tempNetwork = AimiNeuralNetwork(
-                inputSize = inputs.first().size,
-                hiddenSize = 5,
-                outputSize = 1,
-                config = TrainingConfig(
-                    learningRate = 0.001,
-                    epochs = 200
-                ),
-                regularizationLambda = 0.01
-            )
-
-            tempNetwork.trainWithValidation(trainingInputs, trainingTargets, validationInputs, validationTargets)
-            val foldValLoss = tempNetwork.validate(validationInputs, validationTargets)
-
-            if (foldValLoss < bestFoldValLoss) {
-                bestFoldValLoss = foldValLoss
-                bestNetwork = tempNetwork
-            }
-        }
-
-        val adjustedLearningRate = if (bestFoldValLoss < 0.01) 0.0005 else 0.001
-        val epochs = if (bestFoldValLoss < 0.01) 100 else 200
-
-        if (bestNetwork != null) {
-            //println("Réentraînement final avec les meilleurs hyperparamètres sur toutes les données...")
-            println(context.getString(R.string.retraining_final_model))
-            val finalNetwork = AimiNeuralNetwork(
-                inputSize = inputs.first().size,
-                hiddenSize = 5,
-                outputSize = 1,
-                config = TrainingConfig(
-                    learningRate = adjustedLearningRate,
-                    beta1 = 0.9,
-                    beta2 = 0.999,
-                    epsilon = 1e-8,
-                    patience = 10,
-                    batchSize = 32,
-                    weightDecay = 0.01,
-                    epochs = epochs,
-                    useBatchNorm = false,
-                    useDropout = true,
-                    dropoutRate = 0.3,
-                    leakyReluAlpha = 0.01
-                ),
-                regularizationLambda = 0.01
-            )
-            finalNetwork.copyWeightsFrom(bestNetwork)
-            finalNetwork.trainWithValidation(inputs, targets, inputs, targets)
-            bestNetwork = finalNetwork
-        }
-
-        // --- Normalisation légère sur lastEnhancedInput ---
-        fun normalize(input: FloatArray): FloatArray {
-            val mean = input.average().toFloat()
-            val std = input.map { (it - mean) * (it - mean) }.average().let { sqrt(it).toFloat().coerceAtLeast(1e-8f) }
-            return input.map { (it - mean) / std }.toFloatArray()
-        }
-
-        var iterationCount = 0
-        do {
-            val dynamicThreshold = calculateDynamicThreshold(iterationCount, delta, shortAvgDelta, longAvgDelta)
-            val normalizedInput = lastEnhancedInput?.let { normalize(it) }?.toDoubleArray() ?: DoubleArray(0)
-            val refinedSMB = bestNetwork?.let {
-                AimiNeuralNetwork.refineSMB(finalRefinedSMB, it, normalizedInput)
-            } ?: finalRefinedSMB
-
-            //println("→ Iteration $iterationCount | SMB=$finalRefinedSMB → $refinedSMB | Δ=${abs(finalRefinedSMB - refinedSMB)} | threshold=$dynamicThreshold")
-            println(context.getString(R.string.iteration_smb, iterationCount, finalRefinedSMB, refinedSMB, abs(finalRefinedSMB - refinedSMB), dynamicThreshold))
-
-            if (abs(finalRefinedSMB - refinedSMB) <= dynamicThreshold) {
-                finalRefinedSMB = max(0.05f, refinedSMB)
-                break
-            }
-            iterationCount++
-        } while (iterationCount < maxIterations)
-
-        if (finalRefinedSMB > predictedSMB && bg > 150 && delta > 5) {
-            //println("Modèle prédictif plus élevé, ajustement retenu.")
-            println(context.getString(R.string.predicted_smb_higher))
-            return finalRefinedSMB
-        }
-
-        val alpha = 0.7f
-        val blendedSMB = alpha * finalRefinedSMB + (1 - alpha) * predictedSMB
-        return blendedSMB
+        return trendBoundedSMB.coerceAtLeast(0f)
     }
 
     private fun computeDynamicBolusMultiplier(delta: Float): Float {
@@ -2694,7 +2552,28 @@ class DetermineBasalaimiSMB2 @Inject constructor(
     private data class PredictionResult(
         val eventual: Double,
         val series: List<Int>
-    )
+    ) {
+
+        val minGuard: Double
+            get() = series.minOrNull()?.toDouble() ?: eventual
+    }
+
+    private fun sanitizePredictionInts(predictions: List<Double>): List<Int> =
+        predictions
+            .map { round(min(401.0, max(39.0, it)), 0) }
+            .map { it.toInt() }
+
+    private fun forecastSensitivityWithActiveProfile(baseSensitivity: Double, profile: OapsProfileAimi): Double {
+        val profilePercentage = profile.profile_percentage.coerceIn(1, 300)
+        if (profilePercentage >= 100) return baseSensitivity
+        val profileSensitivity = profile.profile_sens.takeIf { it.isFinite() && it > 0.0 } ?: return baseSensitivity
+        return max(baseSensitivity, profileSensitivity)
+    }
+
+    private fun forecastBasalWithActiveProfile(profile: OapsProfileAimi, fallbackBasal: Double): Double =
+        profile.profile_basal
+            .takeIf { it.isFinite() && it > 0.0 }
+            ?: fallbackBasal
 
     private fun computePkpdPredictions(
         currentBg: Double,
@@ -2737,9 +2616,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             // Fallback: flat prediction
             List(48) { currentBg }
         }
-
-        val sanitizedPredictions = advancedPredictions.map { round(min(401.0, max(39.0, it)), 0) }
-        val intsPredictions = sanitizedPredictions.map { it.toInt() }
+        val intsPredictions = sanitizePredictionInts(advancedPredictions)
         rT.predBGs = Predictions().apply {
             AIMI_FINAL = intsPredictions
             IOB = intsPredictions
@@ -2751,6 +2628,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val eventual = intsPredictions.lastOrNull()?.toDouble() ?: currentBg
         consoleLog.add(
             "Прогноз PKPD → итог=${"%.0f".format(eventual)} mg/dL, шагов=${intsPredictions.size}"
+        )
+        consoleLog.add(
+            "Единый momentum-прогноз: +60=${intsPredictions.getOrNull(12) ?: intsPredictions.lastOrNull()} " +
+                "| быстрый отскок=${if (rescueFastActive) "да" else "нет"} " +
+                "| тип углеводов=${selectedFoodType ?: "не указан"}"
         )
         return PredictionResult(eventual, intsPredictions)
     }
@@ -2806,9 +2688,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             consoleLog.add("Ошибка прогноза после SMB: ${e.message}")
             List(48) { currentBg }
         }
-
-        val sanitizedPredictions = advancedPredictions.map { round(min(401.0, max(39.0, it)), 0) }
-        val intsPredictions = sanitizedPredictions.map { it.toInt() }
+        val intsPredictions = sanitizePredictionInts(advancedPredictions)
         rT.predBGs = (rT.predBGs ?: Predictions()).apply {
             AIMI_FINAL = intsPredictions
             IOB = intsPredictions
@@ -2822,6 +2702,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 "(SMB=${"%.2f".format(plannedSmbU)}U, базал=${"%.2f".format(plannedRateUph ?: profileBasalUph)}U/h, " +
                 "еда=${"%.2f".format(mealFactorApplied)}, MPC=${"%.0f".format(mpcShare * 100)}%, PI=${"%.0f".format(piShare * 100)}%, " +
                 "уверенность в невведенной еде=${"%.0f".format(uamConfidence * 100)}%, свежий SMB=${"%.2f".format(freshSmbPressure)}U)"
+        )
+        consoleLog.add(
+            "Единый momentum после решения: +60=${intsPredictions.getOrNull(12) ?: intsPredictions.lastOrNull()} " +
+                "| SMB=${"%.2f".format(plannedSmbU)}U | быстрый отскок=${if (rescueFastActive) "да" else "нет"}"
         )
         return PredictionResult(eventual, intsPredictions)
     }
@@ -3455,6 +3339,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             maxSmb = 3.0
         )
         val profile_current_basal = pumpCapabilityValidator.validateBasal(profile.current_basal, pumpCaps)
+        val profile_basal_for_forecast = forecastBasalWithActiveProfile(profile, profile_current_basal)
+        if (profile.profile_percentage != 100) {
+            consoleLog.add(
+                "Профиль ${profile.profile_percentage}% учтен в прогнозе: " +
+                    "базал для прогноза=${"%.2f".format(profile_basal_for_forecast)}U/h, " +
+                    "профильный ISF=${"%.1f".format(profile.profile_sens)}"
+            )
+        }
         var basal: Double
 
         // TODO eliminate
@@ -3983,7 +3875,15 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         this.variableSensitivity = this.variableSensitivity.coerceIn(5.0f, 300.0f)
 
 
-        sens = variableSensitivity.toDouble()
+        val sensitivityBeforeProfile = variableSensitivity.toDouble()
+        sens = forecastSensitivityWithActiveProfile(sensitivityBeforeProfile, profile)
+        if (sens > sensitivityBeforeProfile + 0.05) {
+            consoleLog.add(
+                "Профиль ${profile.profile_percentage}% сделал прогноз менее агрессивным: " +
+                    "ISF ${"%.1f".format(sensitivityBeforeProfile)} -> ${"%.1f".format(sens)}"
+            )
+        }
+        this.variableSensitivity = sens.toFloat()
         val pkpdPredictions = computePkpdPredictions(
             currentBg = bg,
             iobArray = iob_data_array,
@@ -4000,6 +3900,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         this.predictedBg = pkpdPredictions.eventual.toFloat()
         rT.eventualBG = pkpdPredictions.eventual
         rT.predictedBG = predictedBg.toDouble()
+        rT.minGuardBG = minOf(bg, pkpdPredictions.minGuard)
         val earlyOverdeliverySmbCap = earlyOverdeliverySmbCap(mealData)
         val earlyOverdeliveryRisk = earlyOverdeliverySmbCap != null
         if (earlyOverdeliveryRisk) {
@@ -4069,7 +3970,13 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         //val expectedDelta = calculateExpectedDelta(target_bg, eventualBG, bgi)
         val modelcal = calculateSMBFromModel(rT.reason)
         //val smbProposed = modelcal.toDouble()
-        val minBg = minOf(safe(bg), safe(predictedBg.toDouble()), safe(eventualBG))
+        val predictionMinGuard = rT.predBGs?.AIMI_FINAL?.minOrNull()?.toDouble()
+        val minBg = minOf(
+            safe(bg),
+            safe(predictedBg.toDouble()),
+            safe(eventualBG),
+            safe(predictionMinGuard ?: eventualBG)
+        )
         val threshold = computeHypoThreshold(minBg, profile.lgsThreshold)
         rT.minGuardBG = minBg
         rT.hypoThreshold = threshold
@@ -4327,7 +4234,42 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             rT.rate = guardRate
             rT.deliverAt = deliverAt
             rT.duration = 30
+            rT.units = 0.0
+            rT.insulinReq = 0.0
+            rT.safetyMechanism = "Защита от раннего перелива"
+            val guardedPredictions = recomputeDecisionAwarePredictions(
+                currentBg = bg,
+                iobArray = iob_data_array,
+                finalSensitivity = sens,
+                cobG = mealData.mealCOB,
+                mealData = mealData,
+                profile = profile,
+                rT = rT,
+                delta = delta.toDouble(),
+                plannedSmbU = 0.0,
+                plannedRateUph = guardRate,
+                profileBasalUph = profile_basal_for_forecast,
+                mealFactorApplied = smbExecution.mealFactorApplied,
+                mpcShare = smbExecution.mpcShare,
+                piShare = smbExecution.piShare,
+                highBgOverrideUsed = smbExecution.highBgOverrideUsed,
+                observedCarbImpactMgdlPer5m = ci.toDouble(),
+                remainingCiPeakMgdlPer5m = 0.0,
+                rescueFastActive = rescueFastRebound
+            )
+            eventualBG = guardedPredictions.eventual
+            predictedBg = guardedPredictions.eventual.toFloat()
+            rT.eventualBG = eventualBG
+            rT.predictedBG = predictedBg.toDouble()
+            rT.minGuardBG = minOf(bg, guardedPredictions.minGuard)
             rT.reason.append(" | Базал ограничен защитой от раннего перелива: ${"%.2f".format(guardRate)} U/h")
+            consoleLog.add(
+                "Прогноз пересчитан с защитой от раннего перелива: " +
+                    "SMB=0.00U, базал=${"%.2f".format(guardRate)}U/h, " +
+                    "+60=${guardedPredictions.series.getOrNull(12) ?: guardedPredictions.series.lastOrNull()}, " +
+                    "минимум=${"%.0f".format(guardedPredictions.minGuard)}, " +
+                    "итог=${"%.0f".format(guardedPredictions.eventual)}"
+            )
             return rT
         }
         var rate = when {
@@ -4461,29 +4403,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // duration (hours) = duration (5m) * 5 / 60 * 2 (to account for linear decay)
         //consoleError.add("Carb Impact: ${ci} mg/dL per 5m; CI Duration: ${round(cid * 5 / 60 * 2, 1)} hours; remaining CI (~2h peak): ${round(remainingCIpeak, 1)} mg/dL per 5m")
         consoleError.add(context.getString(R.string.console_carb_impact, ci, round(cid * 5 / 60 * 2, 1), round(remainingCIpeak, 1)))
-        val advancedPredictions = AdvancedPredictionEngine.predict(
-            currentBG = bg,
-            iobArray = iob_data_array,
-            finalSensitivity = sens,
-            cobG = mealData.mealCOB,
-            profile = profile,
-            selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType,
-            delta = delta.toDouble(),
-            rescueFastActive = rescueFastRebound,
-            uamConfidence = unannouncedFoodConfidence(mealData, rescueFastRebound),
-            explicitCarbEntry = explicitCarbEntryActive(mealData),
-            freshSmbPressureU = freshSmbPressureUnits()
+        consoleLog.add(
+            "Единая отображаемая прогнозная линия будет рассчитана после финального SMB/TBR " +
+                "(ISF=${"%.1f".format(sens)}, быстрый отскок=$rescueFastRebound)"
         )
-        val sanitizedPredictions = advancedPredictions.map { round(min(401.0, max(39.0, it)), 0) }
-        val intsPredictions = sanitizedPredictions.map { it.toInt() }
-        rT.predBGs = Predictions().apply {
-            AIMI_FINAL = intsPredictions
-            IOB = intsPredictions
-            COB = intsPredictions
-            ZT  = intsPredictions
-            UAM = intsPredictions
-        }
-        consoleLog.add("Расширенный прогноз с итоговым ISF ${"%.1f".format(sens)}")
 //fin predictions
 ////////////////////////////////////////////
 //estimation des glucides nécessaires si risque hypo
@@ -4593,7 +4516,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     delta = delta.toDouble(),
                     plannedSmbU = result.units ?: 0.0,
                     plannedRateUph = result.rate,
-                    profileBasalUph = profile_current_basal,
+                    profileBasalUph = profile_basal_for_forecast,
                     mealFactorApplied = smbExecution.mealFactorApplied,
                     mpcShare = smbExecution.mpcShare,
                     piShare = smbExecution.piShare,
@@ -4608,14 +4531,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 predictedBg = predictions.eventual.toFloat()
                 result.eventualBG = eventualBG
                 result.predictedBG = predictedBg.toDouble()
-                result.minGuardBG = minOf(bg, predictedBg.toDouble(), eventualBG)
+                result.minGuardBG = minOf(bg, predictions.minGuard)
             }
 
             applyDecisionAwarePredictions(recomputeForCurrentDecision())
             var decisionChangedAfterForecast = false
             val decisionMinGuardBG = result.minGuardBG ?: minOf(bg, predictedBg.toDouble(), eventualBG)
             val postDecisionForecast = minOf(predictedBg.toDouble(), eventualBG)
-            if (postDecisionForecast < target_bg && bg < 180.0) {
+            if (postDecisionForecast < target_bg) {
                 val beforeUnits = result.units ?: 0.0
                 val beforeRate = result.rate ?: 0.0
                 if (beforeUnits > 0.0 || beforeRate > profile_current_basal) {
@@ -4629,16 +4552,18 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     result.safetyMechanism = "Прогноз после SMB ниже цели"
                     result.reason.append(
                         " | SMB уменьшен: прогноз после подачи ${"%.0f".format(postDecisionForecast)} ниже цели ${"%.0f".format(target_bg)}, " +
+                            "BG=${"%.0f".format(bg)}, " +
                             "SMB ${"%.2f".format(beforeUnits)} -> 0.00, " +
                             "базал ${"%.2f".format(beforeRate)} -> ${"%.2f".format(result.rate ?: beforeRate)}"
                     )
                     consoleLog.add(
                         "SMB уменьшен: прогноз после подачи ${"%.0f".format(postDecisionForecast)} ниже цели ${"%.0f".format(target_bg)}, " +
-                            "SMB ${"%.2f".format(beforeUnits)} -> 0.00, базал ${"%.2f".format(beforeRate)} -> ${"%.2f".format(result.rate ?: beforeRate)}"
+                            "BG=${"%.0f".format(bg)}, SMB ${"%.2f".format(beforeUnits)} -> 0.00, " +
+                            "базал ${"%.2f".format(beforeRate)} -> ${"%.2f".format(result.rate ?: beforeRate)}"
                     )
                 }
             }
-            if (decisionMinGuardBG < 100.0 && bg < 180.0) {
+            if (decisionMinGuardBG < 100.0) {
                 val beforeUnits = result.units ?: 0.0
                 val beforeRate = result.rate ?: 0.0
                 if (beforeUnits > 0.0 || beforeRate > profile_current_basal) {
@@ -4650,12 +4575,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     result.safetyMechanism = "Жесткая защита прогноза после подачи"
                     result.reason.append(
                         " | Жесткая защита прогноза после подачи: minGuardBG=${"%.0f".format(decisionMinGuardBG)}, " +
+                            "BG=${"%.0f".format(bg)}, " +
                             "SMB ${"%.2f".format(beforeUnits)} -> 0.00, " +
                             "базал ${"%.2f".format(beforeRate)} -> 0.00"
                     )
                     consoleLog.add(
                         "Жесткая защита прогноза после подачи: minGuardBG=${"%.0f".format(decisionMinGuardBG)}, " +
-                            "SMB ${"%.2f".format(beforeUnits)} -> 0.00, базал ${"%.2f".format(beforeRate)} -> 0.00"
+                            "BG=${"%.0f".format(bg)}, SMB ${"%.2f".format(beforeUnits)} -> 0.00, " +
+                            "базал ${"%.2f".format(beforeRate)} -> 0.00"
                     )
                 }
             }
@@ -4860,8 +4787,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 rT.reason.append(context.getString(R.string.reason_set_temp_basal, round(safeBasal, 2)))
                 setTempBasal(safeBasal, 30, profile, rT, currenttemp, overrideSafetyLimits = false)
             }
+            val finalDecisionResult = finalizeDecisionAwareForecast(finalResult)
             comparator.compare(
-                aimiResult = finalResult,
+                aimiResult = finalDecisionResult,
                 glucoseStatus = glucose_status,
                 currentTemp = currenttemp,
                 iobData = iob_data_array,
@@ -4873,7 +4801,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 flatBGsDetected = flatBGsDetected,
                 dynIsfMode = dynIsfMode
             )
-            return finalizeDecisionAwareForecast(finalResult)
+            return finalDecisionResult
         } else {
             var insulinReq = smbToGive.toDouble()
 
@@ -5038,9 +4966,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 currenttemp = currenttemp,
                 overrideSafetyLimits = basalDecision.overrideSafety
             )
-            finalizeDecisionAwareForecast(finalResult)
+            val finalDecisionResult = finalizeDecisionAwareForecast(finalResult)
             comparator.compare(
-                aimiResult = finalResult,
+                aimiResult = finalDecisionResult,
                 glucoseStatus = glucose_status,
                 currentTemp = currenttemp,
                 iobData = iob_data_array,
@@ -5069,7 +4997,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             // 🎯 Process UnifiedReactivityLearner (old learner removed)
             unifiedReactivityLearner.processIfNeeded()  // Analyze & adjust every 6h
 
-            return finalResult
+            return finalDecisionResult
         }
     }
 

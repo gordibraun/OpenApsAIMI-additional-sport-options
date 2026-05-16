@@ -89,6 +89,7 @@ import javax.inject.Inject
 import javax.inject.Provider
 import javax.inject.Singleton
 import kotlin.math.floor
+import kotlin.math.max
 import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfBlender
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.IsfFusion
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.IsfFusionBounds
@@ -219,18 +220,21 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     @SuppressLint("DefaultLocale")
     override fun getIsfMgdl(profile: Profile, caller: String): Double? {
         val start = dateUtil.now()
-        val multiplier = (profile as? ProfileSealed.EPS)?.value?.originalPercentage?.div(100.0)
-            ?: return null
-
-        val sensitivity = calculateVariableIsf(start, multiplier)
+        val profilePercentage = (profile as? ProfileSealed.EPS)?.value?.originalPercentage ?: profile.percentage
+        val sensitivity = calculateVariableIsf(start, null)
+        val dynamicIsf = sensitivity.second
+        val profileIsf = profile.getProfileIsfMgdl()
+        val finalIsf = dynamicIsf?.let {
+            if (profilePercentage < 100) max(it, profileIsf) else it
+        }
 
         profiler.log(
             LTag.APS,
-            "getIsfMgdl() ${sensitivity.first} ${sensitivity.second} ${dateUtil.dateAndTimeAndSecondsString(start)} $caller",
+            "getIsfMgdl() ${sensitivity.first} $finalIsf profile=${profilePercentage}% profileIsf=$profileIsf ${dateUtil.dateAndTimeAndSecondsString(start)} $caller",
             start
         )
 
-        return sensitivity.second?.let { it * multiplier }
+        return finalIsf
     }
 
     override fun getAverageIsfMgdl(timestamp: Long, caller: String): Double? {
@@ -463,7 +467,9 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
             aapsLogger.debug(LTag.APS, rh.gs(app.aaps.core.ui.R.string.no_profile_set))
             return
         }
+        val activeProfilePercentage = (profile as? ProfileSealed.EPS)?.value?.originalPercentage ?: profile.percentage
         val profileBasalFallback = profile.getBasal()
+        val activeProfileIsf = profile.getProfileIsfMgdl()
         val currentBasalForInvoke =
             if (startupForecastOnly && pump.baseBasalRate < 0.01) {
                 aapsLogger.debug(
@@ -683,7 +689,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
             val tdd24ForPk = tdd24Hrs  // garde ta variable existante ici (Double)
 
 // IMPORTANT : passer un ISF "profil brut" pour éviter toute ré-entrée dans dynISF
-            val profileIsfRaw = profile.getProfileIsfMgdl()   // mg/dL/U du profil, SANS dynamique
+            val profileIsfRaw = activeProfileIsf   // mg/dL/U du profil, SANS dynamique
 
             val pkpdRuntimeNow = pkpdIntegration.computeRuntime(
                 epochMillis = nowMs,
@@ -748,7 +754,10 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 futureActivity = futureActivity,
                 sensorLagActivity = sensorLagActivity,
                 historicActivity = historicActivity,
-                currentActivity = currentActivity
+                currentActivity = currentActivity,
+                profile_percentage = activeProfilePercentage,
+                profile_basal = profileBasalFallback,
+                profile_sens = activeProfileIsf
             )
 
             val microBolusAllowed = constraintsChecker.isSMBModeEnabled(ConstraintObject(tempBasalFallback.not(), aapsLogger)).also { inputConstraints.copyReasons(it) }.value()

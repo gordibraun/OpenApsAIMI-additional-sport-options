@@ -70,6 +70,24 @@ def min_bg_between(points: list[GlucosePoint], start: int, end: int) -> float | 
     return min(values) if values else None
 
 
+def has_newer_bg_between(points: list[GlucosePoint], start: int, end: int) -> bool:
+    return any(start < p.timestamp <= end for p in points)
+
+
+def prediction_at(result: dict[str, Any], name: str, minutes: int) -> float | None:
+    pred_bgs = result.get("predBGs")
+    if not isinstance(pred_bgs, dict):
+        return None
+    series = pred_bgs.get(name)
+    if not isinstance(series, list):
+        return None
+    index = minutes // 5
+    if index >= len(series):
+        return None
+    value = number(series[index], default=math.nan)
+    return value if math.isfinite(value) else None
+
+
 def had_low_recent(points: list[GlucosePoint], timestamp: int) -> bool:
     recent = [p for p in points if timestamp - 90 * 60 * 1000 <= p.timestamp < timestamp]
     if not recent:
@@ -183,7 +201,7 @@ def main() -> int:
     decisions: list[dict[str, Any]] = []
     for row in conn.execute(
         """
-        SELECT timestamp, glucoseStatusJson, mealDataJson, profileJson, currentTempJson, resultJson
+        SELECT timestamp, dateCreated, glucoseStatusJson, mealDataJson, profileJson, currentTempJson, resultJson
         FROM apsResults
         WHERE isValid = 1
           AND timestamp >= ?
@@ -192,6 +210,7 @@ def main() -> int:
         (cutoff,),
     ):
         ts = int(row["timestamp"])
+        date_created = int(row["dateCreated"] or ts)
         gs = read_json(row["glucoseStatusJson"])
         meal = read_json(row["mealDataJson"])
         profile_json = read_json(row["profileJson"])
@@ -200,6 +219,7 @@ def main() -> int:
         reason = str(result.get("reason") or "")
 
         bg = number(gs.get("glucose") or result.get("bg"))
+        bg_snapshot_ts = int(number(gs.get("date"), default=ts))
         delta = number(gs.get("delta"))
         short_delta = number(gs.get("shortAvgDelta"))
         long_delta = number(gs.get("longAvgDelta"))
@@ -229,11 +249,34 @@ def main() -> int:
             fresh_smb=fresh_smb,
         )
 
+        actual_15 = first_bg_at_or_after(glucose_points, ts + 15 * 60 * 1000)
         actual_30 = first_bg_at_or_after(glucose_points, ts + 30 * 60 * 1000)
         actual_60 = first_bg_at_or_after(glucose_points, ts + 60 * 60 * 1000)
         actual_120 = first_bg_at_or_after(glucose_points, ts + 120 * 60 * 1000)
         min_180 = min_bg_between(glucose_points, ts, ts + 180 * 60 * 1000)
+        result_delay_sec = max(0.0, (date_created - ts) / 1000.0)
+        bg_snapshot_age_sec = max(0.0, (ts - bg_snapshot_ts) / 1000.0)
+        newer_bg_before_result = has_newer_bg_between(glucose_points, bg_snapshot_ts + 30 * 1000, date_created)
+        stale_or_delayed_result = newer_bg_before_result
+        aimi_final_15 = prediction_at(result, "AIMI_FINAL", 15)
+        aimi_final_30 = prediction_at(result, "AIMI_FINAL", 30)
+        aimi_final_60 = prediction_at(result, "AIMI_FINAL", 60)
+        soft_momentum_15 = prediction_at(result, "AIMI_MOMENTUM_SOFT", 15)
+        soft_momentum_30 = prediction_at(result, "AIMI_MOMENTUM_SOFT", 30)
+        soft_momentum_60 = prediction_at(result, "AIMI_MOMENTUM_SOFT", 60)
+        aimi_final_error_15 = None if actual_15 is None or aimi_final_15 is None else aimi_final_15 - actual_15
+        aimi_final_error_30 = None if actual_30 is None or aimi_final_30 is None else aimi_final_30 - actual_30
         forecast_error_60 = None if actual_60 is None else forecast - actual_60
+        aimi_final_error_60 = None if actual_60 is None or aimi_final_60 is None else aimi_final_60 - actual_60
+        soft_momentum_error_15 = None if actual_15 is None or soft_momentum_15 is None else soft_momentum_15 - actual_15
+        soft_momentum_error_30 = None if actual_30 is None or soft_momentum_30 is None else soft_momentum_30 - actual_30
+        soft_momentum_error_60 = None if actual_60 is None or soft_momentum_60 is None else soft_momentum_60 - actual_60
+        soft_momentum_winner_60 = (
+            actual_60 is not None
+            and aimi_final_error_60 is not None
+            and soft_momentum_error_60 is not None
+            and abs(soft_momentum_error_60) < abs(aimi_final_error_60)
+        )
         below_target_after = actual_60 is not None and target > 0 and actual_60 < target - 5
         hypo_after = min_180 is not None and min_180 < 70
         smb_or_high_tbr = units > 0.0 or (rate > 0 and duration > 0 and target > 0 and rate > 1.05)
@@ -269,13 +312,32 @@ def main() -> int:
                 "min_guard": round(min_guard, 1),
                 "smb_units": round(units, 3),
                 "rate": round(rate, 3),
+                "duration": round(duration, 1),
                 "profile_current_basal": round(profile_current_basal, 3),
                 "current_temp_rate": round(current_temp_rate, 3),
+                "actual_15": actual_15,
                 "actual_30": actual_30,
                 "actual_60": actual_60,
                 "actual_120": actual_120,
                 "min_180": min_180,
+                "result_delay_sec": round(result_delay_sec, 1),
+                "bg_snapshot_age_sec": round(bg_snapshot_age_sec, 1),
+                "newer_bg_before_result": newer_bg_before_result,
+                "stale_or_delayed_result": stale_or_delayed_result,
+                "aimi_final_15": None if aimi_final_15 is None else round(aimi_final_15, 1),
+                "aimi_final_30": None if aimi_final_30 is None else round(aimi_final_30, 1),
+                "aimi_final_60": None if aimi_final_60 is None else round(aimi_final_60, 1),
+                "soft_momentum_15": None if soft_momentum_15 is None else round(soft_momentum_15, 1),
+                "soft_momentum_30": None if soft_momentum_30 is None else round(soft_momentum_30, 1),
+                "soft_momentum_60": None if soft_momentum_60 is None else round(soft_momentum_60, 1),
+                "aimi_final_error_15": None if aimi_final_error_15 is None else round(aimi_final_error_15, 1),
+                "aimi_final_error_30": None if aimi_final_error_30 is None else round(aimi_final_error_30, 1),
                 "forecast_error_60": None if forecast_error_60 is None else round(forecast_error_60, 1),
+                "aimi_final_error_60": None if aimi_final_error_60 is None else round(aimi_final_error_60, 1),
+                "soft_momentum_error_15": None if soft_momentum_error_15 is None else round(soft_momentum_error_15, 1),
+                "soft_momentum_error_30": None if soft_momentum_error_30 is None else round(soft_momentum_error_30, 1),
+                "soft_momentum_error_60": None if soft_momentum_error_60 is None else round(soft_momentum_error_60, 1),
+                "soft_momentum_winner_60": soft_momentum_winner_60,
                 "below_target_after": below_target_after,
                 "hypo_after": hypo_after,
                 "smb_or_high_tbr": smb_or_high_tbr,
@@ -312,7 +374,46 @@ def main() -> int:
     hyper_kicker_blocked_cycles = [d for d in decisions if d["hyper_kicker_blocked"]]
     low_forecast_hyper_kicker = [d for d in decisions if d["low_forecast_with_hyper_kicker"]]
     late_basal_cycles = [d for d in decisions if d["late_basal_reduction"]]
+    stale_or_delayed = [d for d in decisions if d["stale_or_delayed_result"]]
+    stale_or_delayed_with_action = [
+        d for d in stale_or_delayed
+        if d["smb_units"] > 0.0 or (
+            d["rate"] > 0.0
+            and d["duration"] > 0.0
+            and d["profile_current_basal"] > 0.0
+            and d["rate"] > d["profile_current_basal"] * 1.2
+        )
+    ]
+    falling_cycles = [d for d in decisions if d["delta"] <= -2.0 or d["short_delta"] <= -2.0]
+    falling_forecast_too_low_15 = [
+        d for d in falling_cycles
+        if d["aimi_final_error_15"] is not None and d["aimi_final_error_15"] <= -10.0
+    ]
+    falling_forecast_too_low_30 = [
+        d for d in falling_cycles
+        if d["aimi_final_error_30"] is not None and d["aimi_final_error_30"] <= -15.0
+    ]
     errors = [d["forecast_error_60"] for d in decisions if d["forecast_error_60"] is not None]
+    aimi_final_abs_errors_15 = [abs(d["aimi_final_error_15"]) for d in decisions if d["aimi_final_error_15"] is not None]
+    aimi_final_abs_errors_30 = [abs(d["aimi_final_error_30"]) for d in decisions if d["aimi_final_error_30"] is not None]
+    aimi_final_abs_errors = [abs(d["aimi_final_error_60"]) for d in decisions if d["aimi_final_error_60"] is not None]
+    soft_momentum_abs_errors = [abs(d["soft_momentum_error_60"]) for d in decisions if d["soft_momentum_error_60"] is not None]
+    ab_cycles = [
+        d for d in decisions
+        if d["aimi_final_error_60"] is not None and d["soft_momentum_error_60"] is not None
+    ]
+    ab_aimi_final_abs_errors = [abs(d["aimi_final_error_60"]) for d in ab_cycles]
+    ab_soft_momentum_abs_errors = [abs(d["soft_momentum_error_60"]) for d in ab_cycles]
+    soft_momentum_cycles = [d for d in decisions if d["soft_momentum_60"] is not None]
+    soft_momentum_pending = [
+        d for d in soft_momentum_cycles
+        if d["aimi_final_error_60"] is None or d["soft_momentum_error_60"] is None
+    ]
+    soft_momentum_better = [d for d in ab_cycles if d["soft_momentum_winner_60"]]
+    aimi_final_better = [
+        d for d in ab_cycles
+        if abs(d["aimi_final_error_60"]) < abs(d["soft_momentum_error_60"])
+    ]
 
     summary = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -332,7 +433,23 @@ def main() -> int:
         "hyper_kicker_blocked_cycles": len(hyper_kicker_blocked_cycles),
         "low_forecast_with_hyper_kicker": len(low_forecast_hyper_kicker),
         "late_basal_reduction_cycles": len(late_basal_cycles),
+        "stale_or_delayed_results": len(stale_or_delayed),
+        "stale_or_delayed_results_with_action": len(stale_or_delayed_with_action),
+        "falling_cycles": len(falling_cycles),
+        "falling_forecast_too_low_15m": len(falling_forecast_too_low_15),
+        "falling_forecast_too_low_30m": len(falling_forecast_too_low_30),
         "median_forecast_error_60m": None if not errors else round(median(errors), 1),
+        "median_abs_aimi_final_error_15m": None if not aimi_final_abs_errors_15 else round(median(aimi_final_abs_errors_15), 1),
+        "median_abs_aimi_final_error_30m": None if not aimi_final_abs_errors_30 else round(median(aimi_final_abs_errors_30), 1),
+        "soft_momentum_available_cycles": len(soft_momentum_cycles),
+        "soft_momentum_pending_60m": len(soft_momentum_pending),
+        "ab_momentum_cycles_60m": len(ab_cycles),
+        "soft_momentum_better_60m": len(soft_momentum_better),
+        "aimi_final_better_60m": len(aimi_final_better),
+        "median_abs_aimi_final_error_60m": None if not aimi_final_abs_errors else round(median(aimi_final_abs_errors), 1),
+        "median_abs_soft_momentum_error_60m": None if not soft_momentum_abs_errors else round(median(soft_momentum_abs_errors), 1),
+        "median_abs_aimi_final_ab_error_60m": None if not ab_aimi_final_abs_errors else round(median(ab_aimi_final_abs_errors), 1),
+        "median_abs_soft_momentum_ab_error_60m": None if not ab_soft_momentum_abs_errors else round(median(ab_soft_momentum_abs_errors), 1),
         "waiting_for_new_data_after_monitor_start": waiting_for_new_data,
     }
     json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -348,8 +465,8 @@ def main() -> int:
             ]
         else:
             lines = [
-                "| время | тип | BG | прогноз | факт +60 | цель | SMB | свежий SMB 60м | мин +180 |",
-                "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+                "| время | тип | BG | прогноз | AIMI +15 | AIMI +30 | AIMI +60 | мягк. +60 | факт +15 | факт +30 | факт +60 | цель | SMB | свежий SMB 60м | мин +180 |",
+                "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
             ]
         for d in rows[:limit]:
             if include_basal:
@@ -361,6 +478,12 @@ def main() -> int:
             else:
                 lines.append(
                     f"| {d['time']} | {d['type']} | {d['bg']} | {d['forecast']} | "
+                    f"{'' if d['aimi_final_15'] is None else d['aimi_final_15']} | "
+                    f"{'' if d['aimi_final_30'] is None else d['aimi_final_30']} | "
+                    f"{'' if d['aimi_final_60'] is None else d['aimi_final_60']} | "
+                    f"{'' if d['soft_momentum_60'] is None else d['soft_momentum_60']} | "
+                    f"{'' if d['actual_15'] is None else round(d['actual_15'], 1)} | "
+                    f"{'' if d['actual_30'] is None else round(d['actual_30'], 1)} | "
                     f"{'' if d['actual_60'] is None else round(d['actual_60'], 1)} | {d['target']} | "
                     f"{d['smb_units']} | {d['fresh_smb_60m']} | {'' if d['min_180'] is None else round(d['min_180'], 1)} |"
                 )
@@ -391,6 +514,22 @@ def main() -> int:
         proposal_lines.append(
             "- Проверить позднее снижение базала: прогнозная линия уже ниже цели, но финальный базал еще выше половины профильного."
         )
+    if stale_or_delayed_with_action:
+        proposal_lines.append(
+            "- Усилить защиту свежести: есть APS-результаты, завершившиеся уже после новой CGM-точки, но все еще с действием SMB/TBR."
+        )
+    if falling_forecast_too_low_15 or falling_forecast_too_low_30:
+        proposal_lines.append(
+            "- Проверить слой падения: есть циклы, где прогноз при снижении оказался заметно ниже факта на +15/+30 минут."
+        )
+    if ab_cycles:
+        proposal_lines.append(
+            "- Сравнить A/B momentum: если мягкая линия чаще выигрывает на +60 минут и не дает крупных недооценок, переносить ее в основной прогноз."
+        )
+    elif soft_momentum_pending:
+        proposal_lines.append(
+            "- A/B momentum уже пишется, но фактическая глюкоза +60 минут еще не накопилась; дождаться следующего отчета после часа наблюдения."
+        )
     if not proposal_lines:
         proposal_lines.append("- Явных сигналов ухудшения по текущему окну нет; продолжать сбор для накопления статистики.")
 
@@ -417,7 +556,23 @@ def main() -> int:
 - Global Hyper Kicker заблокирован защитой: {summary['hyper_kicker_blocked_cycles']}
 - Global Hyper Kicker при прогнозе ниже цели: {summary['low_forecast_with_hyper_kicker']}
 - Позднее снижение базала при низком прогнозе: {summary['late_basal_reduction_cycles']}
+- Устаревшие или задержанные APS-результаты: {summary['stale_or_delayed_results']}
+- Устаревшие или задержанные результаты с действием SMB/TBR: {summary['stale_or_delayed_results_with_action']}
+- Циклы с падением: {summary['falling_cycles']}
+- Слишком низкий прогноз при падении на 15 минут: {summary['falling_forecast_too_low_15m']}
+- Слишком низкий прогноз при падении на 30 минут: {summary['falling_forecast_too_low_30m']}
 - Медианная ошибка прогноза на 60 минут: {summary['median_forecast_error_60m']}
+- Медианная абсолютная ошибка AIMI +15: {summary['median_abs_aimi_final_error_15m']}
+- Медианная абсолютная ошибка AIMI +30: {summary['median_abs_aimi_final_error_30m']}
+- Циклы с мягкой линией momentum: {summary['soft_momentum_available_cycles']}
+- Циклы мягкой линии, ожидающие факт +60: {summary['soft_momentum_pending_60m']}
+- A/B momentum циклов с обеими линиями: {summary['ab_momentum_cycles_60m']}
+- Мягкий momentum точнее на +60 минут: {summary['soft_momentum_better_60m']}
+- Основной AIMI точнее на +60 минут: {summary['aimi_final_better_60m']}
+- Медианная абсолютная ошибка основного AIMI +60: {summary['median_abs_aimi_final_error_60m']}
+- Медианная абсолютная ошибка мягкого momentum +60: {summary['median_abs_soft_momentum_error_60m']}
+- В A/B-циклах ошибка основного AIMI +60: {summary['median_abs_aimi_final_ab_error_60m']}
+- В A/B-циклах ошибка мягкого momentum +60: {summary['median_abs_soft_momentum_ab_error_60m']}
 
 ## Что смотреть после изменения
 
@@ -426,6 +581,10 @@ def main() -> int:
 ## Эпизоды с завышенным прогнозом
 
 {sample_rows(false_high)}
+
+## A/B momentum: где мягкая линия была точнее
+
+{sample_rows(soft_momentum_better)}
 
 ## Быстрые спасательные отскоки
 
@@ -442,6 +601,14 @@ def main() -> int:
 ## Позднее снижение базала
 
 {sample_rows(late_basal_cycles, include_basal=True)}
+
+## Устаревшие или задержанные результаты APS
+
+{sample_rows(stale_or_delayed_with_action)}
+
+## Слишком низкий прогноз при падении
+
+{sample_rows(falling_forecast_too_low_15 + falling_forecast_too_low_30)}
 
 ## Файлы
 

@@ -74,6 +74,17 @@ adb_device_state() {
   "$ADB" devices | awk -v serial="$1" '$1 == serial { print $2; found = 1 } END { if (!found) print "" }'
 }
 
+target_matches_serial() {
+  local target="$1"
+  local actual
+  actual="$("$ADB" -s "$target" shell 'getprop ro.serialno; getprop ro.boot.serialno' 2>/dev/null | tr -d '\r' | awk 'NF {print; exit}')"
+  if [ "$actual" = "$SERIAL" ]; then
+    return 0
+  fi
+  echo "Ignoring ADB target $target: device serial is '${actual:-unknown}', expected '$SERIAL'." >&2
+  return 1
+}
+
 resolve_adb_target() {
   if [ "$(adb_device_state "$SERIAL")" = "device" ]; then
     echo "$SERIAL"
@@ -86,17 +97,18 @@ resolve_adb_target() {
     target="$ip:$ADB_WIFI_PORT"
     if [ -n "$ip" ]; then
       "$ADB" connect "$target" >/dev/null 2>&1 || true
-      if [ "$(adb_device_state "$target")" = "device" ]; then
+      if [ "$(adb_device_state "$target")" = "device" ] && target_matches_serial "$target"; then
         echo "$target"
         return 0
       fi
+      "$ADB" disconnect "$target" >/dev/null 2>&1 || true
     fi
   fi
 
   "$CONNECTOR" >/dev/null 2>&1 || true
   local wifi_target
   wifi_target="$("$ADB" devices | awk -v port=":$ADB_WIFI_PORT" '$1 ~ port "$" && $2 == "device" { print $1; exit }')"
-  if [ -n "$wifi_target" ]; then
+  if [ -n "$wifi_target" ] && target_matches_serial "$wifi_target"; then
     echo "$wifi_target"
     return 0
   fi

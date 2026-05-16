@@ -58,5 +58,8 @@ data class OapsProfileAimi(
     var futureActivity: Double,
     var sensorLagActivity: Double,
     var historicActivity: Double,
-    var currentActivity: Double
+    var currentActivity: Double,
+    var profile_percentage: Int = 100,
+    var profile_basal: Double = 0.0,
+    var profile_sens: Double = 0.0
 )

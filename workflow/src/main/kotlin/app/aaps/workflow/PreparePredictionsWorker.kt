@@ -16,15 +16,18 @@ import app.aaps.core.interfaces.nsclient.ProcessedDeviceStatusData
 import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.overview.OverviewMenus
 import app.aaps.core.interfaces.plugin.ActivePlugin
+import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.utils.DateUtil
+import app.aaps.core.objects.extensions.target
 import app.aaps.core.objects.workflow.LoggingWorker
 import app.aaps.core.utils.receivers.DataWorkerStorage
 import kotlinx.coroutines.Dispatchers
 import java.util.Calendar
 import javax.inject.Inject
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -43,6 +46,7 @@ class PreparePredictionsWorker(
     @Inject lateinit var persistenceLayer: PersistenceLayer
     @Inject lateinit var overviewMenus: OverviewMenus
     @Inject lateinit var dataWorkerStorage: DataWorkerStorage
+    @Inject lateinit var profileFunction: ProfileFunction
     @Inject lateinit var profileUtil: ProfileUtil
     @Inject lateinit var rh: ResourceHelper
     @Inject lateinit var dateUtil: DateUtil
@@ -56,7 +60,9 @@ class PreparePredictionsWorker(
             ?: return Result.failure(workDataOf("Error" to "missing input data"))
 
         val apsResult = resolveBestApsResult()
-        val predictionsAreStale = apsResult?.let { isPredictionStale(it) } == true
+        val predictionsAreStaleByBg = apsResult?.let { isPredictionStale(it) } == true
+        val predictionsAreStaleByContext = apsResult?.let { isPredictionContextStale(it) } == true
+        val predictionsAreStale = predictionsAreStaleByBg || predictionsAreStaleByContext
         val predictionsAvailable =
             apsResult?.predictionsAsGv?.isNotEmpty() == true ||
                 (if (config.APS) loop.lastRun?.request?.hasPredictions == true else config.AAPSCLIENT)
@@ -85,13 +91,11 @@ class PreparePredictionsWorker(
 
         val bgListArray: MutableList<DataPointWithLabelInterface> = ArrayList()
         val finalAimiListArray: MutableList<DataPointWithLabelInterface> = ArrayList()
-        val predictions: MutableList<GlucoseValueDataPoint>? = apsResult?.predictionsAsGv
+        val predictions: MutableList<GlucoseValueDataPoint>? = if (predictionsAreStale) {
+            mutableListOf()
+        } else apsResult?.predictionsAsGv
             ?.map { bg ->
-                val adjustedBg =
-                    if (predictionsAreStale && bg.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION) {
-                        bg.copy(sourceSensor = SourceSensor.AIMI_FINAL_PREDICTION_STALE)
-                    } else bg
-                GlucoseValueDataPoint(adjustedBg, profileUtil, rh, dateUtil)
+                GlucoseValueDataPoint(bg, profileUtil, rh, dateUtil)
             }
             ?.toMutableList()
         if (predictions != null) {
@@ -112,7 +116,7 @@ class PreparePredictionsWorker(
         val lastFinalPoint = finalAimiListArray.lastOrNull() as? GlucoseValueDataPoint
         aapsLogger.debug(
             LTag.WORKER,
-            "AIMI final prediction prepared: points=${finalAimiListArray.size} stale=$predictionsAreStale" +
+            "AIMI final prediction prepared: points=${finalAimiListArray.size} stale=$predictionsAreStale contextStale=$predictionsAreStaleByContext" +
                 (firstFinalPoint?.let { " first=${dateUtil.dateAndTimeString(it.data.timestamp)} ${profileUtil.fromMgdlToStringInUnits(it.data.value)}" } ?: "") +
                 (lastFinalPoint?.let { " last=${dateUtil.dateAndTimeString(it.data.timestamp)} ${profileUtil.fromMgdlToStringInUnits(it.data.value)}" } ?: "")
         )
@@ -120,24 +124,61 @@ class PreparePredictionsWorker(
     }
 
     private fun isPredictionStale(apsResult: app.aaps.core.interfaces.aps.APSResult): Boolean {
-        val actualBg = activePlugin.activeIobCobCalculator.ads.actualBg() ?: return true
+        val actualBg = currentBgSnapshot() ?: return true
         val predictionBgTimestamp = apsResult.glucoseStatus?.date ?: apsResult.date
         val predictionBgValue = apsResult.glucoseStatus?.glucose
         val bgAgeGap = actualBg.timestamp - predictionBgTimestamp
-        val bgValueGap = predictionBgValue?.let { kotlin.math.abs(actualBg.recalculated - it) } ?: 0.0
+        val bgValueGap = predictionBgValue?.let { kotlin.math.abs(actualBg.value - it) } ?: 0.0
         val isStaleByTime = bgAgeGap > T.mins(6).msecs()
         val isStaleByValue = bgAgeGap > T.mins(1).msecs() && bgValueGap >= 10.0
 
         if (isStaleByTime || isStaleByValue) {
             aapsLogger.debug(
                 LTag.WORKER,
-                "Marking AIMI predictions as stale: aps=${dateUtil.dateAndTimeString(apsResult.date)} " +
+                "Hiding stale AIMI prediction by BG: aps=${dateUtil.dateAndTimeString(apsResult.date)} " +
                     "bgSnapshot=${dateUtil.dateAndTimeString(predictionBgTimestamp)} ${profileUtil.fromMgdlToStringInUnits(predictionBgValue ?: 0.0)} " +
-                    "currentBg=${dateUtil.dateAndTimeString(actualBg.timestamp)} ${profileUtil.fromMgdlToStringInUnits(actualBg.recalculated)} " +
+                    "currentBg=${dateUtil.dateAndTimeString(actualBg.timestamp)} ${profileUtil.fromMgdlToStringInUnits(actualBg.value)} " +
+                    "source=${actualBg.source} " +
                     "ageGapMs=$bgAgeGap valueGapMgdl=$bgValueGap"
             )
         }
         return isStaleByTime || isStaleByValue
+    }
+
+    private data class BgSnapshot(val timestamp: Long, val value: Double, val source: String)
+
+    private fun currentBgSnapshot(): BgSnapshot? {
+        val adsBg = activePlugin.activeIobCobCalculator.ads.actualBg()
+            ?.let { BgSnapshot(it.timestamp, it.recalculated, "autosens") }
+        val dbBg = persistenceLayer.getLastGlucoseValue()
+            ?.let { BgSnapshot(it.timestamp, it.value, "db") }
+        return listOfNotNull(adsBg, dbBg).maxByOrNull { it.timestamp }
+    }
+
+    private fun isPredictionContextStale(apsResult: app.aaps.core.interfaces.aps.APSResult): Boolean {
+        val aimiProfile = apsResult.oapsProfileAimi ?: return false
+        val now = dateUtil.now()
+        val currentProfile = profileFunction.getProfile(now) ?: return true
+        val currentProfileSwitch = persistenceLayer.getEffectiveProfileSwitchActiveAt(now)
+        val currentPercentage = currentProfileSwitch?.originalPercentage ?: currentProfile.percentage
+        val currentTempTarget = persistenceLayer.getTemporaryTargetActiveAt(now)
+        val currentTempTargetSet = currentTempTarget != null
+        val currentTarget = currentTempTarget?.target() ?: currentProfile.getTargetMgdl()
+
+        val tempTargetMismatch = aimiProfile.temptargetSet != currentTempTargetSet
+        val targetMismatch = abs(currentTarget - aimiProfile.target_bg) >= 2.0
+        val profileMismatch = currentPercentage != aimiProfile.profile_percentage
+
+        if (tempTargetMismatch || targetMismatch || profileMismatch) {
+            aapsLogger.debug(
+                LTag.WORKER,
+                "Hiding stale AIMI prediction: resultTarget=${aimiProfile.target_bg} currentTarget=$currentTarget " +
+                    "resultTempTarget=${aimiProfile.temptargetSet} currentTempTarget=$currentTempTargetSet " +
+                    "resultProfile=${aimiProfile.profile_percentage}% currentProfile=$currentPercentage%"
+            )
+        }
+
+        return tempTargetMismatch || targetMismatch || profileMismatch
     }
 
     private fun resolveBestApsResult(): app.aaps.core.interfaces.aps.APSResult? {
