@@ -112,6 +112,8 @@
     <string name="food_type_fast">Быстрая</string>
     <string name="food_type_balanced">Обычная</string>
     <string name="food_type_slow">Медленная</string>
+    <string name="aimi_details_show">Показать детали AIMI</string>
+    <string name="aimi_details_hide">Скрыть детали AIMI</string>
     <string name="a11y_set_carb_timer">set carb timer alarm</string>
     <string name="show_calculation">Show calcuation</string>
 

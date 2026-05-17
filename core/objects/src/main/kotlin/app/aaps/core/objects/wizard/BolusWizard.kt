@@ -338,6 +338,19 @@ class BolusWizard @Inject constructor(
         )
     }
 
+    fun applyAimiForecastBolusAdjustment(adjustedBolus: Double, explanation: String) {
+        calculatedTotalInsulin = adjustedBolus
+        insulinAfterConstraints = constraintChecker.applyBolusConstraints(ConstraintObject(calculatedTotalInsulin, aapsLogger)).value()
+        aimiMealDecision = aimiMealDecision?.copy(
+            recommendedBolus = insulinAfterConstraints,
+            explanation = "${aimiMealDecision?.explanation.orEmpty()}. $explanation"
+        )
+        aapsLogger.debug(
+            LTag.APS,
+            "AIMI wizard bolus adjusted by forecast: adjusted=${"%.2f".format(insulinAfterConstraints)}U explanation=$explanation"
+        )
+    }
+
     private fun aimiExplainShort(): String? {
         val decision = aimiMealDecision ?: return null
         return buildString {

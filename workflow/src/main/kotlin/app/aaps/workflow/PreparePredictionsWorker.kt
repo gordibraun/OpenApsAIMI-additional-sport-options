@@ -64,7 +64,10 @@ class PreparePredictionsWorker(
         val apsResult = resolveBestApsResult()
         val predictionsAreStaleByBg = apsResult?.let { isPredictionStale(it) } == true
         val predictionsAreStaleByContext = apsResult?.let { isPredictionContextStale(it) } == true
-        val predictionsAreStale = predictionsAreStaleByBg || predictionsAreStaleByContext
+        val predictionsAreStaleByCarbs = apsResult?.let { isPredictionStaleByCarbs(it) } == true
+        val predictionsAreStale = predictionsAreStaleByBg || predictionsAreStaleByContext || predictionsAreStaleByCarbs
+        val hidePredictions = predictionsAreStaleByBg
+        val markPredictionPendingRecalc = !hidePredictions && (predictionsAreStaleByContext || predictionsAreStaleByCarbs)
         val predictionsAvailable =
             apsResult?.predictionsAsGv?.isNotEmpty() == true ||
                 (if (config.APS) loop.lastRun?.request?.hasPredictions == true else config.AAPSCLIENT)
@@ -108,9 +111,21 @@ class PreparePredictionsWorker(
         val predictionValues = mutableListOf<app.aaps.core.data.model.GV>()
         val finalAimiPredictionValues = mutableListOf<app.aaps.core.data.model.GV>()
         val lowPredictionMarkMgdl = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), profileUtil.units)
-        val predictions: MutableList<GlucoseValueDataPoint>? = if (predictionsAreStale) {
+        val displayPredictionValues = apsResult?.predictionsAsGv?.let { values ->
+            if (markPredictionPendingRecalc) {
+                values.map { bg ->
+                    when (bg.sourceSensor) {
+                        SourceSensor.AIMI_FINAL_PREDICTION,
+                        SourceSensor.AIMI_FINAL_PREDICTION_STALE -> bg.copy(sourceSensor = SourceSensor.AIMI_BEFORE_DECISION_PREDICTION)
+
+                        else -> bg
+                    }
+                }
+            } else values
+        }
+        val predictions: MutableList<GlucoseValueDataPoint>? = if (hidePredictions) {
             mutableListOf()
-        } else apsResult?.predictionsAsGv
+        } else displayPredictionValues
             ?.map { bg ->
                 GlucoseValueDataPoint(bg, profileUtil, rh, dateUtil, lowPredictionMarkMgdl)
             }
@@ -120,6 +135,7 @@ class PreparePredictionsWorker(
             for (prediction in predictions) {
                 if (prediction.data.value < 40) continue
                 if (prediction.data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION ||
+                    prediction.data.sourceSensor == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||
                     prediction.data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION_STALE
                 ) {
                     finalAimiListArray.add(prediction)
@@ -139,7 +155,8 @@ class PreparePredictionsWorker(
         val lastFinalPoint = finalAimiListArray.lastOrNull() as? GlucoseValueDataPoint
         aapsLogger.debug(
             LTag.WORKER,
-            "AIMI final prediction prepared: points=${finalAimiListArray.size} stale=$predictionsAreStale contextStale=$predictionsAreStaleByContext" +
+            "AIMI final prediction prepared: points=${finalAimiListArray.size} stale=$predictionsAreStale " +
+                "hide=$hidePredictions pendingRecalc=$markPredictionPendingRecalc contextStale=$predictionsAreStaleByContext carbsStale=$predictionsAreStaleByCarbs" +
                 (firstFinalPoint?.let { " first=${dateUtil.dateAndTimeString(it.data.timestamp)} ${profileUtil.fromMgdlToStringInUnits(it.data.value)}" } ?: "") +
                 (lastFinalPoint?.let { " last=${dateUtil.dateAndTimeString(it.data.timestamp)} ${profileUtil.fromMgdlToStringInUnits(it.data.value)}" } ?: "")
         )
@@ -166,6 +183,43 @@ class PreparePredictionsWorker(
             )
         }
         return isStaleByTime || isStaleByValue
+    }
+
+    private fun isPredictionStaleByCarbs(apsResult: app.aaps.core.interfaces.aps.APSResult): Boolean {
+        val resultTime = apsResult.date
+        val resultCob = apsResult.mealData?.mealCOB
+        val currentCob = try {
+            activePlugin.activeIobCobCalculator.getCobInfo("AIMI prediction stale by COB").displayCob
+        } catch (_: Throwable) {
+            null
+        }
+        if (resultCob != null && currentCob != null && abs(currentCob - resultCob) >= 5.0) {
+            aapsLogger.debug(
+                LTag.WORKER,
+                "AIMI prediction pending recalculation by COB mismatch: result=${dateUtil.dateAndTimeString(resultTime)} " +
+                    "resultCOB=${"%.1f".format(resultCob)} currentCOB=${"%.1f".format(currentCob)}"
+            )
+            return true
+        }
+
+        val changedCarbs = try {
+            persistenceLayer.getCarbsFromTime(resultTime - T.hours(24).msecs(), false)
+                .blockingGet()
+                .firstOrNull { carbs ->
+                    carbs.isValid && (carbs.dateCreated > resultTime || carbs.timestamp > resultTime)
+                }
+        } catch (_: Throwable) {
+            persistenceLayer.getNewestCarbs()
+                ?.takeIf { carbs -> carbs.isValid && (carbs.dateCreated > resultTime || carbs.timestamp > resultTime) }
+        } ?: return false
+
+        aapsLogger.debug(
+            LTag.WORKER,
+            "AIMI prediction pending recalculation by carbs: result=${dateUtil.dateAndTimeString(resultTime)} " +
+                "carbs=${changedCarbs.amount}g event=${dateUtil.dateAndTimeString(changedCarbs.timestamp)} " +
+                "created=${if (changedCarbs.dateCreated > 0) dateUtil.dateAndTimeString(changedCarbs.dateCreated) else "unknown"}"
+        )
+        return true
     }
 
     private data class BgSnapshot(val timestamp: Long, val value: Double, val source: String)
@@ -195,7 +249,7 @@ class PreparePredictionsWorker(
         if (tempTargetMismatch || targetMismatch || profileMismatch) {
             aapsLogger.debug(
                 LTag.WORKER,
-                "Hiding stale AIMI prediction: resultTarget=${aimiProfile.target_bg} currentTarget=$currentTarget " +
+                "AIMI prediction pending recalculation by context: resultTarget=${aimiProfile.target_bg} currentTarget=$currentTarget " +
                     "resultTempTarget=${aimiProfile.temptargetSet} currentTempTarget=$currentTempTargetSet " +
                     "resultProfile=${aimiProfile.profile_percentage}% currentProfile=$currentPercentage%"
             )

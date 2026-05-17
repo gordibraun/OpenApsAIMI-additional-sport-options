@@ -39,15 +39,29 @@
 
         </RelativeLayout>
 
-        <TextView
-            android:id="@+id/wizard_aimi_logic"
+        <Button
+            android:id="@+id/wizard_aimi_logic_toggle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginStart="10dp"
             android:layout_marginTop="6dp"
             android:layout_marginEnd="10dp"
+            android:minHeight="36dp"
+            android:padding="6dp"
+            android:text="@string/aimi_details_show"
+            android:textAllCaps="false"
+            android:textAppearance="?android:attr/textAppearanceSmall" />
+
+        <TextView
+            android:id="@+id/wizard_aimi_logic"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_marginTop="2dp"
+            android:layout_marginEnd="10dp"
             android:padding="8dp"
             android:textAppearance="?android:attr/textAppearanceSmall"
+            android:visibility="gone"
             tools:text="AIMI logic" />
 
         <LinearLayout
@@ -277,6 +291,26 @@
 
             </TableRow>
 
+            <TableRow
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <TextView
+                    android:id="@+id/carb_timing_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_span="3"
+                    android:paddingStart="10dp"
+                    android:paddingTop="2dp"
+                    android:paddingEnd="10dp"
+                    android:paddingBottom="8dp"
+                    android:textAppearance="?android:attr/textAppearanceSmall"
+                    android:textColor="?attr/carbsColor"
+                    android:visibility="gone"
+                    tools:text="Время углеводов: сейчас" />
+
+            </TableRow>
+
         </TableLayout>
 
         <include
@@ -300,33 +334,32 @@
                 android:textAppearance="@style/TextAppearance.AppCompat.Small"
                 android:textStyle="bold" />
 
-            <RadioGroup
+            <LinearLayout
                 android:id="@+id/food_type_group"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:orientation="horizontal">
 
-                <RadioButton
+                <CheckBox
                     android:id="@+id/food_type_fast"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="@string/food_type_fast" />
 
-                <RadioButton
+                <CheckBox
                     android:id="@+id/food_type_balanced"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:checked="true"
                     android:text="@string/food_type_balanced" />
 
-                <RadioButton
+                <CheckBox
                     android:id="@+id/food_type_slow"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="@string/food_type_slow" />
 
-            </RadioGroup>
+            </LinearLayout>
 
         </LinearLayout>
 

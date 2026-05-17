@@ -1021,7 +1021,11 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val bg = iobCobCalculator.ads.actualBg()?.valueToUnits(units) ?: 0.0
 
         // COB (как в визарде: берём displayCob)
-        val cob = iobCobCalculator.getCobInfo("Overview COB").displayCob ?: 0.0
+        val displayCob = iobCobCalculator.getCobInfo("Overview COB").displayCob ?: 0.0
+        val wizardUseCob = preferences.get(BooleanKey.WizardIncludeCob)
+        val wizardUseTrend = preferences.get(BooleanKey.WizardIncludeTrend)
+        val wizardUsePercentage = preferences.get(BooleanKey.WizardCorrectionPercent)
+        val cob = if (wizardUseCob) displayCob else 0.0
 
         val wizardLine: String? =
             if (profile != null && profileStore != null) {
@@ -1036,17 +1040,23 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     0.0,                           // correction
                     preferences.get(app.aaps.core.keys.IntKey.OverviewBolusPercentage),
                     true,                          // bgCheckbox
-                    true,                          // cobCheckbox
+                    wizardUseCob,                  // cobCheckbox
                     true,                          // iobCheckbox
                     true,                          // ??? (в визарде два раза iobCheckbox)
                     false,                         // superbolus
                     false,                         // ttCheckbox
-                    false,                         // trendCheckbox
+                    wizardUseTrend,                // trendCheckbox
                     false,                         // alarm
                     "",                            // notes
                     0,                             // carbTime
-                    usePercentage = false,
+                    usePercentage = wizardUsePercentage,
                     totalPercentage = preferences.get(app.aaps.core.keys.IntKey.OverviewBolusPercentage).toDouble()
+                )
+
+                aapsLogger.debug(
+                    LTag.UI,
+                    "Overview wizard line: insulin=${"%.2f".format(w.calculatedTotalInsulin)} bg=$bg displayCob=$displayCob " +
+                        "usedCob=$cob useCob=$wizardUseCob useTrend=$wizardUseTrend usePercentage=$wizardUsePercentage"
                 )
 
                 // “Результат / Не хватает” без текста, только значение+единица

@@ -177,29 +177,23 @@ class DetermineBasalResult @Inject constructor(
             val startTime = date
 
             val predictions = predictions()
-            predictions?.AIMI_FINAL?.let { aimiFinal ->
-                for (i in 1 until aimiFinal.size) {
-                    array.add(
-                        GV(
-                            raw = 0.0,
-                            noise = 0.0,
-                            value = aimiFinal[i].toDouble(),
-                            timestamp = startTime + i * 5 * 60 * 1000L,
-                            sourceSensor = SourceSensor.AIMI_FINAL_PREDICTION,
-                            trendArrow = TrendArrow.NONE
-                        )
-                    )
-                }
+            val aimiFinal = predictions?.AIMI_FINAL?.takeIf { it.isNotEmpty() }
+            val aimiBeforeDecision = predictions?.AIMI_BEFORE_DECISION?.takeIf { it.isNotEmpty() }
+            val displayedAimiPrediction = aimiFinal ?: aimiBeforeDecision
+            val displayedAimiSource = if (aimiFinal != null) {
+                SourceSensor.AIMI_FINAL_PREDICTION
+            } else {
+                SourceSensor.AIMI_BEFORE_DECISION_PREDICTION
             }
-            predictions?.AIMI_BEFORE_DECISION?.let { beforeDecision ->
-                for (i in 1 until beforeDecision.size) {
+            displayedAimiPrediction?.let { aimiPrediction ->
+                for (i in 1 until aimiPrediction.size) {
                     array.add(
                         GV(
                             raw = 0.0,
                             noise = 0.0,
-                            value = beforeDecision[i].toDouble(),
+                            value = aimiPrediction[i].toDouble(),
                             timestamp = startTime + i * 5 * 60 * 1000L,
-                            sourceSensor = SourceSensor.AIMI_BEFORE_DECISION_PREDICTION,
+                            sourceSensor = displayedAimiSource,
                             trendArrow = TrendArrow.NONE
                         )
                     )

@@ -299,7 +299,10 @@ class OverviewViewModel(
         val request = loop.lastRun?.request ?: return resourceHelper.gs(R.string.dashboard_adjustment_prediction_unavailable)
         val predictions = request.predictionsAsGv
         if (predictions.isEmpty()) return resourceHelper.gs(R.string.dashboard_adjustment_prediction_unavailable)
-        val prioritizedPredictions = predictions.filter { it.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION }
+        val prioritizedPredictions = predictions.filter {
+            it.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION ||
+                it.sourceSensor == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION
+        }
             .ifEmpty { predictions }
         val targetTime = now + TimeUnit.MINUTES.toMillis(PREDICTION_LOOKAHEAD_MINUTES)
         val closest = prioritizedPredictions.minByOrNull { abs(it.timestamp - targetTime) }

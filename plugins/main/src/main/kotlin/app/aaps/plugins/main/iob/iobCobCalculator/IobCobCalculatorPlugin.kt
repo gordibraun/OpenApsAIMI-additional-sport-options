@@ -432,6 +432,9 @@ class IobCobCalculatorPlugin @Inject constructor(
 
     @Synchronized
     private fun scheduleHistoryDataChange(event: EventNewHistoryData) {
+        aapsLogger.debug(LTag.AUTOSENS, "Refreshing predictions immediately after history data change")
+        calculationWorkflow.runOnReceivedPredictions(overviewData)
+
         // if there is nothing scheduled or asking reload deeper to the past
         if (scheduledEvent == null || event.oldDataTimestamp < (scheduledEvent?.oldDataTimestamp ?: 0L)) {
             // cancel waiting task to prevent sending multiple posts

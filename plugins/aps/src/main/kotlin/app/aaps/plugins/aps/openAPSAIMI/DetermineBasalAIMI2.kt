@@ -2711,7 +2711,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 "| SMB=${"%.2f".format(plannedSmbU)}U | быстрый отскок=${if (rescueFastActive) "да" else "нет"}"
         )
         consoleLog.add(
-            "Честный график: AIMI до новой подачи сохранен отдельно, AIMI_FINAL показывает прогноз после финального решения."
+            "Честный график: одна линия AIMI; до решения она оранжевая, после финального решения AIMI_FINAL голубая."
         )
         return PredictionResult(eventual, intsPredictions)
     }
@@ -3448,50 +3448,26 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 
         val halfBasalTarget = profile.half_basal_exercise_target
 
-        when {
-            !profile.temptargetSet && recentSteps5Minutes >= 0 && (recentSteps30Minutes >= 500 || recentSteps180Minutes > 1500) && recentSteps10Minutes > 0 && predictedBg < 140 -> {
-                this.targetBg = 130.0f
+        val explicitTarget = profile.target_bg
+        val hiddenActivityTargetWanted =
+            !profile.temptargetSet &&
+                recentSteps5Minutes >= 0 &&
+                (recentSteps30Minutes >= 500 || recentSteps180Minutes > 1500) &&
+                recentSteps10Minutes > 0 &&
+                predictedBg < 140
+        val hiddenRisingTargetWanted = !profile.temptargetSet && predictedBg >= 120 && combinedDelta > 3
+        val hiddenFallingTargetWanted = !profile.temptargetSet && combinedDelta <= 0 && predictedBg < 120
+        this.targetBg = explicitTarget.toFloat()
+        target_bg = explicitTarget
+        if (hiddenActivityTargetWanted || hiddenRisingTargetWanted || hiddenFallingTargetWanted) {
+            val reason = when {
+                hiddenActivityTargetWanted -> "активность без временной цели"
+                hiddenRisingTargetWanted   -> "быстрый рост без временной цели"
+                else                       -> "падение/ровная динамика без временной цели"
             }
-
-            !profile.temptargetSet && predictedBg >= 120 && combinedDelta > 3                                                                                                    -> {
-                var baseTarget = if (honeymoon) 110.0 else 70.0
-                if (hourOfDay in 0..11 || hourOfDay in 15..19 || hourOfDay >= 22) {
-                    baseTarget = if (honeymoon) 110.0 else 90.0
-                }
-                var hyperTarget = max(baseTarget, profile.target_bg - (bg - profile.target_bg) / 3).toInt()
-                hyperTarget = (hyperTarget * min(circadianSensitivity, 1.0)).toInt()
-                hyperTarget = max(hyperTarget, baseTarget.toInt())
-
-                this.targetBg = hyperTarget.toFloat()
-                target_bg = hyperTarget.toDouble()
-                val c = (halfBasalTarget - normalTarget).toDouble()
-                sensitivityRatio = c / (c + target_bg - normalTarget)
-                // limit sensitivityRatio to profile.autosens_max (1.2x by default)
-                sensitivityRatio = min(sensitivityRatio, profile.autosens_max)
-                sensitivityRatio = round(sensitivityRatio, 2)
-                //consoleLog.add("Sensitivity ratio set to $sensitivityRatio based on temp target of $target_bg; ")
-                consoleLog.add(context.getString(R.string.sensitivity_ratio_temp_target, sensitivityRatio, target_bg))
-            }
-
-            !profile.temptargetSet && combinedDelta <= 0 && predictedBg < 120                                                                                                    -> {
-                val baseHypoTarget = if (honeymoon) 130.0 else 110.0
-                val hypoTarget = baseHypoTarget * max(1.0, circadianSensitivity)
-                this.targetBg = min(hypoTarget.toFloat(), 166.0f)
-                target_bg = targetBg.toDouble()
-                val c = (halfBasalTarget - normalTarget).toDouble()
-                sensitivityRatio = c / (c + target_bg - normalTarget)
-                // limit sensitivityRatio to profile.autosens_max (1.2x by default)
-                sensitivityRatio = min(sensitivityRatio, profile.autosens_max)
-                sensitivityRatio = round(sensitivityRatio, 2)
-                //consoleLog.add("Sensitivity ratio set to $sensitivityRatio based on temp target of $target_bg; ")
-                consoleLog.add(context.getString(R.string.sensitivity_ratio_temp_target, sensitivityRatio, target_bg))
-            }
-
-            else                                                                                                                                                                 -> {
-                val defaultTarget = profile.target_bg
-                this.targetBg = defaultTarget.toFloat()
-                target_bg = targetBg.toDouble()
-            }
+            consoleLog.add(
+                "AIMI: скрытое изменение цели отключено ($reason); используется явная цель ${"%.0f".format(target_bg)}"
+            )
         }
         if (high_temptarget_raises_sensitivity && profile.temptargetSet && target_bg > normalTarget
             || profile.low_temptarget_lowers_sensitivity && profile.temptargetSet && target_bg < normalTarget
@@ -3937,8 +3913,16 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // and adjust it for the deviation above (used only for noisy target heuristics)
         val legacyEventual = naive_eventualBG + deviation
 
-        // raise target for noisy / raw CGM data
-        if (bg > max_bg && profile.adv_target_adjustments && !profile.temptargetSet) {
+        // AIMI keeps the calculation target equal to the explicit profile/temp target.
+        // The legacy advanced adjustment can silently lower target while the screen
+        // still looks like it is aiming at the profile target, so leave it disabled here.
+        val allowAutomaticTargetAdjustments = false
+        if (bg > max_bg && profile.adv_target_adjustments && !profile.temptargetSet && !allowAutomaticTargetAdjustments) {
+            consoleLog.add(
+                "AIMI: автоматическая коррекция цели отключена; используется явная цель ${"%.0f".format(target_bg)}"
+            )
+        }
+        if (bg > max_bg && profile.adv_target_adjustments && !profile.temptargetSet && allowAutomaticTargetAdjustments) {
             // with target=100, as BG rises from 100 to 160, adjustedTarget drops from 100 to 80
             val adjustedMinBG = round(max(80.0, min_bg - (bg - min_bg) / 3.0), 0)
             val adjustedTargetBG = round(max(80.0, target_bg - (bg - target_bg) / 3.0), 0)
@@ -4595,6 +4579,99 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             if (decisionChangedAfterForecast) {
                 applyDecisionAwarePredictions(recomputeForCurrentDecision())
             }
+
+            fun maxConsecutiveBelowTarget(values: List<Int>, limit: Double): Int {
+                var currentRun = 0
+                var bestRun = 0
+                values.forEach { value ->
+                    if (value.toDouble() < limit) {
+                        currentRun += 1
+                        bestRun = max(bestRun, currentRun)
+                    } else {
+                        currentRun = 0
+                    }
+                }
+                return bestRun
+            }
+
+            fun firstBelowMinute(series: List<Int>, startIndex: Int, limit: Double): Int? {
+                val offset = series.drop(startIndex).indexOfFirst { it.toDouble() < limit }
+                return offset.takeIf { it >= 0 }?.let { (startIndex + it) * 5 }
+            }
+
+            val aimiFinalSeries = result.predBGs?.AIMI_FINAL.orEmpty()
+            val actionStartIndex = 4 // +20 min: earliest zone where new basal/SMB meaningfully changes future BG.
+            val actionEndIndex = min(aimiFinalSeries.lastIndex, 24) // +120 min: practical insulin-action decision window.
+            val actionWindow = if (aimiFinalSeries.size > actionStartIndex && actionEndIndex >= actionStartIndex) {
+                aimiFinalSeries.subList(actionStartIndex, actionEndIndex + 1)
+            } else {
+                emptyList()
+            }
+            val actionWindowMin = actionWindow.minOrNull()?.toDouble()
+            val actionWindowMinMinute = actionWindowMin?.let { minValue ->
+                val offset = actionWindow.indexOfFirst { it.toDouble() == minValue }
+                (actionStartIndex + offset) * 5
+            }
+            val lowSafetyMark = (result.hypoThreshold ?: threshold).coerceAtLeast(65.0)
+            val belowTargetRun = maxConsecutiveBelowTarget(actionWindow, target_bg)
+            val sustainedBelowTarget = belowTargetRun >= 3 || (actionWindowMin?.let { it <= target_bg - 10.0 } == true)
+            val hardLowInActionWindow = actionWindow.any { it.toDouble() <= lowSafetyMark }
+            val fallingOrFlat = delta.toDouble() <= 0.5 || shortAvgDelta.toDouble() <= 0.5
+            val freshInsulinPressure = freshSmbPressureUnits() >= 0.2 ||
+                iob_data.iob >= 1.0 ||
+                (result.units ?: 0.0) > 0.0
+            val beforeForecastGateUnits = result.units ?: 0.0
+            val beforeForecastGateRate = result.rate ?: profile_current_basal
+            val forecastGateNeedsZeroBasal =
+                hardLowInActionWindow ||
+                    (
+                        sustainedBelowTarget &&
+                            fallingOrFlat &&
+                            freshInsulinPressure &&
+                            bg < 180.0
+                    )
+            val forecastGateNeedsSoftBasalCut =
+                sustainedBelowTarget &&
+                    !forecastGateNeedsZeroBasal &&
+                    bg < 200.0 &&
+                    (fallingOrFlat || freshInsulinPressure)
+
+            if ((forecastGateNeedsZeroBasal || forecastGateNeedsSoftBasalCut) && actionWindow.isNotEmpty()) {
+                val cappedRate = if (forecastGateNeedsZeroBasal) {
+                    0.0
+                } else {
+                    roundBasal(profile_current_basal * 0.35)
+                }
+                val shouldChangeUnits = beforeForecastGateUnits > 0.0
+                val shouldChangeRate = beforeForecastGateRate > cappedRate + 0.01
+                if (shouldChangeUnits || shouldChangeRate) {
+                    result.units = 0.0
+                    result.insulinReq = 0.0
+                    result.rate = min(beforeForecastGateRate, cappedRate)
+                    result.duration = 30
+                    decisionChangedAfterForecast = true
+                    result.safetyMechanism = if (forecastGateNeedsZeroBasal) {
+                        "Финальный прогноз устойчиво ниже цели"
+                    } else {
+                        "Финальный прогноз ниже цели: базал снижен"
+                    }
+                    val firstBelow = firstBelowMinute(aimiFinalSeries, actionStartIndex, target_bg)
+                    val gateMessage =
+                        "Forecast insulin gate: рабочая зона +20..+120, " +
+                            "ниже цели ${belowTargetRun} точек подряд" +
+                            (firstBelow?.let { ", первая ниже цели +${it}m" } ?: "") +
+                            (actionWindowMin?.let { ", минимум ${"%.0f".format(it)} на +${actionWindowMinMinute}m" } ?: "") +
+                            ", цель=${"%.0f".format(target_bg)}, low=${"%.0f".format(lowSafetyMark)}, " +
+                            "delta=${"%.1f".format(delta.toDouble())}, short=${"%.1f".format(shortAvgDelta.toDouble())}, " +
+                            "IOB=${"%.2f".format(iob_data.iob)}, свежий SMB=${"%.2f".format(freshSmbPressureUnits())}U, " +
+                            "SMB ${"%.2f".format(beforeForecastGateUnits)} -> 0.00, " +
+                            "базал ${"%.2f".format(beforeForecastGateRate)} -> ${"%.2f".format(result.rate ?: cappedRate)}"
+                    result.reason.append(" | $gateMessage")
+                    consoleLog.add(gateMessage)
+                    applyDecisionAwarePredictions(recomputeForCurrentDecision())
+                }
+            }
+
             val refreshedMinGuardBG = result.minGuardBG ?: minOf(bg, predictedBg.toDouble(), eventualBG)
             val refreshedPostDecisionForecast = minOf(predictedBg.toDouble(), eventualBG)
             val forecastBelowTarget =
