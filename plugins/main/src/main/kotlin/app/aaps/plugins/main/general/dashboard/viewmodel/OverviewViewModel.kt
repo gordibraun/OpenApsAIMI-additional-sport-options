@@ -42,6 +42,7 @@ import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.data.time.T
 import app.aaps.core.objects.extensions.directionToIcon
 import app.aaps.core.objects.extensions.displayText
+import app.aaps.core.objects.extensions.withAimiResultCob
 import java.io.Serializable
 import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.extensions.isInProgress
@@ -163,6 +164,7 @@ class OverviewViewModel(
         val iobText = totalIobText()
         val cobText = iobCobCalculator
             .getCobInfo("Dashboard COB")
+            .withAimiResultCob(loop, dateUtil.now())
             .displayText(resourceHelper, decimalFormatter)
             ?: resourceHelper.gs(app.aaps.core.ui.R.string.value_unavailable_short)
         val timeAgo = dateUtil.minAgoShort(lastBg?.timestamp)

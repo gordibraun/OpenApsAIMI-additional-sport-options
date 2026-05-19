@@ -39,6 +39,7 @@ import app.aaps.core.keys.IntComposedKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.directionToIcon
 import app.aaps.core.objects.extensions.displayText
+import app.aaps.core.objects.extensions.withAimiResultCob
 import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.profile.ProfileSealed
 import app.aaps.core.ui.extensions.toVisibility
@@ -208,7 +209,10 @@ class Widget : AppWidgetProvider() {
     private fun updateIobCob(views: RemoteViews) {
         views.setTextViewText(R.id.iob, iobText())
         // cob
-        var cobText = iobCobCalculator.getCobInfo("Overview COB").displayText(rh, decimalFormatter) ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short)
+        var cobText = iobCobCalculator.getCobInfo("Overview COB")
+            .withAimiResultCob(loop, dateUtil.now())
+            .displayText(rh, decimalFormatter)
+            ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short)
 
         val constraintsProcessed = loop.lastRun?.constraintsProcessed
         val lastRun = loop.lastRun

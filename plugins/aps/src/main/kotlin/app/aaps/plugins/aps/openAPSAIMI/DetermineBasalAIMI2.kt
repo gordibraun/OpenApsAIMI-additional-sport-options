@@ -37,6 +37,8 @@ import app.aaps.plugins.aps.R
 import app.aaps.plugins.aps.openAPSAIMI.basal.BasalDecisionEngine
 import app.aaps.plugins.aps.openAPSAIMI.basal.BasalHistoryUtils
 import app.aaps.plugins.aps.openAPSAIMI.carbs.CarbsAdvisor
+import app.aaps.plugins.aps.openAPSAIMI.activity.ActivityContext
+import app.aaps.plugins.aps.openAPSAIMI.activity.ActivityState
 import app.aaps.plugins.aps.openAPSAIMI.model.BasalPlan
 import app.aaps.plugins.aps.openAPSAIMI.extensions.asRounded
 import app.aaps.core.interfaces.ui.UiInteraction
@@ -60,6 +62,7 @@ import app.aaps.plugins.aps.openAPSAIMI.wcycle.WCycleInfo
 import app.aaps.plugins.aps.openAPSAIMI.wcycle.WCycleLearner
 import app.aaps.plugins.aps.openAPSAIMI.wcycle.WCyclePreferences
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.AdvancedPredictionEngine
+import app.aaps.plugins.aps.openAPSAIMI.pkpd.CarbAbsorptionModel
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.InsulinActionProfiler
 import java.io.File
 import java.text.DecimalFormat
@@ -831,6 +834,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val risingAfterLow = delta >= 2.0f || shortAvgDelta >= 1.0f
         val explicitFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
         val userTypedCarbsHavePriority = explicitFoodType != null && mealData.mealCOB > 0.0
+        val rescueCobEligible = mealData.mealCOB <= 15.0
         val noActiveMealMode = !mealTime &&
             !bfastTime &&
             !lunchTime &&
@@ -838,7 +842,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             !highCarbTime &&
             !snackTime
 
-        return recentLow && risingAfterLow && noActiveMealMode && !userTypedCarbsHavePriority
+        val rescueFast = recentLow && risingAfterLow && noActiveMealMode && !userTypedCarbsHavePriority && rescueCobEligible
+        if (!rescueFast && recentLow && risingAfterLow && noActiveMealMode && !userTypedCarbsHavePriority && !rescueCobEligible) {
+            consoleLog.add(
+                "Быстрый спасательный отскок не включен: COB=${"%.1f".format(mealData.mealCOB)}г больше rescue-лимита 15г; " +
+                    "используется обычное распределение COB."
+            )
+        }
+        return rescueFast
     }
 
     private fun freshSmbPressureUnits(): Double =
@@ -2575,6 +2586,321 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             .takeIf { it.isFinite() && it > 0.0 }
             ?: fallbackBasal
 
+    private fun selectedFoodTypeForForecast(cobG: Double): String? =
+        aimiMealAssist.activeEpisode()?.selectedFoodType ?: activityCarbFoodType(cobG)
+
+    private data class ParallelCarbEntry(
+        val timestamp: Long,
+        val amount: Double,
+        val foodType: String
+    )
+
+    private data class ParallelCarbForecast(
+        val cobG: Double,
+        val dominantFoodType: String?,
+        val impactMgdlPer5m: List<Double>?
+    )
+
+    private fun activityCarbFoodType(cobG: Double): String? {
+        val now = dateUtil.now()
+        return try {
+            val activityCarbs = persistenceLayer.getCarbsFromTimeToTimeExpanded(now - T.hours(6).msecs(), now + T.hours(6).msecs(), true)
+                .asSequence()
+                .filter { it.isValid && it.amount > 0.0 && it.notes?.contains("AIMI_ACTIVITY_V2_CARBS") == true }
+                .toList()
+            if (activityCarbs.isEmpty()) return null
+            val activityCarbAmount = activityCarbs.sumOf { it.amount }
+            if (cobG > activityCarbAmount + 2.0) {
+                consoleLog.add(
+                    "Тип углеводов нагрузки не применен ко всему COB: " +
+                        "activityCarbs=${"%.1f".format(activityCarbAmount)}г, totalCOB=${"%.1f".format(cobG)}г"
+                )
+                return null
+            }
+            activityCarbs
+                .maxByOrNull { it.timestamp }
+                ?.notes
+                ?.let { note ->
+                    when {
+                        note.contains("type=fast")     -> "fast"
+                        note.contains("type=balanced") -> "balanced"
+                        else                           -> null
+                    }
+                }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parallelCarbForecast(
+        aapsCobG: Double,
+        activityEvents: List<TE>,
+        delta: Double,
+        carbSensitivityMgdlPerGram: Double?,
+        horizonMinutes: Int = 240
+    ): ParallelCarbForecast {
+        if (!aapsCobG.isFinite() || aapsCobG <= 0.0) {
+            return ParallelCarbForecast(if (aapsCobG.isFinite()) aapsCobG.coerceAtLeast(0.0) else 0.0, null, null)
+        }
+
+        val now = dateUtil.now()
+        val fallbackCob = activityForecastCob(aapsCobG, activityEvents)
+        return try {
+            val activeEpisode = aimiMealAssist.activeEpisode()
+            val entries = persistenceLayer.getCarbsFromTimeToTimeExpanded(
+                now - T.hours(6).msecs(),
+                now + T.mins(horizonMinutes.toLong()).msecs(),
+                true
+            )
+                .asSequence()
+                .filter { it.isValid && it.amount > 0.0 }
+                .map { carb ->
+                    ParallelCarbEntry(
+                        timestamp = carb.timestamp,
+                        amount = carb.amount,
+                        foodType = carbFoodTypeForParallelForecast(carb.notes, carb.timestamp, activeEpisode)
+                    )
+                }
+                .toList()
+
+            if (entries.isEmpty()) return ParallelCarbForecast(fallbackCob, selectedFoodTypeForForecast(fallbackCob), null)
+
+            val currentEntries = entries.filter { it.timestamp <= now }
+            val physiologicalCob = currentEntries.sumOf { entry ->
+                val elapsedMinutes = (now - entry.timestamp) / 60_000.0
+                entry.amount * CarbAbsorptionModel.remainingFraction(
+                    elapsedMinutes = elapsedMinutes,
+                    selectedFoodType = entry.foodType,
+                    delta = delta
+                )
+            }
+
+            if (physiologicalCob <= 0.0) {
+                return ParallelCarbForecast(0.0, null, emptyList())
+            }
+
+            val forecastCob = min(fallbackCob, physiologicalCob).coerceAtLeast(0.0)
+            val currentScale = if (physiologicalCob > 0.0 && forecastCob < physiologicalCob) {
+                (forecastCob / physiologicalCob).coerceIn(0.0, 1.0)
+            } else {
+                1.0
+            }
+            val remainingByType = currentEntries.groupBy { it.foodType }.mapValues { (_, typedEntries) ->
+                typedEntries.sumOf { entry ->
+                    val elapsedMinutes = (now - entry.timestamp) / 60_000.0
+                    entry.amount * CarbAbsorptionModel.remainingFraction(
+                        elapsedMinutes = elapsedMinutes,
+                        selectedFoodType = entry.foodType,
+                        delta = delta
+                    ) * currentScale
+                }
+            }
+            val dominantFoodType = remainingByType
+                .maxByOrNull { it.value }
+                ?.takeIf { forecastCob <= 0.0 || it.value >= forecastCob * 0.55 }
+                ?.key
+
+            val timeline = carbSensitivityMgdlPerGram
+                ?.takeIf { it.isFinite() && it > 0.0 }
+                ?.let { csf ->
+                    val steps = (horizonMinutes / 5).coerceAtLeast(1)
+                    DoubleArray(steps).also { impacts ->
+                        entries.forEach { entry ->
+                            val entryScale = if (entry.timestamp <= now) currentScale else 1.0
+                            if (entryScale <= 0.0) return@forEach
+                            for (index in impacts.indices) {
+                                val stepStart = now + T.mins((index * 5).toLong()).msecs()
+                                val stepEnd = now + T.mins(((index + 1) * 5).toLong()).msecs()
+                                val startElapsed = (stepStart - entry.timestamp) / 60_000.0
+                                val endElapsed = (stepEnd - entry.timestamp) / 60_000.0
+                                val absorbed = carbAbsorbedFractionBetween(startElapsed, endElapsed, entry.foodType, delta)
+                                if (absorbed > 0.0) impacts[index] += entry.amount * entryScale * csf * absorbed
+                            }
+                        }
+                    }.toList()
+                }
+
+            if (abs(forecastCob - aapsCobG) >= 0.5 || entries.size > 1) {
+                consoleLog.add(
+                    "Parallel carb forecast: AAPS COB ${"%.1f".format(aapsCobG)} -> " +
+                        "phys ${"%.1f".format(physiologicalCob)} -> forecast ${"%.1f".format(forecastCob)}г; " +
+                        "entries=${entries.size}, type=${dominantFoodType ?: "mixed"}"
+                )
+            }
+
+            ParallelCarbForecast(forecastCob, dominantFoodType, timeline)
+        } catch (e: Exception) {
+            consoleLog.add("Parallel carb forecast unavailable: ${e.message}")
+            ParallelCarbForecast(fallbackCob, selectedFoodTypeForForecast(fallbackCob), null)
+        }
+    }
+
+    private fun carbFoodTypeForParallelForecast(
+        note: String?,
+        timestamp: Long,
+        activeEpisode: app.aaps.core.interfaces.aps.AimiMealEpisode?
+    ): String {
+        carbFoodTypeFromNote(note)?.let { return it }
+        activeEpisode?.let { episode ->
+            val carbStart = episode.startedAt + episode.carbTimeMinutes * 60_000L
+            if (abs(timestamp - carbStart) <= T.mins(20).msecs()) {
+                return normalizeForecastFoodType(episode.selectedFoodType)
+            }
+        }
+        return "balanced"
+    }
+
+    private fun carbFoodTypeFromNote(note: String?): String? =
+        sequenceOf("type", "carbType", "foodType")
+            .mapNotNull { key -> activityNoteToken(note, key) }
+            .mapNotNull { value -> normalizeForecastFoodTypeOrNull(value) }
+            .firstOrNull()
+
+    private fun normalizeForecastFoodType(value: String?): String =
+        normalizeForecastFoodTypeOrNull(value) ?: "balanced"
+
+    private fun normalizeForecastFoodTypeOrNull(value: String?): String? =
+        when (value?.lowercase()) {
+            "fast" -> "fast"
+            "slow" -> "slow"
+            "balanced", "normal", "ordinary" -> "balanced"
+            else -> null
+        }
+
+    private fun carbAbsorbedFractionBetween(
+        startElapsedMinutes: Double,
+        endElapsedMinutes: Double,
+        foodType: String,
+        delta: Double
+    ): Double {
+        if (endElapsedMinutes <= 0.0) return 0.0
+        val absorbedAtStart = 1.0 - CarbAbsorptionModel.remainingFraction(
+            elapsedMinutes = startElapsedMinutes,
+            selectedFoodType = foodType,
+            delta = delta
+        )
+        val absorbedAtEnd = 1.0 - CarbAbsorptionModel.remainingFraction(
+            elapsedMinutes = endElapsedMinutes,
+            selectedFoodType = foodType,
+            delta = delta
+        )
+        return (absorbedAtEnd - absorbedAtStart).coerceIn(0.0, 1.0)
+    }
+
+    private fun activityForecastCob(cobG: Double, activityEvents: List<TE>): Double {
+        if (!cobG.isFinite() || cobG <= 0.0) return cobG
+        val now = dateUtil.now()
+        return try {
+            val activityCarbs = persistenceLayer.getCarbsFromTimeToTimeExpanded(now - T.hours(3).msecs(), now + T.hours(1).msecs(), true)
+                .asSequence()
+                .filter { it.isValid && it.amount > 0.0 && it.notes?.contains("AIMI_ACTIVITY_V2_CARBS") == true }
+                .toList()
+            if (activityCarbs.isEmpty()) return cobG
+
+            val exerciseEvents = activityEvents
+                .asSequence()
+                .filter { it.isValid && it.type == TE.Type.EXERCISE && it.note?.contains("AIMI_ACTIVITY_V2") == true }
+                .toList()
+            if (exerciseEvents.isEmpty()) return cobG
+
+            val coveredByElapsedActivity = activityCarbs.sumOf { carb ->
+                val matchingEvent = exerciseEvents
+                    .map { event ->
+                        val durationMin = activityNoteToken(event.note, "duration")?.toLongOrNull()
+                            ?: (event.duration / T.mins(1).msecs())
+                        val tailMin = activityNoteToken(event.note, "tail")?.toLongOrNull() ?: 0L
+                        val start = event.timestamp
+                        val totalMin = (durationMin + tailMin).coerceAtLeast(5L)
+                        val end = start + T.mins(totalMin).msecs()
+                        Triple(event, start, end)
+                    }
+                    .filter { (_, start, end) ->
+                        carb.timestamp in (start - T.mins(10).msecs())..(end + T.mins(10).msecs())
+                    }
+                    .minByOrNull { (_, start, _) -> abs(carb.timestamp - start) }
+                    ?: return@sumOf 0.0
+
+                val start = matchingEvent.second
+                val end = matchingEvent.third
+                val elapsedFraction = when {
+                    now <= start -> 0.0
+                    now >= end   -> 1.0
+                    else         -> ((now - start).toDouble() / (end - start).toDouble()).coerceIn(0.0, 1.0)
+                }
+                carb.amount * elapsedFraction
+            }
+
+            val covered = coveredByElapsedActivity.coerceIn(0.0, cobG)
+            val adjustedCob = (cobG - covered).coerceAtLeast(0.0)
+            if (covered >= 0.5 && adjustedCob < cobG - 0.1) {
+                consoleLog.add(
+                    "Activity carb COB guard: forecast COB ${"%.1f".format(cobG)} -> " +
+                        "${"%.1f".format(adjustedCob)}г; " +
+                        "${"%.1f".format(covered)}г углеводов нагрузки уже покрыты прошедшей нагрузкой."
+                )
+            }
+            adjustedCob
+        } catch (e: Exception) {
+            consoleLog.add("Activity carb COB guard unavailable: ${e.message}")
+            cobG
+        }
+    }
+
+    private fun activityNoteToken(note: String?, key: String): String? =
+        note
+            ?.split(' ')
+            ?.firstOrNull { it.startsWith("$key=") }
+            ?.substringAfter('=')
+            ?.takeIf { it.isNotBlank() }
+
+    private fun activityPhaseAtMinute(activityContext: ActivityContext, minute: Int): Double {
+        if (activityContext.manualMode == null || activityContext.glucoseUseMgdlPer5m <= 0.0) return 0.0
+        val start = activityContext.startOffsetMinutes.coerceAtLeast(0)
+        if (minute < start) return 0.0
+
+        val activeRemaining = activityContext.activeRemainingMinutes.coerceAtLeast(0)
+        val activeEnd = start + activeRemaining
+        if (activeRemaining > 0 && minute <= activeEnd) return 1.0
+
+        val tailRemaining = activityContext.tailRemainingMinutes.coerceAtLeast(0)
+        if (tailRemaining <= 0) return 0.0
+
+        val tailMinute = (minute - activeEnd).coerceAtLeast(0)
+        if (tailMinute > tailRemaining) return 0.0
+
+        val startingPhase = if (activeRemaining == 0 && activityContext.startOffsetMinutes <= 0) {
+            activityContext.currentPhase.coerceIn(0.0, 1.0)
+        } else {
+            1.0
+        }
+        return (startingPhase * (1.0 - tailMinute.toDouble() / tailRemaining.toDouble())).coerceIn(0.0, 1.0)
+    }
+
+    private fun applyActivityEffectToPredictions(
+        predictions: List<Double>,
+        activityContext: ActivityContext
+    ): List<Double> {
+        if (activityContext.manualMode == null || activityContext.glucoseUseMgdlPer5m <= 0.0) return predictions
+        var accumulatedUse = 0.0
+        var maxPhase = 0.0
+        val adjusted = predictions.mapIndexed { index, predicted ->
+            val minute = (index + 1) * 5
+            val phase = activityPhaseAtMinute(activityContext, minute)
+            maxPhase = max(maxPhase, phase)
+            accumulatedUse += activityContext.glucoseUseMgdlPer5m * phase
+            predicted - accumulatedUse
+        }
+        if (maxPhase > 0.0 || activityContext.startOffsetMinutes > 0) {
+            consoleLog.add(
+                "Activity v2 forecast: ${activityContext.manualMode} " +
+                    "start=${activityContext.startOffsetMinutes.coerceAtLeast(0)}м, " +
+                    "activeRem=${activityContext.activeRemainingMinutes}м, tailRem=${activityContext.tailRemainingMinutes}м, " +
+                    "расход=${"%.1f".format(activityContext.glucoseUseMgdlPer5m)} mg/dL/5м"
+            )
+        }
+        return adjusted
+    }
+
     private fun computePkpdPredictions(
         currentBg: Double,
         iobArray: Array<IobTotal>,
@@ -2586,10 +2912,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         rT: RT,
         delta: Double,
         targetBg: Double,
-        rescueFastActive: Boolean = false
+        carbSensitivityMgdlPerGram: Double? = null,
+        rescueFastActive: Boolean = false,
+        selectedFoodTypeOverride: String? = null,
+        carbImpactTimelineMgdlPer5m: List<Double>? = null,
+        activityContext: ActivityContext = ActivityContext()
     ): PredictionResult {
         consoleLog.add("Расчет прогноза PKPD: delta=$delta")
-        val selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
+        val selectedFoodType = selectedFoodTypeOverride ?: selectedFoodTypeForForecast(cobG)
         val uamConfidence = unannouncedFoodConfidence(mealData, rescueFastActive)
         val freshSmbPressure = freshSmbPressureUnits()
         selectedFoodType?.let { consoleLog.add("Тип углеводов, выбранный пользователем: $it. Введенные углеводы имеют приоритет.") }
@@ -2606,19 +2936,22 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 cobG = cobG,
                 profile = profile,
                 selectedFoodType = selectedFoodType,
+                carbSensitivityMgdlPerGram = carbSensitivityMgdlPerGram,
                 delta = delta,
                 rescueFastActive = rescueFastActive,
                 uamConfidence = uamConfidence,
                 explicitCarbEntry = explicitCarbEntryActive(mealData),
                 freshSmbPressureU = freshSmbPressure,
-                targetBG = targetBg
+                targetBG = targetBg,
+                carbImpactTimelineMgdlPer5m = carbImpactTimelineMgdlPer5m
             )
         } catch (e: Exception) {
             consoleLog.add("Ошибка расширенного прогноза: ${e.message}")
             // Fallback: flat prediction
             List(48) { currentBg }
         }
-        val intsPredictions = sanitizePredictionInts(advancedPredictions)
+        val activityAdjustedPredictions = applyActivityEffectToPredictions(advancedPredictions, activityContext)
+        val intsPredictions = sanitizePredictionInts(activityAdjustedPredictions)
         rT.predBGs = Predictions().apply {
             AIMI_FINAL = intsPredictions
             AIMI_BEFORE_DECISION = intsPredictions
@@ -2659,9 +2992,13 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         observedCarbImpactMgdlPer5m: Double,
         remainingCiPeakMgdlPer5m: Double,
         targetBg: Double,
-        rescueFastActive: Boolean = false
+        carbSensitivityMgdlPerGram: Double? = null,
+        rescueFastActive: Boolean = false,
+        selectedFoodTypeOverride: String? = null,
+        carbImpactTimelineMgdlPer5m: List<Double>? = null,
+        activityContext: ActivityContext = ActivityContext()
     ): PredictionResult {
-        val selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
+        val selectedFoodType = selectedFoodTypeOverride ?: selectedFoodTypeForForecast(cobG)
         val uamConfidence = unannouncedFoodConfidence(mealData, rescueFastActive)
         val freshSmbPressure = freshSmbPressureUnits()
         val advancedPredictions = try {
@@ -2672,6 +3009,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 cobG = cobG,
                 profile = profile,
                 selectedFoodType = selectedFoodType,
+                carbSensitivityMgdlPerGram = carbSensitivityMgdlPerGram,
                 delta = delta,
                 plannedSmbU = plannedSmbU,
                 plannedRateUph = plannedRateUph,
@@ -2687,13 +3025,15 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 uamConfidence = uamConfidence,
                 explicitCarbEntry = explicitCarbEntryActive(mealData),
                 freshSmbPressureU = freshSmbPressure,
-                targetBG = targetBg
+                targetBG = targetBg,
+                carbImpactTimelineMgdlPer5m = carbImpactTimelineMgdlPer5m
             )
         } catch (e: Exception) {
             consoleLog.add("Ошибка прогноза после SMB: ${e.message}")
             List(48) { currentBg }
         }
-        val intsPredictions = sanitizePredictionInts(advancedPredictions)
+        val activityAdjustedPredictions = applyActivityEffectToPredictions(advancedPredictions, activityContext)
+        val intsPredictions = sanitizePredictionInts(activityAdjustedPredictions)
         val beforeDecisionPrediction = rT.predBGs?.AIMI_BEFORE_DECISION
         rT.predBGs = (rT.predBGs ?: Predictions()).apply {
             AIMI_FINAL = intsPredictions
@@ -3815,17 +4155,31 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 // --- FIN DE LA NOUVELLE LOGIQUE ---
 
         // --- 🏃 ACTIVITY MANAGER INTEGRATION ---
+        val sensitivityBeforeActivity = variableSensitivity.toDouble()
         
         // 1. Process Data through Manager
+        val activityEvents = try {
+            persistenceLayer.getTherapyEventDataFromToTime(
+                currentTime - T.hours(12).msecs(),
+                currentTime + T.hours(6).msecs()
+            ).blockingGet()
+        } catch (e: Exception) {
+            consoleLog.add("Activity v2: не удалось прочитать события нагрузки: ${e.message}")
+            emptyList()
+        }
         val activityContext = activityManager.process(
             steps5min = recentSteps5Minutes,
             steps10min = recentSteps10Minutes,
             avgHr = averageBeatsPerMinute,
-            avgHrResting = averageBeatsPerMinute60 // Using 60min avg as proxy for baseline/resting for now
+            avgHrResting = averageBeatsPerMinute60, // Using 60min avg as proxy for baseline/resting for now
+            therapyEvents = activityEvents,
+            now = currentTime,
+            profileBasalUph = profile_current_basal,
+            profileIsfMgdl = sens
         )
 
         // 2. Log Decision
-        if (activityContext.state != app.aaps.plugins.aps.openAPSAIMI.activity.ActivityState.REST || activityContext.isRecovery) {
+        if (activityContext.state != ActivityState.REST || activityContext.isRecovery || activityContext.manualMode != null) {
             consoleLog.add("Activity: ${activityContext.description} → ISF x${"%.2f".format(activityContext.isfMultiplier)}")
         }
 
@@ -3842,11 +4196,13 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // Reduire la basale SI activité significative (évite accumulation IOB)
         // Light: 100%, Moderate: 80%, Intense: 60%
         val anyMealModeActive = mealTime || bfastTime || lunchTime || dinnerTime || highCarbTime
-        val basalFactor = when (activityContext.state) {
-            app.aaps.plugins.aps.openAPSAIMI.activity.ActivityState.REST -> 1.0f
-            app.aaps.plugins.aps.openAPSAIMI.activity.ActivityState.LIGHT -> 1.0f
-            app.aaps.plugins.aps.openAPSAIMI.activity.ActivityState.MODERATE -> if (anyMealModeActive) 0.9f else 0.8f
-            app.aaps.plugins.aps.openAPSAIMI.activity.ActivityState.INTENSE -> if (anyMealModeActive) 0.8f else 0.6f
+        val basalFactor = if (activityContext.manualMode != null && activityContext.currentPhase > 0.0) {
+            (1.0 - activityContext.effectFraction * activityContext.currentPhase).toFloat().coerceIn(0.55f, 1.0f)
+        } else when (activityContext.state) {
+            ActivityState.REST -> 1.0f
+            ActivityState.LIGHT -> 1.0f
+            ActivityState.MODERATE -> if (anyMealModeActive) 0.9f else 0.8f
+            ActivityState.INTENSE -> if (anyMealModeActive) 0.8f else 0.6f
         }
         if (basalFactor < 1.0f) {
             this.basalaimi *= basalFactor
@@ -3870,18 +4226,43 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             )
         }
         this.variableSensitivity = sens.toFloat()
+        val carbSensitivityForForecast = if (profile.carb_ratio.isFinite() && profile.carb_ratio > 0.0) {
+            forecastSensitivityWithActiveProfile(sensitivityBeforeActivity, profile) / profile.carb_ratio
+        } else {
+            Double.NaN
+        }.takeIf { it.isFinite() && it > 0.0 }
+        carbSensitivityForForecast?.let { csf ->
+            val finalCsf = if (profile.carb_ratio.isFinite() && profile.carb_ratio > 0.0) sens / profile.carb_ratio else Double.NaN
+            if (finalCsf.isFinite() && finalCsf > csf + 0.05) {
+                consoleLog.add(
+                    "Activity carb forecast guard: COB uses base CSF ${"%.1f".format(csf)} mg/dL/g, " +
+                        "not activity-boosted ${"%.1f".format(finalCsf)} mg/dL/g"
+                )
+            }
+        }
+        val carbForecast = parallelCarbForecast(
+            aapsCobG = mealData.mealCOB,
+            activityEvents = activityEvents,
+            delta = delta.toDouble(),
+            carbSensitivityMgdlPerGram = carbSensitivityForForecast
+        )
+        val forecastCobG = carbForecast.cobG
         val pkpdPredictions = computePkpdPredictions(
             currentBg = bg,
             iobArray = iob_data_array,
             finalSensitivity = sens,
-            cobG = mealData.mealCOB,
+            cobG = forecastCobG,
             mealData = mealData,
 
             profile = profile,
             rT = rT,
             delta = delta.toDouble(),
             targetBg = target_bg,
-            rescueFastActive = rescueFastRebound
+            carbSensitivityMgdlPerGram = carbSensitivityForForecast,
+            rescueFastActive = rescueFastRebound,
+            selectedFoodTypeOverride = carbForecast.dominantFoodType,
+            carbImpactTimelineMgdlPer5m = carbForecast.impactMgdlPer5m,
+            activityContext = activityContext
         )
         this.eventualBG = pkpdPredictions.eventual
         this.predictedBg = pkpdPredictions.eventual.toFloat()
@@ -4258,11 +4639,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 (firstBelowMinute?.let { ", первая ниже +${it}m" } ?: ", ниже цели нет") +
                 ", цель=${"%.0f".format(target_bg)}"
 
-            val forecastCsf = if (profile.carb_ratio.isFinite() && profile.carb_ratio > 0.0) {
-                sens / profile.carb_ratio
-            } else {
-                0.0
-            }.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+            val forecastCsf = carbSensitivityForForecast ?: 0.0
 
             if (forecastCsf > 0.0) {
                 val deficitMgdl = (target_bg - minValue.toDouble()).coerceAtLeast(0.0)
@@ -4301,7 +4678,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 currentBg = bg,
                 iobArray = iob_data_array,
                 finalSensitivity = sens,
-                cobG = mealData.mealCOB,
+                cobG = forecastCobG,
                 mealData = mealData,
                 profile = profile,
                 rT = rT,
@@ -4316,7 +4693,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 observedCarbImpactMgdlPer5m = ci.toDouble(),
                 remainingCiPeakMgdlPer5m = 0.0,
                 targetBg = target_bg,
-                rescueFastActive = rescueFastRebound
+                rescueFastActive = rescueFastRebound,
+                carbSensitivityMgdlPerGram = carbSensitivityForForecast,
+                selectedFoodTypeOverride = carbForecast.dominantFoodType,
+                carbImpactTimelineMgdlPer5m = carbForecast.impactMgdlPer5m,
+                activityContext = activityContext
             )
             eventualBG = guardedPredictions.eventual
             predictedBg = guardedPredictions.eventual.toFloat()
@@ -4425,11 +4806,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         )
         appendCompactLog(reasonAimi, tp, bg, delta, recentSteps5Minutes, averageBeatsPerMinute)
         rT.reason.append(reasonAimi.toString())
-        val rawCsf = if (profile.carb_ratio.isFinite() && profile.carb_ratio > 0.0) {
-            sens / profile.carb_ratio
-        } else {
-            Double.NaN
-        }
+        val rawCsf = carbSensitivityForForecast ?: Double.NaN
         val csf = rawCsf.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
         if (csf <= 0.0) {
             consoleLog.add(
@@ -4531,10 +4908,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 
         mealModeSmbReason?.let { reason(rT, it) }
 
-        rT.COB = mealData.mealCOB
+        rT.COB = forecastCobG
         rT.IOB = iob_data.iob
         rT.reason.append(
-            "COB: ${round(mealData.mealCOB, 1).withoutZeros()}, Dev: ${convertBG(deviation.toDouble())}, BGI: ${convertBG(bgi)}, ISF: ${convertBG(sens)}, CR: ${
+            "COB: ${round(forecastCobG, 1).withoutZeros()} (AAPS ${round(mealData.mealCOB, 1).withoutZeros()}), Dev: ${convertBG(deviation.toDouble())}, BGI: ${convertBG(bgi)}, ISF: ${convertBG(sens)}, CR: ${
                 round(profile.carb_ratio, 2)
                     .withoutZeros()
             }, Target: ${convertBG(target_bg)} \uD83D\uDCD2 "
@@ -4590,7 +4967,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     currentBg = bg,
                     iobArray = iob_data_array,
                     finalSensitivity = sens,
-                    cobG = mealData.mealCOB,
+                    cobG = forecastCobG,
                     mealData = mealData,
                     profile = profile,
                     rT = result,
@@ -4605,7 +4982,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     observedCarbImpactMgdlPer5m = ci,
                     remainingCiPeakMgdlPer5m = remainingCIpeak,
                     targetBg = target_bg,
-                    rescueFastActive = rescueFastRebound
+                    carbSensitivityMgdlPerGram = carbSensitivityForForecast,
+                    rescueFastActive = rescueFastRebound,
+                    selectedFoodTypeOverride = carbForecast.dominantFoodType,
+                    carbImpactTimelineMgdlPer5m = carbForecast.impactMgdlPer5m,
+                    activityContext = activityContext
                 )
 
             fun applyDecisionAwarePredictions(predictions: PredictionResult) {

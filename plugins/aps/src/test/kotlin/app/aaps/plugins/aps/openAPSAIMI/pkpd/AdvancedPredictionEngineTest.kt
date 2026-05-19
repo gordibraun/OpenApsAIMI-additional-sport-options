@@ -207,6 +207,35 @@ class AdvancedPredictionEngineTest {
     }
 
     @Test
+    fun `activity boosted insulin sensitivity does not amplify carb effect when csf override is provided`() {
+        val profile = mockk<OapsProfileAimi>(relaxed = true)
+        every { profile.carb_ratio } returns 10.0
+        every { profile.peakTime } returns 75.0
+
+        val activityBoostedCsf = AdvancedPredictionEngine.predict(
+            currentBG = 90.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 60.0,
+            cobG = 30.0,
+            profile = profile,
+            selectedFoodType = "balanced",
+            horizonMinutes = 180
+        )
+        val baseMealCsf = AdvancedPredictionEngine.predict(
+            currentBG = 90.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 60.0,
+            carbSensitivityMgdlPerGram = 3.0,
+            cobG = 30.0,
+            profile = profile,
+            selectedFoodType = "balanced",
+            horizonMinutes = 180
+        )
+
+        assertTrue(baseMealCsf.last() < activityBoostedCsf.last() - 40.0)
+    }
+
+    @Test
     fun `protective zero basal decision lifts falling forecast without adding insulin`() {
         val profile = mockk<OapsProfileAimi>(relaxed = true)
         every { profile.carb_ratio } returns 10.0

@@ -31,7 +31,7 @@ object ForecastCarbsCalculator {
         val maxTime = now + T.mins(maxMinutes.toLong()).msecs()
         val minPoint = predictions
             .asSequence()
-            .filter { it.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION }
+            .filter { it.sourceSensor.isFinalAimiLineSource() }
             .filter { it.timestamp in minTime..maxTime }
             .filter { it.value.isFinite() && it.value > 0.0 }
             .minByOrNull { it.value }
@@ -52,4 +52,9 @@ object ForecastCarbsCalculator {
             targetMgdl = targetMgdl
         )
     }
+
+    private fun SourceSensor.isFinalAimiLineSource(): Boolean =
+        this == SourceSensor.AIMI_FINAL_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
 }

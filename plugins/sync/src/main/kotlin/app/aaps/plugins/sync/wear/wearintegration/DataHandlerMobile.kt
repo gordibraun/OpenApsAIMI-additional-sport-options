@@ -70,6 +70,7 @@ import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.core.objects.extensions.convertedToAbsolute
 import app.aaps.core.objects.extensions.generateCOBString
+import app.aaps.core.objects.extensions.withAimiResultCob
 import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.extensions.toStringShort
 import app.aaps.core.objects.extensions.valueToUnits
@@ -1286,6 +1287,8 @@ class DataHandlerMobile @Inject constructor(
             SourceSensor.UAM_PREDICTION   -> rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
             SourceSensor.ZT_PREDICTION    -> rh.gac(context, app.aaps.core.ui.R.attr.ztColor)
             SourceSensor.AIMI_FINAL_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.aimiFinalPredictionColor)
+            SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION -> rh.gc(app.aaps.core.ui.R.color.aimi_activity_active_prediction)
+            SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION -> rh.gc(app.aaps.core.ui.R.color.aimi_activity_tail_prediction)
             SourceSensor.AIMI_BEFORE_DECISION_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.carbsColor)
             SourceSensor.AIMI_MOMENTUM_SOFT_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
             else                          -> rh.gac(context, app.aaps.core.ui.R.attr.defaultTextColor)
@@ -1296,7 +1299,7 @@ class DataHandlerMobile @Inject constructor(
     // чтобы получить "Missing __ g"
     private fun computeWizardCarbsReq(profile: Profile): Int {
         val bgReading = iobCobCalculator.ads.actualBg() ?: return 0
-        val cobInfo = iobCobCalculator.getCobInfo("WearStatusWizard")
+        val cobInfo = iobCobCalculator.getCobInfo("WearStatusWizard").withAimiResultCob(loop, dateUtil.now())
         val displayCob = cobInfo.displayCob ?: return 0
         val tempTarget = persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())
         val profileName = profileFunction.getProfileName()
@@ -1349,7 +1352,9 @@ class DataHandlerMobile @Inject constructor(
             val basalIob = iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended().round()
             iobSum = decimalFormatter.to2Decimal(bolusIob.iob + basalIob.basaliob)
             iobDetail = "(${decimalFormatter.to2Decimal(bolusIob.iob)}|${decimalFormatter.to2Decimal(basalIob.basaliob)})"
-            cobString = iobCobCalculator.getCobInfo("WatcherUpdaterService").generateCOBString(decimalFormatter)
+            cobString = iobCobCalculator.getCobInfo("WatcherUpdaterService")
+                .withAimiResultCob(loop, dateUtil.now())
+                .generateCOBString(decimalFormatter)
             currentBasal =
                 processedTbrEbData.getTempBasalIncludingConvertedExtended(System.currentTimeMillis())?.toStringShort(rh)
                     ?: rh.gs(app.aaps.core.ui.R.string.pump_base_basal_rate, profile.getBasal())

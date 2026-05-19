@@ -26,6 +26,8 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import app.aaps.core.data.configuration.Constants
 import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.RM
+import app.aaps.core.data.model.SourceSensor
+import app.aaps.core.data.model.TE
 import app.aaps.core.data.time.T
 import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.data.ue.Action
@@ -95,6 +97,7 @@ import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.core.objects.extensions.directionToIcon
 import app.aaps.core.objects.extensions.displayText
+import app.aaps.core.objects.extensions.withAimiResultCob
 import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.profile.ProfileSealed
 import app.aaps.core.objects.forecast.ForecastCarbsCalculator
@@ -184,6 +187,18 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
     private var _binding: OverviewFragmentBinding? = null
 
+    private enum class ActivityButtonPhase {
+        PLANNED,
+        ACTIVE,
+        TAIL
+    }
+
+    private data class ActivityButtonState(
+        val mode: String,
+        val phase: ActivityButtonPhase,
+        val minutes: Int
+    )
+
     // This property is only valid between onCreateView and
     // onDestroyView.
     private val binding get() = _binding!!
@@ -271,6 +286,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         binding.buttonsLayout.cgmButton.setOnClickListener(this)
         binding.buttonsLayout.insulinButton.setOnClickListener(this)
         binding.buttonsLayout.carbsButton.setOnClickListener(this)
+        binding.buttonsLayout.exerciseModeButton.setOnClickListener(this)
         binding.buttonsLayout.quickWizardButton.setOnClickListener(this)
         binding.buttonsLayout.quickWizardButton.setOnLongClickListener(this)
         binding.infoLayout.apsMode.setOnClickListener(this)
@@ -456,6 +472,11 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     ProtectionCheck.Protection.BOLUS,
                     UIRunnable { if (isAdded) uiInteraction.runCarbsDialog(childFragmentManager) })
 
+                R.id.exercise_mode_button -> protectionCheck.queryProtection(
+                    activity,
+                    ProtectionCheck.Protection.BOLUS,
+                    UIRunnable { if (isAdded) uiInteraction.runCareDialog(childFragmentManager, UiInteraction.EventType.EXERCISE, app.aaps.core.ui.R.string.careportal_exercise) })
+
                 R.id.temp_target         -> protectionCheck.queryProtection(
                     activity,
                     ProtectionCheck.Protection.BOLUS,
@@ -533,6 +554,84 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         }
     }
 
+    private fun currentActivityButtonState(now: Long = dateUtil.now()): ActivityButtonState? =
+        try {
+            persistenceLayer.getTherapyEventDataFromToTime(
+                now - T.hours(12).msecs(),
+                now + T.hours(6).msecs()
+            ).blockingGet()
+                .asSequence()
+                .filter { it.isValid && it.type == TE.Type.EXERCISE && it.note?.contains("AIMI_ACTIVITY_V2") == true }
+                .mapNotNull { event ->
+                    val tokens = activityNoteTokens(event.note)
+                    val mode = tokens["mode"]?.uppercase(Locale.US)?.takeIf { it == "WALK" || it == "SPORT" } ?: return@mapNotNull null
+                    val duration = (tokens["duration"]?.toLongOrNull() ?: (event.duration / T.mins(1).msecs())).coerceAtLeast(0)
+                    val tail = (tokens["tail"]?.toLongOrNull() ?: 0L).coerceAtLeast(0)
+                    val activeEnd = event.timestamp + T.mins(duration).msecs()
+                    val tailEnd = activeEnd + T.mins(tail).msecs()
+                    val state = when {
+                        now < event.timestamp && event.timestamp <= now + T.hours(6).msecs() ->
+                            ActivityButtonState(mode, ActivityButtonPhase.PLANNED, T.msecs(event.timestamp - now).mins().toInt().coerceAtLeast(0))
+
+                        now <= activeEnd ->
+                            ActivityButtonState(mode, ActivityButtonPhase.ACTIVE, T.msecs(activeEnd - now).mins().toInt().coerceAtLeast(0))
+
+                        now <= tailEnd ->
+                            ActivityButtonState(mode, ActivityButtonPhase.TAIL, T.msecs(tailEnd - now).mins().toInt().coerceAtLeast(0))
+
+                        else -> null
+                    }
+                    state?.let { event.timestamp to it }
+                }
+                .maxByOrNull { it.first }
+                ?.second
+        } catch (e: Exception) {
+            aapsLogger.debug(LTag.UI, "Cannot read AIMI activity button state: ${e.message}")
+            null
+        }
+
+    private fun activityNoteTokens(note: String?): Map<String, String> =
+        note
+            ?.split(' ')
+            ?.mapNotNull { part ->
+                val splitAt = part.indexOf('=')
+                if (splitAt <= 0 || splitAt >= part.lastIndex) null else part.substring(0, splitAt) to part.substring(splitAt + 1)
+            }
+            ?.toMap()
+            ?: emptyMap()
+
+    private fun applyExerciseButtonState(state: ActivityButtonState?) {
+        val button = binding.buttonsLayout.exerciseModeButton
+        if (state == null) {
+            setRibbon(
+                button,
+                app.aaps.core.ui.R.attr.icBolusColor,
+                app.aaps.core.ui.R.attr.ribbonDefaultColor,
+                rh.gs(app.aaps.core.ui.R.string.careportal_exercise)
+            )
+            button.contentDescription = rh.gs(app.aaps.core.ui.R.string.careportal_exercise)
+            return
+        }
+
+        val text = when (state.phase) {
+            ActivityButtonPhase.PLANNED -> "СТАРТ ${state.minutes}м"
+            ActivityButtonPhase.ACTIVE  -> "${state.mode} ${state.minutes}м"
+            ActivityButtonPhase.TAIL    -> "ХВОСТ ${state.minutes}м"
+        }
+        val backgroundColor = when (state.phase) {
+            ActivityButtonPhase.TAIL -> rh.gc(app.aaps.core.ui.R.color.aimi_activity_tail_prediction)
+            else                     -> rh.gc(app.aaps.core.ui.R.color.aimi_activity_active_prediction)
+        }
+        val textColor = Color.BLACK
+        with(button) {
+            setText(text)
+            setBackgroundColor(backgroundColor)
+            setTextColor(textColor)
+            compoundDrawables.forEach { drawable -> drawable?.mutate()?.setTint(textColor) }
+            contentDescription = "Нагрузка ${state.mode}, ${text.lowercase(Locale.getDefault())}"
+        }
+    }
+
     override fun onLongClick(v: View): Boolean {
         when (v.id) {
             R.id.quick_wizard_button -> {
@@ -591,6 +690,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val profile = profileFunction.getProfile()
         val profileName = profileFunction.getProfileName()
         val actualBG = iobCobCalculator.ads.actualBg()
+        val activityButtonState = currentActivityButtonState()
         var list = ""
 
         // QuickWizard button
@@ -632,6 +732,8 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             binding.buttonsLayout.wizardButton.visibility = (loop.runningMode != RM.Mode.DISCONNECTED_PUMP && !pump.isSuspended() && pump.isInitialized() && profile != null
                 && preferences.get(BooleanKey.OverviewShowWizardButton)).toVisibility()
             binding.buttonsLayout.insulinButton.visibility = (profile != null && preferences.get(BooleanKey.OverviewShowInsulinButton)).toVisibility()
+            binding.buttonsLayout.exerciseModeButton.visibility = (profile != null && preferences.get(BooleanKey.OverviewShowExerciseModeButton)).toVisibility()
+            applyExerciseButtonState(activityButtonState)
             if (loop.runningMode == RM.Mode.DISCONNECTED_PUMP || pump.isSuspended() || !pump.isInitialized()) {
                 setRibbon(
                     binding.buttonsLayout.insulinButton,
@@ -1009,7 +1111,8 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     private fun updateIobCob() {
         val iobText = iobText()
         val iobDialogText = iobDialogText()
-        val displayText = iobCobCalculator.getCobInfo("Overview COB").displayText(rh, decimalFormatter)
+        val cobInfo = iobCobCalculator.getCobInfo("Overview COB").withAimiResultCob(loop, dateUtil.now())
+        val displayText = cobInfo.displayText(rh, decimalFormatter)
         val lastCarbsTime = persistenceLayer.getNewestCarbs()?.timestamp ?: 0L
 
         // ---- NEW: посчитать то же ядро, что в WizardDialog, но без UI ----
@@ -1022,7 +1125,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val bg = iobCobCalculator.ads.actualBg()?.valueToUnits(units) ?: 0.0
 
         // COB (как в визарде: берём displayCob)
-        val displayCob = iobCobCalculator.getCobInfo("Overview COB").displayCob ?: 0.0
+        val displayCob = cobInfo.displayCob ?: 0.0
         val wizardUseCob = preferences.get(BooleanKey.WizardIncludeCob)
         val wizardUseTrend = preferences.get(BooleanKey.WizardIncludeTrend)
         val wizardUsePercentage = preferences.get(BooleanKey.WizardCorrectionPercent)
@@ -1151,7 +1254,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             setText(text)
             setBackgroundColor(rh.gac(context, attrResBack))
             setTextColor(rh.gac(context, attrResText))
-            compoundDrawables[0]?.setTint(rh.gac(context, attrResText))
+            compoundDrawables.forEach { drawable -> drawable?.mutate()?.setTint(rh.gac(context, attrResText)) }
         }
     }
 
@@ -1284,13 +1387,43 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     }
 
     private fun fullPredictionBounds(): Pair<Long, Long>? {
-        val points = overviewData.predictionValues + overviewData.finalAimiPredictionValues
+        val points = overviewData.predictionValues + freshFinalAimiPredictionValues()
         if (points.isEmpty()) return null
 
         val start = min(points.minOf { it.timestamp }, dateUtil.now()) - T.mins(5).msecs()
         val end = max(points.maxOf { it.timestamp }, dateUtil.now()) + T.mins(5).msecs()
         return start to end
     }
+
+    private fun freshFinalAimiPredictionValues(): List<app.aaps.core.data.model.GV> {
+        val values = overviewData.finalAimiPredictionValues
+        if (values.isEmpty()) return values
+        val latestBg = overviewData.bgReadingsArray
+            .filter { it.value.isFinite() && it.value > 0.0 }
+            .maxByOrNull { it.timestamp }
+            ?: return values
+        val finalLine = values.filter { it.sourceSensor.isFinalAimiDisplaySource() }
+        if (finalLine.isEmpty()) return values
+        val closest = finalLine.minByOrNull { abs(it.timestamp - latestBg.timestamp) } ?: return values
+        val anchorMismatch =
+            latestBg.timestamp >= closest.timestamp &&
+                abs(closest.timestamp - latestBg.timestamp) <= T.mins(6).msecs() &&
+                abs(closest.value - latestBg.value) >= 12.0
+        if (anchorMismatch) {
+            aapsLogger.debug(
+                LTag.UI,
+                "Hiding stale displayed AIMI prediction: bg=${dateUtil.timeString(latestBg.timestamp)} " +
+                    "${"%.0f".format(latestBg.value)} anchor=${dateUtil.timeString(closest.timestamp)} ${"%.0f".format(closest.value)}"
+            )
+            return emptyList()
+        }
+        return values
+    }
+
+    private fun SourceSensor.isFinalAimiDisplaySource(): Boolean =
+        this == SourceSensor.AIMI_FINAL_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
 
     private fun fullPredictionTargetMgdl(): Double? {
         val targetUsed = when {
@@ -1307,7 +1440,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val now = dateUtil.now()
         val isfMgdl = profile.getIsfMgdlForCarbs(now, "Overview forecast carbs", config, processedDeviceStatusData)
         val result = ForecastCarbsCalculator.fromFinalForecast(
-            predictions = overviewData.finalAimiPredictionValues,
+            predictions = freshFinalAimiPredictionValues(),
             now = now,
             targetMgdl = target,
             isfMgdl = isfMgdl,

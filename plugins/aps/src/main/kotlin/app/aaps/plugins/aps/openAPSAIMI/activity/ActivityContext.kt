@@ -26,5 +26,13 @@ data class ActivityContext(
     val isRecovery: Boolean = false,
     val isfMultiplier: Double = 1.0,
     val protectionMode: Boolean = false,
-    val description: String = "Rest"
+    val description: String = "Rest",
+    val manualMode: String? = null,
+    val effectFraction: Double = 0.0,
+    val currentPhase: Double = 0.0,
+    val startOffsetMinutes: Int = 0,
+    val activeRemainingMinutes: Int = 0,
+    val tailRemainingMinutes: Int = 0,
+    val tailTotalMinutes: Int = 0,
+    val glucoseUseMgdlPer5m: Double = 0.0
 )

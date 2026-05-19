@@ -4,6 +4,9 @@ import android.content.Context
 import android.graphics.DashPathEffect
 import android.graphics.Paint
 import app.aaps.core.data.model.GlucoseUnit
+import app.aaps.core.data.model.GV
+import app.aaps.core.data.model.SourceSensor
+import app.aaps.core.data.time.T
 import app.aaps.core.graph.data.AreaGraphSeries
 import app.aaps.core.graph.data.BarGraphSeries
 import app.aaps.core.graph.data.BolusDataPoint
@@ -65,7 +68,9 @@ class GraphData @Inject constructor(
         } else overviewData.maxBgValue
         minY = 0.0
         val bgSeries = overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
-        val finalAimiSeries = overviewData.finalAimiPredictionGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
+        val finalAimiPoints = finalAimiPredictionValuesForDisplay()
+            .map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowPredictionMarkMgdl()) }
+        val finalAimiSeries = PointsWithLabelGraphSeries(Array(finalAimiPoints.size) { i -> finalAimiPoints[i] })
         val predictionSeries = overviewData.predictionsGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
 
         maxY = max(maxY, finalAimiSeries.highestValueY)
@@ -85,7 +90,7 @@ class GraphData @Inject constructor(
     fun addFullPredictionReadings(context: Context?, targetMgdl: Double? = null, fromTime: Long? = null, toTime: Long? = null) {
         val lowMarkMgdl = lowPredictionMarkMgdl()
         val predictionPoints = overviewData.predictionValues.map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
-        val finalAimiPoints = overviewData.finalAimiPredictionValues.map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
+        val finalAimiPoints = finalAimiPredictionValuesForDisplay().map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
         val allPoints = predictionPoints + finalAimiPoints
         if (allPoints.isEmpty()) {
             maxY = if (units == GlucoseUnit.MGDL) 180.0 else 10.0
@@ -120,6 +125,28 @@ class GraphData @Inject constructor(
 
     private fun lowPredictionMarkMgdl(): Double =
         profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), units)
+
+    private fun finalAimiPredictionValuesForDisplay(): List<GV> {
+        val values = overviewData.finalAimiPredictionValues
+        if (values.isEmpty()) return values
+        val latestBg = overviewData.bgReadingsArray
+            .filter { it.value.isFinite() && it.value > 0.0 }
+            .maxByOrNull { it.timestamp }
+            ?: return values
+        val finalLine = values.filter { it.sourceSensor.isFinalAimiDisplaySource() }
+        if (finalLine.isEmpty()) return values
+        val closest = finalLine.minByOrNull { abs(it.timestamp - latestBg.timestamp) } ?: return values
+        val anchorMismatch =
+            latestBg.timestamp >= closest.timestamp &&
+                abs(closest.timestamp - latestBg.timestamp) <= T.mins(6).msecs() &&
+                abs(closest.value - latestBg.value) >= 12.0
+        return if (anchorMismatch) emptyList() else values
+    }
+
+    private fun SourceSensor.isFinalAimiDisplaySource(): Boolean =
+        this == SourceSensor.AIMI_FINAL_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
 
     private fun addFullPredictionTargetLine(fromTime: Long, toTime: Long, targetInUnits: Double) {
         val targetPoints = arrayOf(

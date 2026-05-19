@@ -25,6 +25,7 @@ object AdvancedPredictionEngine {
         cobG: Double,
         profile: OapsProfileAimi,
         selectedFoodType: String? = null,
+        carbSensitivityMgdlPerGram: Double? = null,
         delta: Double = 0.0, // Innovation: Carb impact awareness
         plannedSmbU: Double = 0.0,
         plannedRateUph: Double? = null,
@@ -42,6 +43,7 @@ object AdvancedPredictionEngine {
         explicitCarbEntry: Boolean = false,
         freshSmbPressureU: Double = 0.0,
         targetBG: Double? = null,
+        carbImpactTimelineMgdlPer5m: List<Double>? = null,
         horizonMinutes: Int = 240
     ): List<Double> {
         val predictions = mutableListOf(currentBG)
@@ -50,13 +52,16 @@ object AdvancedPredictionEngine {
         val steps = maxOf(1, horizonMinutes / 5)
         val now = System.currentTimeMillis()
         val carbRatio = profile.carb_ratio.takeIf { it > 0 } ?: 10.0
-        val csf = finalSensitivity / carbRatio
+        val csf = carbSensitivityMgdlPerGram
+            ?.takeIf { it.isFinite() && it > 0.0 }
+            ?: (finalSensitivity / carbRatio)
         val totalCarbEffectMgDl = (cobG * csf).coerceAtLeast(0.0)
         val belowTargetUnannouncedRise = targetBG
             ?.takeIf { it.isFinite() && it > 0.0 }
             ?.let { target -> currentBG < target && delta > 0.0 && cobG <= 0.0 && !explicitCarbEntry }
             ?: false
-        val shortReboundModel = rescueFastActive || belowTargetUnannouncedRise
+        val rescueFastModel = rescueFastActive && cobG <= 15.0
+        val shortReboundModel = rescueFastModel || belowTargetUnannouncedRise
 
         // Innovation: Dynamic IOB Damping during active meal rise
         // If BG is rising while COB exists OR during unannounced meals (UAM), the "effective" insulin pulling down is dampened by the inflow of glucose.
@@ -81,7 +86,7 @@ object AdvancedPredictionEngine {
             1.0
         }
 
-        val effectiveFoodType = if (shortReboundModel && selectedFoodType == null) "fast" else selectedFoodType
+        val effectiveFoodType = if (rescueFastModel && selectedFoodType == null) "fast" else selectedFoodType
         val effectiveFoodTypeName = effectiveFoodType?.lowercase()
         val explicitTypedCarbs = explicitCarbEntry || cobG > 0.0
         val carbParameters = CarbAbsorptionModel.resolveParameters(cobG = cobG, delta = delta, selectedFoodType = effectiveFoodType)
@@ -99,13 +104,16 @@ object AdvancedPredictionEngine {
         val normalizedMealFactor = mealFactorApplied.coerceIn(0.7, 1.5)
         val mealCurveBoost = 1.0 + (normalizedMealFactor - 1.0) * 0.8
         val effectiveCarbEffectMgDl = totalCarbEffectMgDl * mealCurveBoost
+        val explicitCarbTimeline = carbImpactTimelineMgdlPer5m
+            ?.takeIf { it.isNotEmpty() }
+            ?.map { it.coerceAtLeast(0.0) }
         val observedCarbImpact = observedCarbImpactMgdlPer5m.coerceAtLeast(0.0)
         val typedObservedTailFactor = when (effectiveFoodTypeName) {
             "fast" -> 0.45
             "slow" -> 1.0
             else -> 0.75
         }
-        val remainingObservedPeak = if (rescueFastActive) {
+        val remainingObservedPeak = if (rescueFastModel) {
             remainingCiPeakMgdlPer5m.coerceIn(0.0, observedCarbImpact * 0.6)
         } else if (belowTargetUnannouncedRise) {
             remainingCiPeakMgdlPer5m.coerceAtLeast(0.0) * normalizedUamConfidence * 0.35
@@ -164,7 +172,7 @@ object AdvancedPredictionEngine {
         // This is crucial for UAM where no COB is entered.
         var momentum = initialMomentum(
             delta = delta,
-            rescueFastActive = rescueFastActive,
+            rescueFastActive = rescueFastModel,
             belowTargetUnannouncedRise = belowTargetUnannouncedRise,
             explicitCarbEntry = explicitCarbEntry || cobG > 0.0,
             selectedFoodType = effectiveFoodType,
@@ -180,7 +188,10 @@ object AdvancedPredictionEngine {
             val dampingProgress = (minutesInFuture / 90.0).coerceIn(0.0, 1.0)
             val stepIobDampingFactor = baseIobDampingFactor + (1.0 - baseIobDampingFactor) * dampingProgress
             insulinImpactPer5min *= stepIobDampingFactor
-            val baseCarbImpactPer5Min = effectiveCarbEffectMgDl * carbWeights[stepIndex]
+            val baseCarbImpactPer5Min = explicitCarbTimeline
+                ?.getOrNull(stepIndex)
+                ?.let { it * mealCurveBoost }
+                ?: (effectiveCarbEffectMgDl * carbWeights[stepIndex])
             val liveDecayMinutes = when {
                 shortReboundModel -> 12.0
                 explicitTypedCarbs -> (carbParameters.peakMinutes * 1.1).coerceIn(12.0, 45.0)
@@ -215,7 +226,7 @@ object AdvancedPredictionEngine {
 
             // Linear/Exp decay of momentum
             momentum *= momentumDecay(
-                rescueFastActive = rescueFastActive,
+                rescueFastActive = rescueFastModel,
                 belowTargetUnannouncedRise = belowTargetUnannouncedRise,
                 explicitCarbEntry = explicitCarbEntry || cobG > 0.0,
                 selectedFoodType = effectiveFoodType,

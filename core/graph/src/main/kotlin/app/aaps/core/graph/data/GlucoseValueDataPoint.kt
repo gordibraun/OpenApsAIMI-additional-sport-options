@@ -33,6 +33,7 @@ class GlucoseValueDataPoint(
 
     override fun color(context: Context?): Int {
         return when {
+            isPendingPrediction         -> predictionColor(context)
             isPredictionBelowLowMark -> rh.gac(context, app.aaps.core.ui.R.attr.lowColor)
             isPrediction             -> predictionColor(context)
             else                     -> rh.gac(context, app.aaps.core.ui.R.attr.originalBgValueColor)
@@ -47,6 +48,8 @@ class GlucoseValueDataPoint(
             SourceSensor.UAM_PREDICTION   -> rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
             SourceSensor.ZT_PREDICTION    -> rh.gac(context, app.aaps.core.ui.R.attr.ztColor)
             SourceSensor.AIMI_FINAL_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.aimiFinalPredictionColor)
+            SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION -> rh.gc(app.aaps.core.ui.R.color.aimi_activity_active_prediction)
+            SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION -> rh.gc(app.aaps.core.ui.R.color.aimi_activity_tail_prediction)
             SourceSensor.AIMI_BEFORE_DECISION_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.carbsColor)
             SourceSensor.AIMI_MOMENTUM_SOFT_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
             SourceSensor.AIMI_FINAL_PREDICTION_STALE -> rh.gac(context, app.aaps.core.ui.R.attr.lowColor)
@@ -64,11 +67,16 @@ class GlucoseValueDataPoint(
             data.sourceSensor == SourceSensor.UAM_PREDICTION ||
             data.sourceSensor == SourceSensor.ZT_PREDICTION ||
             data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION ||
+            data.sourceSensor == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
+            data.sourceSensor == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION ||
             data.sourceSensor == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||
             data.sourceSensor == SourceSensor.AIMI_MOMENTUM_SOFT_PREDICTION ||
             data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION_STALE
 
     private val isPredictionBelowLowMark: Boolean
         get() = isPrediction && lowPredictionMarkMgdl?.let { data.value < it } == true
+
+    private val isPendingPrediction: Boolean
+        get() = data.sourceSensor == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION
 
 }

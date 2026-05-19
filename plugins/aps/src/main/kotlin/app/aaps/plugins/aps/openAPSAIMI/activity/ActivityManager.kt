@@ -1,8 +1,10 @@
 package app.aaps.plugins.aps.openAPSAIMI.activity
 
+import app.aaps.core.data.model.TE
 import javax.inject.Inject
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Manages the detection of physical activity using Steps and Heart Rate.
@@ -15,6 +17,36 @@ class ActivityManager @Inject constructor() {
     private var recoveryBucket: Double = 0.0 // Accumulates during effort, decays slowly
     private val RECOVERY_DECAY_RATE = 0.5 // Points lost per 5 min cycle
     private val RECOVERY_ACCUMULATION_FACTOR = 0.2 // Points gained per score point
+
+    private enum class ManualMode(val label: String, val effectFraction: Double) {
+        WALK("WALK", 0.20),
+        SPORT("SPORT", 0.30)
+    }
+
+    private data class ManualActivity(
+        val mode: ManualMode,
+        val startMs: Long,
+        val durationMinutes: Int,
+        val tailMinutes: Int,
+        val note: String?
+    )
+
+    companion object {
+
+        const val NOTE_PREFIX = "AIMI_ACTIVITY_V2"
+
+        fun buildNote(
+            mode: String,
+            effectPercent: Int,
+            startOffsetMinutes: Int,
+            durationMinutes: Int,
+            tailMinutes: Int,
+            requiredCarbs: Int,
+            carbType: String?
+        ): String =
+            "$NOTE_PREFIX mode=$mode effect=$effectPercent startOffset=$startOffsetMinutes duration=$durationMinutes " +
+                "tail=$tailMinutes requiredCarbs=$requiredCarbs carbType=${carbType ?: "none"}"
+    }
 
     /**
      * Main processing function. Call this every loop cycle (~5 mins).
@@ -29,7 +61,11 @@ class ActivityManager @Inject constructor() {
         steps5min: Int,
         steps10min: Int,
         avgHr: Double,
-        avgHrResting: Double
+        avgHrResting: Double,
+        therapyEvents: List<TE> = emptyList(),
+        now: Long = System.currentTimeMillis(),
+        profileBasalUph: Double = 0.0,
+        profileIsfMgdl: Double = 0.0
     ): ActivityContext {
         // 1. Scoring (0.0 - 10.0+)
         // Base score from steps (approx 100 steps/min = moderate walk -> score ~3-4)
@@ -101,7 +137,7 @@ class ActivityManager @Inject constructor() {
         
         val description = if (isRecovery) "Recovery (Debt: ${"%.1f".format(recoveryBucket)})" else "${state.name} (Score: ${"%.1f".format(smoothedScore)})"
 
-        return ActivityContext(
+        val automaticContext = ActivityContext(
             state = state,
             intensityScore = smoothedScore,
             isRecovery = isRecovery,
@@ -109,5 +145,157 @@ class ActivityManager @Inject constructor() {
             protectionMode = isRecovery || (state == ActivityState.INTENSE),
             description = description
         )
+        val manualContext = resolveManualContext(therapyEvents, now, profileBasalUph, profileIsfMgdl)
+        return mergeContexts(automaticContext, manualContext)
     }
+
+    private fun resolveManualContext(
+        therapyEvents: List<TE>,
+        now: Long,
+        profileBasalUph: Double,
+        profileIsfMgdl: Double
+    ): ActivityContext? {
+        val manual = therapyEvents
+            .asSequence()
+            .filter { it.isValid && it.type == TE.Type.EXERCISE }
+            .mapNotNull { event -> parseManualActivity(event) }
+            .filter { activity ->
+                val endWithTail = activity.startMs + minutesToMs(activity.durationMinutes + activity.tailMinutes)
+                activity.startMs <= now + minutesToMs(6 * 60) && endWithTail >= now - minutesToMs(5)
+            }
+            .maxByOrNull { it.startMs } ?: return null
+
+        val activeEnd = manual.startMs + minutesToMs(manual.durationMinutes)
+        val tailEnd = activeEnd + minutesToMs(manual.tailMinutes)
+        val startOffset = ((manual.startMs - now) / 60_000.0).roundToInt()
+        val currentPhase = when {
+            now < manual.startMs        -> 0.0
+            now <= activeEnd            -> 1.0
+            now <= tailEnd              -> ((tailEnd - now).toDouble() / minutesToMs(manual.tailMinutes).toDouble()).coerceIn(0.0, 1.0)
+            else                        -> 0.0
+        }
+        val isUpcoming = startOffset > 0
+        val activeRemaining = when {
+            now < manual.startMs -> manual.durationMinutes
+            now <= activeEnd     -> ((activeEnd - now) / 60_000.0).roundToInt().coerceAtLeast(0)
+            else                 -> 0
+        }
+        val tailRemaining = when {
+            now <= activeEnd -> manual.tailMinutes
+            now <= tailEnd   -> ((tailEnd - now) / 60_000.0).roundToInt().coerceAtLeast(0)
+            else             -> 0
+        }
+        val effectNow = manual.mode.effectFraction * currentPhase
+        val state = when {
+            manual.mode == ManualMode.SPORT && currentPhase > 0.0 -> ActivityState.MODERATE
+            manual.mode == ManualMode.WALK && currentPhase > 0.0  -> ActivityState.LIGHT
+            else                                                  -> ActivityState.REST
+        }
+        val phaseDescription = when {
+            isUpcoming       -> "старт через ${startOffset}м"
+            now <= activeEnd -> "активна еще ${activeRemaining}м"
+            tailRemaining > 0 -> "хвост еще ${tailRemaining}м"
+            else             -> "завершена"
+        }
+        val glucoseUse = activityGlucoseUseMgdlPer5m(manual.mode, profileBasalUph, profileIsfMgdl)
+
+        return ActivityContext(
+            state = state,
+            intensityScore = manual.mode.effectFraction * 10.0 * max(0.3, currentPhase),
+            isRecovery = tailRemaining > 0 && now > activeEnd,
+            isfMultiplier = 1.0 + effectNow,
+            protectionMode = false,
+            description = "${manual.mode.label} ${manual.durationMinutes}м: $phaseDescription, " +
+                "ISF x${"%.2f".format(1.0 + effectNow)}, basal x${"%.2f".format(1.0 - effectNow)}, " +
+                "расход ${"%.1f".format(glucoseUse)} mg/dL/5м",
+            manualMode = manual.mode.label,
+            effectFraction = manual.mode.effectFraction,
+            currentPhase = currentPhase,
+            startOffsetMinutes = startOffset,
+            activeRemainingMinutes = activeRemaining,
+            tailRemainingMinutes = tailRemaining,
+            tailTotalMinutes = manual.tailMinutes,
+            glucoseUseMgdlPer5m = glucoseUse
+        )
+    }
+
+    private fun parseManualActivity(event: TE): ManualActivity? {
+        val note = event.note
+        if (note?.contains(NOTE_PREFIX) != true) return null
+        val tokens = note.split(' ')
+            .mapNotNull { part ->
+                val splitAt = part.indexOf('=')
+                if (splitAt <= 0 || splitAt >= part.lastIndex) null
+                else part.substring(0, splitAt) to part.substring(splitAt + 1)
+            }
+            .toMap()
+        val mode = when (tokens["mode"]?.uppercase()) {
+            ManualMode.WALK.label  -> ManualMode.WALK
+            ManualMode.SPORT.label -> ManualMode.SPORT
+            else                   -> null
+        } ?: return null
+        val duration = (tokens["duration"]?.toIntOrNull() ?: (event.duration / 60_000L).toInt()).coerceAtLeast(5)
+        val tail = (tokens["tail"]?.toIntOrNull() ?: tailMinutes(mode, duration)).coerceAtLeast(0)
+        return ManualActivity(
+            mode = mode,
+            startMs = event.timestamp,
+            durationMinutes = duration,
+            tailMinutes = tail,
+            note = note
+        )
+    }
+
+    private fun mergeContexts(automatic: ActivityContext, manual: ActivityContext?): ActivityContext {
+        if (manual == null) return automatic
+        val manualRelevant = manual.manualMode != null &&
+            (manual.startOffsetMinutes <= 6 * 60) &&
+            (manual.startOffsetMinutes > 0 || manual.currentPhase > 0.0 || manual.tailRemainingMinutes > 0)
+        if (!manualRelevant) return automatic
+
+        // Manual WALK/SPORT is the only dosing input for Activity v2 for now.
+        // Watch-derived steps/HR remain visible in logs, but must not silently
+        // strengthen sensitivity, basal reduction, or protection decisions.
+        val description = "${manual.description}; часы: ${automatic.description} (только наблюдение)"
+        return manual.copy(
+            state = manual.state,
+            intensityScore = manual.intensityScore,
+            isRecovery = manual.isRecovery,
+            isfMultiplier = manual.isfMultiplier,
+            protectionMode = manual.protectionMode,
+            description = description
+        )
+    }
+
+    private fun activityGlucoseUseMgdlPer5m(mode: ManualMode, profileBasalUph: Double, profileIsfMgdl: Double): Double {
+        val insulinEquivalent = if (profileBasalUph > 0.0 && profileIsfMgdl > 0.0) {
+            profileBasalUph * profileIsfMgdl * mode.effectFraction / 12.0
+        } else {
+            0.0
+        }
+        val movementUse = when (mode) {
+            ManualMode.WALK  -> 0.8
+            ManualMode.SPORT -> 1.2
+        }
+        val cap = when (mode) {
+            ManualMode.WALK  -> 3.5
+            ManualMode.SPORT -> 5.0
+        }
+        return (insulinEquivalent + movementUse).coerceIn(0.5, cap)
+    }
+
+    private fun minutesToMs(minutes: Int): Long = minutes * 60_000L
+
+    private fun tailMinutes(mode: ManualMode, durationMinutes: Int): Int =
+        when (mode) {
+            ManualMode.WALK  -> when {
+                durationMinutes >= 90 -> 30
+                else                  -> 0
+            }
+
+            ManualMode.SPORT -> when {
+                durationMinutes >= 90 -> 180
+                durationMinutes >= 50 -> 120
+                else                  -> 60
+            }
+        }
 }

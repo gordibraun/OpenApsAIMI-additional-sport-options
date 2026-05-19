@@ -8,6 +8,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.RemoteInput
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.interfaces.configuration.Config
+import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.db.ProcessedTbrEbData
 import app.aaps.core.interfaces.iob.GlucoseStatusProvider
 import app.aaps.core.interfaces.iob.IobCobCalculator
@@ -29,6 +30,7 @@ import app.aaps.core.interfaces.ui.IconsProvider
 import app.aaps.core.interfaces.utils.DecimalFormatter
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.objects.extensions.generateCOBString
+import app.aaps.core.objects.extensions.withAimiResultCob
 import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.extensions.toStringShort
 import app.aaps.plugins.main.R
@@ -56,7 +58,8 @@ class PersistentNotificationPlugin @Inject constructor(
     private val iconsProvider: IconsProvider,
     private val glucoseStatusProvider: GlucoseStatusProvider,
     private val config: Config,
-    private val decimalFormatter: DecimalFormatter
+    private val decimalFormatter: DecimalFormatter,
+    private val loop: Loop
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.GENERAL)
@@ -154,14 +157,14 @@ class PersistentNotificationPlugin @Inject constructor(
                         .string.cob
                 ) + ": " + iobCobCalculator.getCobInfo(
                     "PersistentNotificationPlugin"
-                ).generateCOBString(decimalFormatter)
+                ).withAimiResultCob(loop, System.currentTimeMillis()).generateCOBString(decimalFormatter)
             val line2aa =
                 rh.gs(app.aaps.core.ui.R.string.treatments_iob_label_string) + " " + rh.gs(app.aaps.core.ui.R.string.format_insulin_units, (bolusIob.iob + basalIob.basaliob)) + ". " + rh.gs(
                     app.aaps.core.ui.R
                         .string.cob
                 ) + ": " + iobCobCalculator.getCobInfo(
                     "PersistentNotificationPlugin"
-                ).generateCOBString(decimalFormatter) + "."
+                ).withAimiResultCob(loop, System.currentTimeMillis()).generateCOBString(decimalFormatter) + "."
             line3 = rh.gs(app.aaps.core.ui.R.string.pump_base_basal_rate, pump.baseBasalRate)
             var line3aa = rh.gs(app.aaps.core.ui.R.string.pump_base_basal_rate, pump.baseBasalRate) + "."
             line3 += " - " + profileFunction.getProfileName()

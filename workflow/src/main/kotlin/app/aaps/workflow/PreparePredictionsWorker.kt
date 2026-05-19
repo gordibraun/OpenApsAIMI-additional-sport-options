@@ -3,8 +3,9 @@ package app.aaps.workflow
 import android.content.Context
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
-import app.aaps.core.data.time.T
 import app.aaps.core.data.model.SourceSensor
+import app.aaps.core.data.model.TE
+import app.aaps.core.data.time.T
 import app.aaps.core.graph.data.DataPointWithLabelInterface
 import app.aaps.core.graph.data.GlucoseValueDataPoint
 import app.aaps.core.graph.data.PointsWithLabelGraphSeries
@@ -58,6 +59,13 @@ class PreparePredictionsWorker(
         val overviewData: OverviewData
     )
 
+    private data class ActivityWindow(
+        val start: Long,
+        val activeEnd: Long,
+        val tailEnd: Long,
+        val label: String
+    )
+
     override suspend fun doWorkAndLog(): Result {
         val data = dataWorkerStorage.pickupObject(inputData.getLong(DataWorkerStorage.STORE_KEY, -1)) as PreparePredictionsData?
             ?: return Result.failure(workDataOf("Error" to "missing input data"))
@@ -69,8 +77,8 @@ class PreparePredictionsWorker(
         val predictionsAreStaleByActions = apsResult?.let { isPredictionStaleByRecentActions(it) } == true
         val predictionsAreMissingMealContext = apsResult?.let { isPredictionMissingMealContext(it) } == true
         val predictionsAreStale = predictionsAreStaleByBg || predictionsAreStaleByContext || predictionsAreStaleByCarbs || predictionsAreStaleByActions || predictionsAreMissingMealContext
-        val hidePredictions = predictionsAreStaleByBg || predictionsAreMissingMealContext
-        val markPredictionPendingRecalc = !hidePredictions && (predictionsAreStaleByContext || predictionsAreStaleByCarbs || predictionsAreStaleByActions)
+        val hidePredictions = false
+        val markPredictionPendingRecalc = predictionsAreStale
         val predictionsAvailable =
             apsResult?.predictionsAsGv?.isNotEmpty() == true ||
                 (if (config.APS) loop.lastRun?.request?.hasPredictions == true else config.AAPSCLIENT)
@@ -117,15 +125,14 @@ class PreparePredictionsWorker(
         val displayPredictionValues = apsResult?.predictionsAsGv?.let { values ->
             if (markPredictionPendingRecalc) {
                 values.map { bg ->
-                    when (bg.sourceSensor) {
-                        SourceSensor.AIMI_FINAL_PREDICTION,
-                        SourceSensor.AIMI_FINAL_PREDICTION_STALE -> bg.copy(sourceSensor = SourceSensor.AIMI_BEFORE_DECISION_PREDICTION)
-
-                        else -> bg
+                    if (bg.sourceSensor.isAimiFinalLineSource()) {
+                        bg.copy(sourceSensor = SourceSensor.AIMI_BEFORE_DECISION_PREDICTION)
+                    } else {
+                        bg
                     }
                 }
             } else values
-        }
+        }?.let { values -> markActivityPredictionPhases(values, markPredictionPendingRecalc) }
         val predictions: MutableList<GlucoseValueDataPoint>? = if (hidePredictions) {
             mutableListOf()
         } else displayPredictionValues
@@ -138,6 +145,8 @@ class PreparePredictionsWorker(
             for (prediction in predictions) {
                 if (prediction.data.value < 40) continue
                 if (prediction.data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION ||
+                    prediction.data.sourceSensor == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
+                    prediction.data.sourceSensor == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION ||
                     prediction.data.sourceSensor == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||
                     prediction.data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION_STALE
                 ) {
@@ -168,6 +177,95 @@ class PreparePredictionsWorker(
         return Result.success()
     }
 
+    private fun markActivityPredictionPhases(
+        values: List<app.aaps.core.data.model.GV>,
+        pendingRecalc: Boolean
+    ): List<app.aaps.core.data.model.GV> {
+        if (pendingRecalc) return values
+        val colorableSources = setOf(
+            SourceSensor.AIMI_FINAL_PREDICTION,
+            SourceSensor.AIMI_BEFORE_DECISION_PREDICTION
+        )
+        if (values.none { it.sourceSensor in colorableSources }) return values
+        val first = values.minOfOrNull { it.timestamp } ?: return values
+        val last = values.maxOfOrNull { it.timestamp } ?: return values
+        val windows = activityWindows(first, last)
+        if (windows.isEmpty()) return values
+
+        var activePoints = 0
+        var tailPoints = 0
+        val mapped = values.map { bg ->
+            if (bg.sourceSensor !in colorableSources) return@map bg
+            val phase = activityPhase(bg.timestamp, windows)
+            when (phase) {
+                SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION -> {
+                    activePoints++
+                    bg.copy(sourceSensor = phase)
+                }
+
+                SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION   -> {
+                    tailPoints++
+                    bg.copy(sourceSensor = phase)
+                }
+
+                else                                         -> bg
+            }
+        }
+        if (activePoints > 0 || tailPoints > 0) {
+            aapsLogger.debug(
+                LTag.WORKER,
+                "AIMI activity forecast coloring: activePoints=$activePoints tailPoints=$tailPoints " +
+                    "pendingRecalc=$pendingRecalc " +
+                    "windows=${windows.joinToString { "${it.label} active=${dateUtil.timeString(it.start)}-${dateUtil.timeString(it.activeEnd)} tailEnd=${dateUtil.timeString(it.tailEnd)}" }}"
+            )
+        }
+        return mapped
+    }
+
+    private fun SourceSensor.isAimiFinalLineSource(): Boolean =
+        this == SourceSensor.AIMI_FINAL_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION ||
+            this == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||
+            this == SourceSensor.AIMI_FINAL_PREDICTION_STALE
+
+    private fun activityWindows(firstPrediction: Long, lastPrediction: Long): List<ActivityWindow> =
+        try {
+            persistenceLayer.getTherapyEventDataFromToTime(
+                firstPrediction - T.hours(12).msecs(),
+                lastPrediction + T.mins(5).msecs()
+            ).blockingGet()
+                .asSequence()
+                .filter { it.isValid && it.type == TE.Type.EXERCISE && it.note?.contains("AIMI_ACTIVITY_V2") == true }
+                .mapNotNull { event ->
+                    val mode = tokenFromNote(event.note, "mode") ?: "ACTIVITY"
+                    val duration = (tokenFromNote(event.note, "duration")?.toLongOrNull() ?: (event.duration / T.mins(1).msecs())).coerceAtLeast(0)
+                    val tail = (tokenFromNote(event.note, "tail")?.toLongOrNull() ?: 0L).coerceAtLeast(0)
+                    val start = event.timestamp
+                    val activeEnd = start + T.mins(duration).msecs()
+                    val tailEnd = activeEnd + T.mins(tail).msecs()
+                    if (tailEnd < firstPrediction || start > lastPrediction) null
+                    else ActivityWindow(start, activeEnd, tailEnd, mode)
+                }
+                .toList()
+        } catch (e: Exception) {
+            aapsLogger.debug(LTag.WORKER, "AIMI activity forecast coloring unavailable: ${e.message}")
+            emptyList()
+        }
+
+    private fun tokenFromNote(note: String?, key: String): String? =
+        note
+            ?.split(' ')
+            ?.firstOrNull { it.startsWith("$key=") }
+            ?.substringAfter('=')
+            ?.takeIf { it.isNotBlank() }
+
+    private fun activityPhase(timestamp: Long, windows: List<ActivityWindow>): SourceSensor? {
+        if (windows.any { timestamp >= it.start && timestamp <= it.activeEnd }) return SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION
+        if (windows.any { timestamp > it.activeEnd && timestamp <= it.tailEnd }) return SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
+        return null
+    }
+
     private fun isPredictionStale(apsResult: APSResult): Boolean {
         val actualBg = currentBgSnapshot() ?: return true
         val predictionBgTimestamp = apsResult.glucoseStatus?.date ?: apsResult.date
@@ -176,18 +274,29 @@ class PreparePredictionsWorker(
         val bgValueGap = predictionBgValue?.let { kotlin.math.abs(actualBg.value - it) } ?: 0.0
         val isStaleByTime = bgAgeGap > T.mins(6).msecs()
         val isStaleByValue = bgAgeGap > T.mins(1).msecs() && bgValueGap >= 10.0
+        val forecastAnchor = apsResult.predictionsAsGv
+            ?.filter { it.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION || it.sourceSensor == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION }
+            ?.minByOrNull { kotlin.math.abs(it.timestamp - actualBg.timestamp) }
+        val isStaleByForecastAnchor = forecastAnchor?.let { anchor ->
+            actualBg.timestamp >= anchor.timestamp &&
+                kotlin.math.abs(anchor.timestamp - actualBg.timestamp) <= T.mins(6).msecs() &&
+                kotlin.math.abs(anchor.value - actualBg.value) >= 12.0
+        } == true
 
-        if (isStaleByTime || isStaleByValue) {
+        if (isStaleByTime || isStaleByValue || isStaleByForecastAnchor) {
             aapsLogger.debug(
                 LTag.WORKER,
                 "Hiding stale AIMI prediction by BG: aps=${dateUtil.dateAndTimeString(apsResult.date)} " +
                     "bgSnapshot=${dateUtil.dateAndTimeString(predictionBgTimestamp)} ${profileUtil.fromMgdlToStringInUnits(predictionBgValue ?: 0.0)} " +
                     "currentBg=${dateUtil.dateAndTimeString(actualBg.timestamp)} ${profileUtil.fromMgdlToStringInUnits(actualBg.value)} " +
                     "source=${actualBg.source} " +
-                    "ageGapMs=$bgAgeGap valueGapMgdl=$bgValueGap"
+                    "ageGapMs=$bgAgeGap valueGapMgdl=$bgValueGap" +
+                    (forecastAnchor?.let {
+                        " forecastAnchor=${dateUtil.dateAndTimeString(it.timestamp)} ${profileUtil.fromMgdlToStringInUnits(it.value)}"
+                    } ?: "")
             )
         }
-        return isStaleByTime || isStaleByValue
+        return isStaleByTime || isStaleByValue || isStaleByForecastAnchor
     }
 
     private fun isPredictionMissingMealContext(apsResult: APSResult): Boolean {
@@ -270,6 +379,28 @@ class PreparePredictionsWorker(
         fun isRelevant(timestamp: Long, dateCreated: Long): Boolean =
             (timestamp in lookback..futureMargin) && (timestamp > resultTime || dateCreated > resultTime)
 
+        fun isOwnLoopAction(timestamp: Long, dateCreated: Long): Boolean {
+            val deliverAt = apsResult.deliverAt.takeIf { it > 0L } ?: resultTime
+            val closeToResult = abs(timestamp - resultTime) <= T.mins(6).msecs() || abs(timestamp - deliverAt) <= T.mins(6).msecs()
+            val createdRightAfterResult = dateCreated in resultTime..(resultTime + T.mins(3).msecs())
+            return closeToResult && createdRightAfterResult
+        }
+
+        fun ownTempBasalMatchesResult(tempBasal: app.aaps.core.data.model.TB): Boolean {
+            if (!tempBasal.isValid || !isOwnLoopAction(tempBasal.timestamp, tempBasal.dateCreated)) return false
+            val resultDuration = apsResult.duration
+            val durationMinutes = tempBasal.duration / T.mins(1).msecs()
+            val durationMatches = resultDuration <= 0 || abs(durationMinutes - resultDuration.toLong()) <= 5L
+            val profileBasal = apsResult.oapsProfileAimi?.current_basal ?: apsResult.oapsProfile?.current_basal ?: 0.0
+            val rateMatches = if (tempBasal.isAbsolute) {
+                abs(tempBasal.rate - apsResult.rate) <= 0.05
+            } else {
+                abs(tempBasal.rate - apsResult.percent.toDouble()) <= 1.0 ||
+                    (profileBasal > 0.0 && abs(tempBasal.rate / 100.0 * profileBasal - apsResult.rate) <= 0.05)
+            }
+            return durationMatches && rateMatches
+        }
+
         fun logPending(kind: String, timestamp: Long, dateCreated: Long, details: String = ""): Boolean {
             aapsLogger.debug(
                 LTag.WORKER,
@@ -348,15 +479,43 @@ class PreparePredictionsWorker(
         }
 
         try {
+            val activity = persistenceLayer.getTherapyEventDataIncludingInvalidFromTime(lookback, false)
+                .blockingGet()
+                .firstOrNull {
+                    it.type == TE.Type.EXERCISE &&
+                        it.note?.contains("AIMI_ACTIVITY_V2") == true &&
+                        isRelevant(it.timestamp, it.dateCreated)
+                }
+            if (activity != null) return logPending(
+                kind = "activity",
+                timestamp = activity.timestamp,
+                dateCreated = activity.dateCreated,
+                details = " duration=${activity.duration / T.mins(1).msecs()}m valid=${activity.isValid}"
+            )
+        } catch (_: Throwable) {
+        }
+
+        try {
             val tempBasal = persistenceLayer.getTemporaryBasalsStartingFromTimeIncludingInvalid(lookback, false)
                 .blockingGet()
                 .firstOrNull { isRelevant(it.timestamp, it.dateCreated) }
-            if (tempBasal != null) return logPending(
-                kind = "temporary basal",
-                timestamp = tempBasal.timestamp,
-                dateCreated = tempBasal.dateCreated,
-                details = " rate=${"%.2f".format(tempBasal.rate)} duration=${tempBasal.duration / T.mins(1).msecs()}m valid=${tempBasal.isValid}"
-            )
+            if (tempBasal != null) {
+                val details = " rate=${"%.2f".format(tempBasal.rate)} duration=${tempBasal.duration / T.mins(1).msecs()}m " +
+                    "absolute=${tempBasal.isAbsolute} valid=${tempBasal.isValid}"
+                if (ownTempBasalMatchesResult(tempBasal)) {
+                    aapsLogger.debug(
+                        LTag.WORKER,
+                        "AIMI prediction action already reflected by final decision: temporary basal " +
+                            "result=${dateUtil.dateAndTimeString(resultTime)} event=${dateUtil.dateAndTimeString(tempBasal.timestamp)} " +
+                            "created=${dateUtil.dateAndTimeString(tempBasal.dateCreated)}$details"
+                    )
+                } else return logPending(
+                    kind = "temporary basal",
+                    timestamp = tempBasal.timestamp,
+                    dateCreated = tempBasal.dateCreated,
+                    details = details
+                )
+            }
         } catch (_: Throwable) {
         }
 

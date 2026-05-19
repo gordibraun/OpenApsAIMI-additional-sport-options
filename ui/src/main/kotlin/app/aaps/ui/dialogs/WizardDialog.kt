@@ -775,6 +775,11 @@ class WizardDialog : DaggerDialogFragment() {
         val maxBgMgdl: Double
     )
 
+    private data class CarbTimingUrgency(
+        val maxOffsetMinutes: Int?,
+        val reasonText: String?
+    )
+
     private data class TimingForecastPoint(val minutes: Int, val bgMgdl: Double)
 
     private fun applyForecastAwareWizardBolus(
@@ -918,7 +923,22 @@ class WizardDialog : DaggerDialogFragment() {
         val carbEffectMgdl = carbs * isfMgdl / ic * carbGlucoseEffectScale(selectedFoodType)
         val plannedBolusEffectMgdl = wizard.insulinAfterConstraints.coerceAtLeast(0.0) * isfMgdl
 
-        val candidates = timingCandidateOffsets(forecast, selectedFoodType).map { offsetMinutes ->
+        val urgency = carbTimingUrgency(
+            forecast = forecast,
+            targetLowMgdl = targetLowMgdl,
+            targetHighMgdl = targetHighMgdl,
+            selectedFoodType = selectedFoodType
+        )
+        val candidateOffsets = timingCandidateOffsets(forecast, selectedFoodType)
+            .let { offsets ->
+                urgency.maxOffsetMinutes?.let { maxOffset ->
+                    offsets.filter { it <= maxOffset }
+                        .plus(0)
+                        .distinct()
+                        .sorted()
+                } ?: offsets
+            }
+        val candidates = candidateOffsets.map { offsetMinutes ->
             scoreCarbTiming(
                 forecast = forecast,
                 offsetMinutes = offsetMinutes,
@@ -936,6 +956,7 @@ class WizardDialog : DaggerDialogFragment() {
         if (selectedCarbTime != chosen.offsetMinutes) {
             details += "Ты указал: ${formatSelectedCarbTiming(selectedCarbTime)}"
         }
+        urgency.reasonText?.let { details += it }
         if (nowCandidate != null && chosen.offsetMinutes > 0 && nowCandidate.score > chosen.score * 1.12) {
             details += "Если съесть сейчас: прогноз хуже"
         }
@@ -979,6 +1000,48 @@ class WizardDialog : DaggerDialogFragment() {
         val latestForecastMinute = timingScoringPoints(forecast).maxOfOrNull { it.minutes } ?: return listOf(0)
         val latestOffsetWithVisiblePeak = (latestForecastMinute - carbTimingPeakMinutes(selectedFoodType)).coerceAtLeast(0)
         return (0..latestOffsetWithVisiblePeak step 5).toList().ifEmpty { listOf(0) }
+    }
+
+    private fun carbTimingUrgency(
+        forecast: List<TimingForecastPoint>,
+        targetLowMgdl: Double,
+        targetHighMgdl: Double,
+        selectedFoodType: String
+    ): CarbTimingUrgency {
+        val currentBgMgdl = forecast.firstOrNull()?.bgMgdl ?: return CarbTimingUrgency(null, null)
+        val shortDelta = wizard?.glucoseStatus?.shortAvgDelta ?: 0.0
+        val earlyPoints = forecast.filter { it.minutes in 0..60 }
+        val earlyLowPoint = earlyPoints
+            .filter { it.bgMgdl <= targetLowMgdl + 5.0 }
+            .minByOrNull { it.minutes }
+        val point15 = earlyPoints.minByOrNull { abs(it.minutes - 15) }
+        val forecastFallingSoon = point15 != null && point15.bgMgdl <= currentBgMgdl - 5.0
+        val fallingNow = shortDelta <= -2.0 || forecastFallingSoon
+        val alreadyNearLow = currentBgMgdl <= targetLowMgdl + 5.0
+        val fallingNearTarget = fallingNow && currentBgMgdl <= targetHighMgdl + 15.0
+
+        if (!alreadyNearLow && !fallingNearTarget && earlyLowPoint == null) {
+            return CarbTimingUrgency(null, null)
+        }
+
+        val riskMinute = when {
+            alreadyNearLow       -> 0
+            earlyLowPoint != null -> earlyLowPoint.minutes
+            else                 -> 20
+        }
+        val usefulLead = carbUsefulLeadMinutes(selectedFoodType)
+        val maxOffset = (riskMinute - usefulLead).coerceAtLeast(0)
+        val reason = when {
+            alreadyNearLow ->
+                "Глюкоза уже около нижней границы, дальнюю отсрочку не используем"
+
+            fallingNearTarget ->
+                "Глюкоза падает сейчас, ближайший риск важнее дальнего пика"
+
+            else ->
+                "В ближайшем прогнозе есть низкая зона, углеводы нужны до нее"
+        }
+        return CarbTimingUrgency(maxOffset, reason)
     }
 
     private fun scoreCarbTiming(
@@ -1080,6 +1143,13 @@ class WizardDialog : DaggerDialogFragment() {
             "fast" -> 15
             "slow" -> 80
             else -> 50
+        }
+
+    private fun carbUsefulLeadMinutes(selectedFoodType: String): Int =
+        when (selectedFoodType) {
+            "fast" -> 5
+            "slow" -> 45
+            else -> 20
         }
 
     private fun carbEffectFraction(minutesSinceCarb: Int, selectedFoodType: String): Double {

@@ -239,6 +239,8 @@
     <color name="omni_yellow">#FFFF00</color>
     <color name="omni_cyan">#00FFFF</color>
     <color name="omni_green">#00FF00</color>
+    <color name="aimi_activity_active_prediction">#FFD600</color>
+    <color name="aimi_activity_tail_prediction">#FFB300</color>
 
     <!-- Button icons - general -->
     <color name="pod_icon_outline">#9E9E9E</color>
