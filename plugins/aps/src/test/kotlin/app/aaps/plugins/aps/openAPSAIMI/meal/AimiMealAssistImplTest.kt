@@ -7,6 +7,8 @@ import app.aaps.core.keys.interfaces.Preferences
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -91,15 +93,229 @@ class AimiMealAssistImplTest {
         assertEquals(0.5, decision.recommendedBolus, 0.0)
     }
 
+    @Test
+    fun `fast carbs receive reduced carb bolus without prebolus boost`() {
+        val balanced = sut.evaluate(
+            baseInput(
+                carbs = 10,
+                requiredCarbs = 0,
+                wizardCalculatedBolus = 1.0,
+                wizardInsulinFromCarbs = 1.0,
+                selectedFoodType = "balanced"
+            )
+        )
+        val fast = sut.evaluate(
+            baseInput(
+                carbs = 10,
+                requiredCarbs = 0,
+                wizardCalculatedBolus = 1.0,
+                wizardInsulinFromCarbs = 1.0,
+                selectedFoodType = "fast"
+            )
+        )
+
+        assertTrue(fast.recommendedBolus < balanced.recommendedBolus)
+        assertEquals(0.0, fast.prebolusBonus, 0.0)
+        assertEquals(0.80, fast.recommendedBolus, 0.0)
+    }
+
+    @Test
+    fun `manual negative correction reduces final AIMI bolus even with protective carbs`() {
+        val withoutCorrection = sut.evaluate(
+            baseInput(
+                carbs = 10,
+                requiredCarbs = 3,
+                wizardCalculatedBolus = 1.0,
+                wizardInsulinFromCarbs = 1.0,
+                correction = 0.0
+            )
+        )
+        val withCorrection = sut.evaluate(
+            baseInput(
+                carbs = 10,
+                requiredCarbs = 3,
+                wizardCalculatedBolus = 0.5,
+                wizardInsulinFromCarbs = 1.0,
+                correction = -0.5
+            )
+        )
+
+        assertEquals(0.7, withoutCorrection.recommendedBolus, 0.0)
+        assertEquals(0.2, withCorrection.recommendedBolus, 0.0)
+    }
+
+    @Test
+    fun `mixed active carb types use balanced forecast type`() {
+        val now = System.currentTimeMillis()
+        val fastInput = baseInput(
+            timestamp = now - 5 * 60_000L,
+            carbs = 10,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 0.8,
+            wizardInsulinFromCarbs = 1.0,
+            selectedFoodType = "fast"
+        )
+        val balancedInput = baseInput(
+            timestamp = now,
+            carbs = 30,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 3.0,
+            wizardInsulinFromCarbs = 3.0,
+            selectedFoodType = "balanced"
+        )
+
+        sut.activate(fastInput, sut.evaluate(fastInput))
+        sut.activate(balancedInput, sut.evaluate(balancedInput))
+
+        assertEquals("balanced", sut.activeEpisode()?.selectedFoodType)
+    }
+
+    @Test
+    fun `dominant active carb type is preserved for forecast`() {
+        val now = System.currentTimeMillis()
+        val fastInput = baseInput(
+            timestamp = now - 5 * 60_000L,
+            carbs = 35,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 2.8,
+            wizardInsulinFromCarbs = 3.5,
+            selectedFoodType = "fast"
+        )
+        val balancedInput = baseInput(
+            timestamp = now,
+            carbs = 5,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 0.5,
+            wizardInsulinFromCarbs = 0.5,
+            selectedFoodType = "balanced"
+        )
+
+        sut.activate(fastInput, sut.evaluate(fastInput))
+        sut.activate(balancedInput, sut.evaluate(balancedInput))
+
+        assertEquals("fast", sut.activeEpisode()?.selectedFoodType)
+    }
+
+    @Test
+    fun `single active fast carb episode decays instead of staying full`() {
+        val now = System.currentTimeMillis()
+        val fastInput = baseInput(
+            timestamp = now - 30 * 60_000L,
+            carbs = 30,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 2.4,
+            wizardInsulinFromCarbs = 3.0,
+            selectedFoodType = "fast"
+        )
+
+        sut.activate(fastInput, sut.evaluate(fastInput))
+
+        val activeEpisode = checkNotNull(sut.activeEpisode())
+        assertEquals("fast", activeEpisode.selectedFoodType)
+        assertEquals(6, activeEpisode.carbs)
+    }
+
+    @Test
+    fun `single fast carb episode expires after fast absorption even inside active window`() {
+        val now = System.currentTimeMillis()
+        val fastInput = baseInput(
+            timestamp = now - 50 * 60_000L,
+            carbs = 30,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 2.4,
+            wizardInsulinFromCarbs = 3.0,
+            selectedFoodType = "fast"
+        )
+
+        sut.activate(fastInput, sut.evaluate(fastInput))
+
+        assertNull(sut.activeEpisode())
+    }
+
+    @Test
+    fun `single active balanced carb episode decays instead of staying full`() {
+        val now = System.currentTimeMillis()
+        val balancedInput = baseInput(
+            timestamp = now - 60 * 60_000L,
+            carbs = 33,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 3.3,
+            wizardInsulinFromCarbs = 3.3,
+            selectedFoodType = "balanced"
+        )
+
+        sut.activate(balancedInput, sut.evaluate(balancedInput))
+
+        val activeEpisode = checkNotNull(sut.activeEpisode())
+        assertEquals("balanced", activeEpisode.selectedFoodType)
+        assertEquals(16, activeEpisode.carbs)
+    }
+
+    @Test
+    fun `single balanced carb episode expires after balanced absorption even inside active window`() {
+        val now = System.currentTimeMillis()
+        val balancedInput = baseInput(
+            timestamp = now - 170 * 60_000L,
+            carbs = 33,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 3.3,
+            wizardInsulinFromCarbs = 3.3,
+            selectedFoodType = "balanced"
+        )
+
+        sut.activate(balancedInput, sut.evaluate(balancedInput))
+
+        assertNull(sut.activeEpisode())
+    }
+
+    @Test
+    fun `single active slow carb episode decays instead of staying full`() {
+        val now = System.currentTimeMillis()
+        val slowInput = baseInput(
+            timestamp = now - 120 * 60_000L,
+            carbs = 48,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 4.4,
+            wizardInsulinFromCarbs = 4.8,
+            selectedFoodType = "slow"
+        )
+
+        sut.activate(slowInput, sut.evaluate(slowInput))
+
+        val activeEpisode = checkNotNull(sut.activeEpisode())
+        assertEquals("slow", activeEpisode.selectedFoodType)
+        assertEquals(16, activeEpisode.carbs)
+    }
+
+    @Test
+    fun `single slow carb episode expires after slow absorption even inside active window`() {
+        val now = System.currentTimeMillis()
+        val slowInput = baseInput(
+            timestamp = now - 250 * 60_000L,
+            carbs = 48,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 4.4,
+            wizardInsulinFromCarbs = 4.8,
+            selectedFoodType = "slow"
+        )
+
+        sut.activate(slowInput, sut.evaluate(slowInput))
+
+        assertNull(sut.activeEpisode())
+    }
+
     private fun baseInput(
+        timestamp: Long = 0L,
         carbs: Int,
         requiredCarbs: Int,
         wizardCalculatedBolus: Double,
-        wizardInsulinFromCarbs: Double
+        wizardInsulinFromCarbs: Double,
+        selectedFoodType: String = "balanced",
+        correction: Double = 0.0
     ) = AimiMealInput(
-        timestamp = 0L,
+        timestamp = timestamp,
         profileName = "test",
-        selectedFoodType = "balanced",
+        selectedFoodType = selectedFoodType,
         bg = 81.0,
         delta = 0.0,
         carbs = carbs,
@@ -121,7 +337,7 @@ class AimiMealAssistImplTest {
         wizardInsulinFromBolusIob = 0.0,
         wizardInsulinFromBasalIob = 0.0,
         wizardInsulinFromSuperBolus = 0.0,
-        correction = 0.0,
+        correction = correction,
         trendInsulin = 0.0,
         notes = ""
     )

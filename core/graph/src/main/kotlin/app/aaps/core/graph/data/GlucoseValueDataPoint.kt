@@ -69,6 +69,6 @@ class GlucoseValueDataPoint(
             data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION_STALE
 
     private val isPredictionBelowLowMark: Boolean
-        get() = isPrediction && lowPredictionMarkMgdl?.let { data.value <= it } == true
+        get() = isPrediction && lowPredictionMarkMgdl?.let { data.value < it } == true
 
 }

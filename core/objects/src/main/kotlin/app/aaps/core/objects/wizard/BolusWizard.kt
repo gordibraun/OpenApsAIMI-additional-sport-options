@@ -124,6 +124,10 @@ class BolusWizard @Inject constructor(
         private set
     var carbsEquivalent: Double = 0.0
         private set
+    var forecastRequiredCarbs: Int = 0
+        private set
+    var forecastRequiredCarbsSource: String = "wizard"
+        private set
     var insulinAfterConstraints: Double = 0.0
         private set
     var calculatedPercentage: Int = 100
@@ -157,6 +161,8 @@ class BolusWizard @Inject constructor(
     private var quickWizard: Boolean = true
     var usePercentage: Boolean = false
     var positiveIOBOnly: Boolean = false
+    private var forecastRequiredCarbsOverride: Int? = null
+    private var preAimiCalculatedTotalInsulin: Double = 0.0
 
     fun doCalc(
         profile: Profile,
@@ -181,7 +187,8 @@ class BolusWizard @Inject constructor(
         usePercentage: Boolean = false,
         totalPercentage: Double = 100.0,
         quickWizard: Boolean = false,
-        positiveIOBOnly: Boolean = false
+        positiveIOBOnly: Boolean = false,
+        forecastRequiredCarbs: Int? = null
     ): BolusWizard {
 
         this.profile = profile
@@ -207,6 +214,9 @@ class BolusWizard @Inject constructor(
         this.usePercentage = usePercentage
         this.totalPercentage = totalPercentage
         this.positiveIOBOnly = positiveIOBOnly
+        this.forecastRequiredCarbsOverride = forecastRequiredCarbs
+        this.forecastRequiredCarbs = 0
+        this.forecastRequiredCarbsSource = "wizard"
 
         // Insulin from BG
         sens = profileUtil.fromMgdlToUnits(profile.getIsfMgdlForCarbs(dateUtil.now(), "BolusWizard", config, processedDeviceStatusData))
@@ -270,6 +280,7 @@ class BolusWizard @Inject constructor(
         totalBeforePercentageAdjustment = calculatedTotalInsulin
         if (calculatedTotalInsulin >= 0) {
             calculatedTotalInsulin = calculatedTotalInsulin * percentage / 100.0
+            preAimiCalculatedTotalInsulin = calculatedTotalInsulin
             if (usePercentage)
                 calcCorrectionWithConstraints()
             else
@@ -277,6 +288,7 @@ class BolusWizard @Inject constructor(
             if (usePercentage)  //Should be updated after calcCorrectionWithConstraints and calcPercentageWithConstraints to have correct synthesis in WizardInfo
                 this.percentageCorrection = Round.roundTo(totalPercentage, 1.0).toInt()
         } else {
+            preAimiCalculatedTotalInsulin = calculatedTotalInsulin
             carbsEquivalent = (-calculatedTotalInsulin) * ic
             calculatedTotalInsulin = 0.0
             calculatedPercentage = percentageCorrection
@@ -300,12 +312,16 @@ class BolusWizard @Inject constructor(
 
     private fun buildAimiMealInput(): AimiMealInput {
         val units = profileFunction.getUnits()
-        // Use the wizard's own non-carb baseline as the protective-carb source so
-        // AIMI meal logic matches the "Не хватает X г" behavior the user sees.
         val wizardProtectiveCarbs = ((-(totalBeforePercentageAdjustment - insulinFromCarbs)).coerceAtLeast(0.0) * ic).toInt()
+        val requiredCarbs = forecastRequiredCarbsOverride?.coerceAtLeast(0) ?: wizardProtectiveCarbs
+        forecastRequiredCarbs = requiredCarbs
+        forecastRequiredCarbsSource = if (forecastRequiredCarbsOverride != null) "AIMI_FINAL" else "wizard"
+        carbsEquivalent = requiredCarbs.toDouble()
         aapsLogger.debug(
             LTag.APS,
-            "AIMI wizard protective carbs: entered=$carbs required=$wizardProtectiveCarbs totalBeforePct=${"%.2f".format(totalBeforePercentageAdjustment)} insulinFromCarbs=${"%.2f".format(insulinFromCarbs)} ic=${"%.2f".format(ic)}"
+            "AIMI wizard protective carbs: entered=$carbs type=$selectedFoodType required=$requiredCarbs source=$forecastRequiredCarbsSource " +
+                "wizardArithmetic=$wizardProtectiveCarbs totalBeforePct=${"%.2f".format(totalBeforePercentageAdjustment)} " +
+                "preAimiTotal=${"%.2f".format(preAimiCalculatedTotalInsulin)} insulinFromCarbs=${"%.2f".format(insulinFromCarbs)} ic=${"%.2f".format(ic)}"
         )
         return AimiMealInput(
             timestamp = dateUtil.now(),
@@ -314,7 +330,7 @@ class BolusWizard @Inject constructor(
             bg = bg,
             delta = glucoseStatus?.shortAvgDelta ?: 0.0,
             carbs = carbs,
-            requiredCarbs = wizardProtectiveCarbs,
+            requiredCarbs = requiredCarbs,
             cob = cob,
             carbTimeMinutes = carbTime,
             targetBgLow = profileUtil.convertToMgdl(targetBGLow, units),
@@ -324,7 +340,7 @@ class BolusWizard @Inject constructor(
             bolusIob = insulinFromBolusIOB,
             basalIob = insulinFromBasalIOB,
             wizardRecommendedBolus = insulinAfterConstraints,
-            wizardCalculatedBolus = calculatedTotalInsulin,
+            wizardCalculatedBolus = preAimiCalculatedTotalInsulin,
             wizardInsulinFromCarbs = insulinFromCarbs,
             wizardInsulinFromBg = insulinFromBG,
             wizardInsulinFromTrend = insulinFromTrend,

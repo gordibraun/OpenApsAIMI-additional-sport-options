@@ -41,6 +41,7 @@ object AdvancedPredictionEngine {
         uamConfidence: Double = 1.0,
         explicitCarbEntry: Boolean = false,
         freshSmbPressureU: Double = 0.0,
+        targetBG: Double? = null,
         horizonMinutes: Int = 240
     ): List<Double> {
         val predictions = mutableListOf(currentBG)
@@ -51,12 +52,17 @@ object AdvancedPredictionEngine {
         val carbRatio = profile.carb_ratio.takeIf { it > 0 } ?: 10.0
         val csf = finalSensitivity / carbRatio
         val totalCarbEffectMgDl = (cobG * csf).coerceAtLeast(0.0)
+        val belowTargetUnannouncedRise = targetBG
+            ?.takeIf { it.isFinite() && it > 0.0 }
+            ?.let { target -> currentBG < target && delta > 0.0 && cobG <= 0.0 && !explicitCarbEntry }
+            ?: false
+        val shortReboundModel = rescueFastActive || belowTargetUnannouncedRise
 
         // Innovation: Dynamic IOB Damping during active meal rise
         // If BG is rising while COB exists OR during unannounced meals (UAM), the "effective" insulin pulling down is dampened by the inflow of glucose.
         // We reduce the impact of IOB in the prediction to avoid false hypo alarms.
         val normalizedUamConfidence = uamConfidence.coerceIn(0.0, 1.0)
-        val baseIobDampingFactor = if (rescueFastActive) {
+        val baseIobDampingFactor = if (shortReboundModel) {
             0.95
         } else if (cobG > 0 || delta > 2.0) {
             val normalDamping = when {
@@ -75,7 +81,9 @@ object AdvancedPredictionEngine {
             1.0
         }
 
-        val effectiveFoodType = if (rescueFastActive && selectedFoodType == null) "fast" else selectedFoodType
+        val effectiveFoodType = if (shortReboundModel && selectedFoodType == null) "fast" else selectedFoodType
+        val effectiveFoodTypeName = effectiveFoodType?.lowercase()
+        val explicitTypedCarbs = explicitCarbEntry || cobG > 0.0
         val carbParameters = CarbAbsorptionModel.resolveParameters(cobG = cobG, delta = delta, selectedFoodType = effectiveFoodType)
         val carbWeights = CarbAbsorptionModel.buildWeights(
             steps = steps,
@@ -92,10 +100,19 @@ object AdvancedPredictionEngine {
         val mealCurveBoost = 1.0 + (normalizedMealFactor - 1.0) * 0.8
         val effectiveCarbEffectMgDl = totalCarbEffectMgDl * mealCurveBoost
         val observedCarbImpact = observedCarbImpactMgdlPer5m.coerceAtLeast(0.0)
+        val typedObservedTailFactor = when (effectiveFoodTypeName) {
+            "fast" -> 0.45
+            "slow" -> 1.0
+            else -> 0.75
+        }
         val remainingObservedPeak = if (rescueFastActive) {
             remainingCiPeakMgdlPer5m.coerceIn(0.0, observedCarbImpact * 0.6)
+        } else if (belowTargetUnannouncedRise) {
+            remainingCiPeakMgdlPer5m.coerceAtLeast(0.0) * normalizedUamConfidence * 0.35
         } else if (cobG <= 0.0 && !explicitCarbEntry) {
             remainingCiPeakMgdlPer5m.coerceAtLeast(0.0) * normalizedUamConfidence
+        } else if (explicitTypedCarbs) {
+            remainingCiPeakMgdlPer5m.coerceAtLeast(0.0) * typedObservedTailFactor
         } else {
             remainingCiPeakMgdlPer5m.coerceAtLeast(0.0)
         }
@@ -148,6 +165,7 @@ object AdvancedPredictionEngine {
         var momentum = initialMomentum(
             delta = delta,
             rescueFastActive = rescueFastActive,
+            belowTargetUnannouncedRise = belowTargetUnannouncedRise,
             explicitCarbEntry = explicitCarbEntry || cobG > 0.0,
             selectedFoodType = effectiveFoodType,
             normalizedUamConfidence = normalizedUamConfidence
@@ -163,8 +181,16 @@ object AdvancedPredictionEngine {
             val stepIobDampingFactor = baseIobDampingFactor + (1.0 - baseIobDampingFactor) * dampingProgress
             insulinImpactPer5min *= stepIobDampingFactor
             val baseCarbImpactPer5Min = effectiveCarbEffectMgDl * carbWeights[stepIndex]
-            val liveDecayMinutes = if (rescueFastActive) 12.0 else 45.0
-            val residualDecayMinutes = if (rescueFastActive) 18.0 else 90.0
+            val liveDecayMinutes = when {
+                shortReboundModel -> 12.0
+                explicitTypedCarbs -> (carbParameters.peakMinutes * 1.1).coerceIn(12.0, 45.0)
+                else -> 45.0
+            }
+            val residualDecayMinutes = when {
+                shortReboundModel -> 18.0
+                explicitTypedCarbs -> (carbParameters.absorptionMinutes * 0.45).coerceIn(18.0, 120.0)
+                else -> 90.0
+            }
             val liveDecay = kotlin.math.exp(-(minutesInFuture.toDouble() / liveDecayMinutes))
             val residualRamp = when {
                 carbParameters.peakMinutes <= 0.0 -> 1.0
@@ -190,6 +216,7 @@ object AdvancedPredictionEngine {
             // Linear/Exp decay of momentum
             momentum *= momentumDecay(
                 rescueFastActive = rescueFastActive,
+                belowTargetUnannouncedRise = belowTargetUnannouncedRise,
                 explicitCarbEntry = explicitCarbEntry || cobG > 0.0,
                 selectedFoodType = effectiveFoodType,
                 normalizedUamConfidence = normalizedUamConfidence
@@ -205,12 +232,14 @@ object AdvancedPredictionEngine {
     private fun initialMomentum(
         delta: Double,
         rescueFastActive: Boolean,
+        belowTargetUnannouncedRise: Boolean,
         explicitCarbEntry: Boolean,
         selectedFoodType: String?,
         normalizedUamConfidence: Double
     ): Double {
         if (delta <= 0.0) return 0.0
         if (rescueFastActive) return delta.coerceAtMost(2.0)
+        if (belowTargetUnannouncedRise) return (delta * normalizedUamConfidence).coerceAtMost(1.5)
 
         if (explicitCarbEntry) {
             val foodType = selectedFoodType?.lowercase()
@@ -232,11 +261,13 @@ object AdvancedPredictionEngine {
 
     private fun momentumDecay(
         rescueFastActive: Boolean,
+        belowTargetUnannouncedRise: Boolean,
         explicitCarbEntry: Boolean,
         selectedFoodType: String?,
         normalizedUamConfidence: Double
     ): Double {
         if (rescueFastActive) return 0.35
+        if (belowTargetUnannouncedRise) return 0.35
 
         if (explicitCarbEntry) {
             return when (selectedFoodType?.lowercase()) {

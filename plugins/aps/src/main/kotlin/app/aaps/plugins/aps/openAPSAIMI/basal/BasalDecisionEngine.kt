@@ -133,7 +133,7 @@ class BasalDecisionEngine @Inject constructor(
             )
 
             val profile = LoopProfile(
-                targetMgdl = input.predictedBg,              // non critique ici
+                targetMgdl = input.targetBg,
                 isfMgdlPerU = input.variableSensitivity,    // dispo si tu veux exploiter plus tard
                 basalProfileUph = input.profileCurrentBasal
             )

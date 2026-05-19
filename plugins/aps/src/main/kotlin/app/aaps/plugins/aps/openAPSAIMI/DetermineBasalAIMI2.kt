@@ -2585,6 +2585,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         profile: OapsProfileAimi,
         rT: RT,
         delta: Double,
+        targetBg: Double,
         rescueFastActive: Boolean = false
     ): PredictionResult {
         consoleLog.add("Расчет прогноза PKPD: delta=$delta")
@@ -2609,7 +2610,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 rescueFastActive = rescueFastActive,
                 uamConfidence = uamConfidence,
                 explicitCarbEntry = explicitCarbEntryActive(mealData),
-                freshSmbPressureU = freshSmbPressure
+                freshSmbPressureU = freshSmbPressure,
+                targetBG = targetBg
             )
         } catch (e: Exception) {
             consoleLog.add("Ошибка расширенного прогноза: ${e.message}")
@@ -2656,6 +2658,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         highBgOverrideUsed: Boolean,
         observedCarbImpactMgdlPer5m: Double,
         remainingCiPeakMgdlPer5m: Double,
+        targetBg: Double,
         rescueFastActive: Boolean = false
     ): PredictionResult {
         val selectedFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
@@ -2683,7 +2686,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 rescueFastActive = rescueFastActive,
                 uamConfidence = uamConfidence,
                 explicitCarbEntry = explicitCarbEntryActive(mealData),
-                freshSmbPressureU = freshSmbPressure
+                freshSmbPressureU = freshSmbPressure,
+                targetBG = targetBg
             )
         } catch (e: Exception) {
             consoleLog.add("Ошибка прогноза после SMB: ${e.message}")
@@ -3876,6 +3880,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             profile = profile,
             rT = rT,
             delta = delta.toDouble(),
+            targetBg = target_bg,
             rescueFastActive = rescueFastRebound
         )
         this.eventualBG = pkpdPredictions.eventual
@@ -4219,6 +4224,71 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         )
         rT.reason.append(savedReason)
         rT.predBGs = savedPredBGs
+
+        fun applyFinalForecastCarbsBeforeEarlyReturn(result: RT) {
+            val series = result.predBGs?.AIMI_FINAL.orEmpty()
+            val startIndex = 4 // +20 min: earliest practical treatment window.
+            val endIndex = min(series.lastIndex, 24) // +120 min: same decision window as final post-processing.
+            val window = if (series.size > startIndex && endIndex >= startIndex) {
+                series.mapIndexed { index, value -> index to value }
+                    .filter { (index, value) -> index in startIndex..endIndex && value > 0 }
+            } else {
+                emptyList()
+            }
+            if (window.isEmpty()) {
+                consoleLog.add("AIMI FINAL: рабочая зона +20..+120: нет данных")
+                return
+            }
+
+            val (minIndex, minValue) = window.minByOrNull { it.second } ?: return
+            var currentRun = 0
+            var belowTargetRun = 0
+            window.forEach { (_, value) ->
+                if (value.toDouble() < target_bg) {
+                    currentRun += 1
+                    belowTargetRun = max(belowTargetRun, currentRun)
+                } else {
+                    currentRun = 0
+                }
+            }
+            val firstBelowMinute = window.firstOrNull { it.second.toDouble() < target_bg }?.first?.let { it * 5 }
+            val summary = "рабочая зона +20..+120: " +
+                "min=${"%.0f".format(minValue.toDouble())} на +${minIndex * 5}m, " +
+                "ниже цели подряд=$belowTargetRun" +
+                (firstBelowMinute?.let { ", первая ниже +${it}m" } ?: ", ниже цели нет") +
+                ", цель=${"%.0f".format(target_bg)}"
+
+            val forecastCsf = if (profile.carb_ratio.isFinite() && profile.carb_ratio > 0.0) {
+                sens / profile.carb_ratio
+            } else {
+                0.0
+            }.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+
+            if (forecastCsf > 0.0) {
+                val deficitMgdl = (target_bg - minValue.toDouble()).coerceAtLeast(0.0)
+                val carbs = (deficitMgdl / forecastCsf).roundToInt().coerceAtLeast(0)
+                val previousCarbsReq = result.carbsReq ?: 0
+                val previousCarbsReqWithin = result.carbsReqWithin ?: 0
+                result.carbsReq = carbs
+                result.carbsReqWithin = minIndex * 5
+                if (previousCarbsReq != result.carbsReq || previousCarbsReqWithin != result.carbsReqWithin) {
+                    consoleLog.add(
+                        "Углеводы по финальному прогнозу: ${previousCarbsReq}г/${previousCarbsReqWithin}м -> " +
+                            "${result.carbsReq ?: 0}г/${result.carbsReqWithin ?: 0}м, цель=${"%.0f".format(target_bg)}, CSF=${"%.1f".format(forecastCsf)}"
+                    )
+                }
+                if (carbs > 0 && !result.reason.contains("Углеводы по финальному прогнозу")) {
+                    result.reason.append(" | Углеводы по финальному прогнозу: ${carbs} г в течение ${minIndex * 5} мин;")
+                }
+            } else {
+                consoleLog.add(
+                    "Углеводы по финальному прогнозу не рассчитаны: CSF недоступен " +
+                        "(ISF=${"%.1f".format(sens)}, CR=${"%.2f".format(profile.carb_ratio)})"
+                )
+            }
+            consoleLog.add("AIMI FINAL: $summary")
+        }
+
         if (earlyOverdeliveryRisk) {
             val guardRate = earlyOverdeliveryBasalRate(profile_current_basal)
             rT.rate = guardRate
@@ -4245,6 +4315,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 highBgOverrideUsed = smbExecution.highBgOverrideUsed,
                 observedCarbImpactMgdlPer5m = ci.toDouble(),
                 remainingCiPeakMgdlPer5m = 0.0,
+                targetBg = target_bg,
                 rescueFastActive = rescueFastRebound
             )
             eventualBG = guardedPredictions.eventual
@@ -4260,6 +4331,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     "минимум=${"%.0f".format(guardedPredictions.minGuard)}, " +
                     "итог=${"%.0f".format(guardedPredictions.eventual)}"
             )
+            applyFinalForecastCarbsBeforeEarlyReturn(rT)
             return rT
         }
         var rate = when {
@@ -4353,7 +4425,18 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         )
         appendCompactLog(reasonAimi, tp, bg, delta, recentSteps5Minutes, averageBeatsPerMinute)
         rT.reason.append(reasonAimi.toString())
-        val csf = sens / profile.carb_ratio
+        val rawCsf = if (profile.carb_ratio.isFinite() && profile.carb_ratio > 0.0) {
+            sens / profile.carb_ratio
+        } else {
+            Double.NaN
+        }
+        val csf = rawCsf.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+        if (csf <= 0.0) {
+            consoleLog.add(
+                "CSF недоступен: ISF=${"%.1f".format(sens)}, CR=${"%.2f".format(profile.carb_ratio)}; " +
+                    "остаточный хвост углеводов и carbsReq по CSF отключены для этого цикла."
+            )
+        }
         //consoleError.add("profile.sens: ${profile.sens}, sens: $sens, CSF: $csf")
         consoleError.add(context.getString(R.string.console_profile_sens, baseSensitivity, sens, csf))
 
@@ -4370,12 +4453,16 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         var remainingCATime = remainingCATimeMin
         val totalCI = max(0.0, ci / 5 * 60 * remainingCATime / 2)
         // totalCI (mg/dL) / CSF (mg/dL/g) = total carbs absorbed (g)
-        val totalCA = totalCI / csf
+        val totalCA = if (csf > 0.0) totalCI / csf else 0.0
         val remainingCarbsCap: Int // default to 90
         remainingCarbsCap = min(90, profile.remainingCarbsCap)
         var remainingCarbs = max(0.0, mealData.mealCOB - totalCA)
         remainingCarbs = min(remainingCarbsCap.toDouble(), remainingCarbs)
-        val remainingCIpeak = remainingCarbs * csf * 5 / 60 / (remainingCATime / 2)
+        val remainingCIpeak = if (csf > 0.0 && remainingCATime > 0.0) {
+            remainingCarbs * csf * 5 / 60 / (remainingCATime / 2)
+        } else {
+            0.0
+        }
         val slopeFromMaxDeviation = mealData.slopeFromMaxDeviation
         val slopeFromMinDeviation = mealData.slopeFromMinDeviation
         val slopeFromDeviations = Math.min(slopeFromMaxDeviation, -slopeFromMinDeviation / 3)
@@ -4384,7 +4471,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // calculate current carb absorption rate, and how long to absorb all carbs
         // CI = current carb impact on BG in mg/dL/5m
         ci = round((minDelta - bgi), 1)
-        if (ci == 0.0) {
+        if (ci == 0.0 || csf <= 0.0) {
             // avoid divide by zero
             cid = 0.0
         } else {
@@ -4402,15 +4489,19 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 //estimation des glucides nécessaires si risque hypo
 
         val thresholdBG = 70.0
-        val carbsRequired = CarbsAdvisor.estimateRequiredCarbs(
-            bg = bg,
-            targetBG = targetBg.toDouble(),
-            slope = slopeFromDeviations,
-            iob = iob.toDouble(),
-            csf = csf,
-            isf = sens,
-            cob = cob.toDouble()
-        )
+        val carbsRequired = if (csf > 0.0) {
+            CarbsAdvisor.estimateRequiredCarbs(
+                bg = bg,
+                targetBG = targetBg.toDouble(),
+                slope = slopeFromDeviations,
+                iob = iob.toDouble(),
+                csf = csf,
+                isf = sens,
+                cob = cob.toDouble()
+            )
+        } else {
+            0
+        }
         val minutesAboveThreshold = HypoTools.calculateMinutesAboveThreshold(bg, slopeFromDeviations, thresholdBG)
         if (carbsRequired >= profile.carbsReqThreshold && minutesAboveThreshold <= 45 && !lunchTime && !dinnerTime && !bfastTime && !highCarbTime && !mealTime) {
             rT.carbsReq = carbsRequired
@@ -4513,6 +4604,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     highBgOverrideUsed = smbExecution.highBgOverrideUsed,
                     observedCarbImpactMgdlPer5m = ci,
                     remainingCiPeakMgdlPer5m = remainingCIpeak,
+                    targetBg = target_bg,
                     rescueFastActive = rescueFastRebound
                 )
 
@@ -4597,6 +4689,19 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             fun firstBelowMinute(series: List<Int>, startIndex: Int, limit: Double): Int? {
                 val offset = series.drop(startIndex).indexOfFirst { it.toDouble() < limit }
                 return offset.takeIf { it >= 0 }?.let { (startIndex + it) * 5 }
+            }
+
+            fun finalForecastCarbsRequirement(series: List<Int>, startIndex: Int, endIndex: Int): Pair<Int, Int>? {
+                if (csf <= 0.0 || series.size <= startIndex || endIndex < startIndex) return null
+                val window = series
+                    .mapIndexed { index, value -> index to value }
+                    .filter { (index, value) ->
+                        index in startIndex..endIndex && value > 0
+                    }
+                val (minIndex, minValue) = window.minByOrNull { it.second } ?: return null
+                val deficitMgdl = (target_bg - minValue.toDouble()).coerceAtLeast(0.0)
+                val carbs = (deficitMgdl / csf).roundToInt().coerceAtLeast(0)
+                return carbs to (minIndex * 5)
             }
 
             val aimiFinalSeries = result.predBGs?.AIMI_FINAL.orEmpty()
@@ -4706,12 +4811,54 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     applyDecisionAwarePredictions(recomputeForCurrentDecision())
                 }
             }
+            val finalAimiSeries = result.predBGs?.AIMI_FINAL.orEmpty()
+            val finalActionEndIndex = min(finalAimiSeries.lastIndex, 24)
+            val finalActionWindow = if (finalAimiSeries.size > actionStartIndex && finalActionEndIndex >= actionStartIndex) {
+                finalAimiSeries.subList(actionStartIndex, finalActionEndIndex + 1)
+            } else {
+                emptyList()
+            }
+            val finalActionWindowMin = finalActionWindow.minOrNull()?.toDouble()
+            val finalActionWindowMinMinute = finalActionWindowMin?.let { minValue ->
+                val offset = finalActionWindow.indexOfFirst { it.toDouble() == minValue }
+                (actionStartIndex + offset) * 5
+            }
+            val finalBelowTargetRun = maxConsecutiveBelowTarget(finalActionWindow, target_bg)
+            val actionWindowFirstBelow = firstBelowMinute(finalAimiSeries, actionStartIndex, target_bg)
+            val workingZoneSummary = if (finalActionWindow.isNotEmpty()) {
+                "рабочая зона +20..+120: " +
+                    "min=${finalActionWindowMin?.let { "%.0f".format(it) } ?: "n/a"}" +
+                    (finalActionWindowMinMinute?.let { " на +${it}m" } ?: "") +
+                    ", ниже цели подряд=${finalBelowTargetRun}" +
+                    (actionWindowFirstBelow?.let { ", первая ниже +${it}m" } ?: ", ниже цели нет") +
+                    ", цель=${"%.0f".format(target_bg)}"
+            } else {
+                "рабочая зона +20..+120: нет данных"
+            }
+            val finalForecastCarbs = finalForecastCarbsRequirement(finalAimiSeries, actionStartIndex, finalActionEndIndex)
+            val previousCarbsReq = result.carbsReq ?: 0
+            val previousCarbsReqWithin = result.carbsReqWithin ?: 0
+            if (finalForecastCarbs != null) {
+                result.carbsReq = finalForecastCarbs.first
+                result.carbsReqWithin = finalForecastCarbs.second
+                if (previousCarbsReq != result.carbsReq || previousCarbsReqWithin != result.carbsReqWithin) {
+                    consoleLog.add(
+                        "Углеводы по финальному прогнозу: ${previousCarbsReq}г/${previousCarbsReqWithin}м -> " +
+                            "${result.carbsReq ?: 0}г/${result.carbsReqWithin ?: 0}м, цель=${"%.0f".format(target_bg)}, CSF=${"%.1f".format(csf)}"
+                    )
+                }
+            }
+            consoleLog.add("AIMI FINAL: $workingZoneSummary")
             val sanitizedReason = result.reason.toString()
+                .replace(Regex("""\d+\s+add'l carbs req w/in \d+min;\s*"""), "")
                 .replace(Regex("""Predicted BG:\s*[-−]?\d+(?:[.,]\d+)?"""), "Predicted BG: ${"%.0f".format(predictedBg)}")
                 .replace(Regex("""minBG=\s*[-−]?\d+(?:[.,]\d+)?"""), "minBG=${"%.0f".format(result.minGuardBG)}")
                 .replace(Regex("""predicted=\s*[-−]?\d+(?:[.,]\d+)?"""), "predicted=${"%.0f".format(predictedBg)}")
                 .replace(Regex("""eventual=\s*[-−]?\d+(?:[.,]\d+)?"""), "eventual=${"%.0f".format(eventualBG)}")
             result.reason = StringBuilder(sanitizedReason)
+            finalForecastCarbs?.takeIf { it.first > 0 }?.let { (carbs, minutes) ->
+                result.reason.append(" | Углеводы по финальному прогнозу: ${carbs} г в течение ${minutes} мин;")
+            }
             result.reason.appendLine()
             result.reason.append(
                 "🔚 Итоговый прогноз после решения: " +
@@ -4719,7 +4866,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     "итог: ${"%.0f".format(eventualBG)} | " +
                     "MinGuardBG: ${"%.0f".format(result.minGuardBG)} | " +
                     "SMB: ${"%.2f".format(result.units ?: 0.0)} U | " +
-                    "базал: ${"%.2f".format(result.rate)} U/h × ${result.duration}m"
+                    "базал: ${"%.2f".format(result.rate ?: 0.0)} U/h × ${result.duration}m | " +
+                    workingZoneSummary
             )
             return result
         }

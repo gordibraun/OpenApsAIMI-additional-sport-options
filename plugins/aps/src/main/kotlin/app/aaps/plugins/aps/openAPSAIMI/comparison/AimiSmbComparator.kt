@@ -136,6 +136,10 @@ class AimiSmbComparator @Inject constructor(
      * ❌ Does NOT re-apply constraints to ensure fair comparison
      */
     private fun mapProfile(p: OapsProfileAimi): OapsProfile {
+        val safeCarbRatio = p.carb_ratio.takeIf { it.isFinite() && it > 0.0 } ?: 10.0
+        val safeSens = p.sens.takeIf { it.isFinite() && it > 0.0 }
+            ?: p.profile_sens.takeIf { it.isFinite() && it > 0.0 }
+            ?: 50.0
         return OapsProfile(
             dia = p.dia,
             min_5m_carbimpact = p.min_5m_carbimpact,
@@ -146,8 +150,8 @@ class AimiSmbComparator @Inject constructor(
             min_bg = p.min_bg,
             max_bg = p.max_bg,
             target_bg = p.target_bg,
-            carb_ratio = p.carb_ratio,
-            sens = p.sens,
+            carb_ratio = safeCarbRatio,
+            sens = safeSens,
             autosens_adjust_targets = p.autosens_adjust_targets,
             max_daily_safety_multiplier = p.max_daily_safety_multiplier,
             current_basal_safety_multiplier = p.current_basal_safety_multiplier,
@@ -178,7 +182,7 @@ class AimiSmbComparator @Inject constructor(
             autosens_max = p.autosens_max,
             out_units = p.out_units,
             lgsThreshold = p.lgsThreshold,
-            variable_sens = p.variable_sens,
+            variable_sens = p.variable_sens.takeIf { it.isFinite() && it > 0.0 } ?: safeSens,
             insulinDivisor = p.insulinDivisor,
             TDD = p.TDD
         )

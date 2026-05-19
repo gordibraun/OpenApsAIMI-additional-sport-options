@@ -13,6 +13,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
+import java.text.DecimalFormat
 
 class BasalPlannerTest {
 
@@ -41,9 +42,17 @@ class BasalPlannerTest {
 
     class DummyFormatter : DecimalFormatter {
         override fun to0Decimal(value: Double): String = String.format("%.0f", value)
+        override fun to0Decimal(value: Double, unit: String): String = "${to0Decimal(value)} $unit"
         override fun to1Decimal(value: Double): String = String.format("%.1f", value)
+        override fun to1Decimal(value: Double, unit: String): String = "${to1Decimal(value)} $unit"
         override fun to2Decimal(value: Double): String = String.format("%.2f", value)
+        override fun to2Decimal(value: Double, unit: String): String = "${to2Decimal(value)} $unit"
         override fun to3Decimal(value: Double): String = String.format("%.3f", value)
+        override fun to3Decimal(value: Double, unit: String): String = "${to3Decimal(value)} $unit"
+        override fun toPumpSupportedBolus(value: Double, bolusStep: Double): String = pumpSupportedBolusFormat(bolusStep).format(value)
+        override fun toPumpSupportedBolusWithUnits(value: Double, bolusStep: Double): String = "${toPumpSupportedBolus(value, bolusStep)} U"
+        override fun pumpSupportedBolusFormat(bolusStep: Double): DecimalFormat =
+            DecimalFormat(if (bolusStep >= 0.1) "0.0" else "0.00")
     }
 
     private val logger = DummyLogger()
@@ -114,10 +123,28 @@ class BasalPlannerTest {
         assertNull(plan)
     }
 
+    @Test
+    fun `test anti stall does not add basal below target`() {
+        val ctx = createLoopContext(bg = 107.0, delta = 0.0, target = 117.0, eventualBg = 121.0)
+        val plan = planner.plan(ctx)
+        assertNull(plan)
+    }
+
+    @Test
+    fun `test anti stall can add basal when at target with forecast above target`() {
+        val ctx = createLoopContext(bg = 117.0, delta = 0.0, target = 117.0, eventualBg = 125.0)
+        val plan = planner.plan(ctx)
+        assertNotNull(plan)
+        assertEquals(1.1, plan!!.rateUph, 0.01)
+        assert(plan.reason.startsWith("Anti-stall"))
+    }
+
     private fun createLoopContext(
         bg: Double = 100.0,
         delta: Double = 0.0,
-        profileBasal: Double = 1.0
+        profileBasal: Double = 1.0,
+        target: Double = 100.0,
+        eventualBg: Double = bg
     ): LoopContext {
         val bgSnap = BgSnapshot(
             mgdl = bg,
@@ -131,7 +158,7 @@ class BasalPlannerTest {
             epochMillis = 0L
         )
         val profile = LoopProfile(
-            targetMgdl = 100.0,
+            targetMgdl = target,
             isfMgdlPerU = 50.0,
             basalProfileUph = profileBasal
         )
@@ -157,7 +184,7 @@ class BasalPlannerTest {
             modes = app.aaps.plugins.aps.openAPSAIMI.model.ModeState(false, false, false, false, false, false, false, false),
             settings = app.aaps.plugins.aps.openAPSAIMI.model.AimiSettings(5, true),
             tdd24hU = 40.0,
-            eventualBg = bg,
+            eventualBg = eventualBg,
             nowEpochMillis = 0L
         )
     }

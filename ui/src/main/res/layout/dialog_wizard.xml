@@ -291,27 +291,26 @@
 
             </TableRow>
 
-            <TableRow
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content">
-
-                <TextView
-                    android:id="@+id/carb_timing_hint"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_span="3"
-                    android:paddingStart="10dp"
-                    android:paddingTop="2dp"
-                    android:paddingEnd="10dp"
-                    android:paddingBottom="8dp"
-                    android:textAppearance="?android:attr/textAppearanceSmall"
-                    android:textColor="?attr/carbsColor"
-                    android:visibility="gone"
-                    tools:text="Время углеводов: сейчас" />
-
-            </TableRow>
-
         </TableLayout>
+
+        <TextView
+            android:id="@+id/carb_timing_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_marginEnd="10dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="8dp"
+            android:breakStrategy="balanced"
+            android:hyphenationFrequency="none"
+            android:includeFontPadding="false"
+            android:lineSpacingExtra="2dp"
+            android:maxLines="6"
+            android:singleLine="false"
+            android:textAppearance="?android:attr/textAppearanceSmall"
+            android:textColor="?attr/carbsColor"
+            android:visibility="gone"
+            tools:text="Болюс: 1.20 → 0.75 ед.\nУглеводы: через 15 мин\nПричина: ближе к цели 117\nВыбрано: сейчас; сейчас хуже" />
 
         <include
             android:id="@+id/notes_layout"

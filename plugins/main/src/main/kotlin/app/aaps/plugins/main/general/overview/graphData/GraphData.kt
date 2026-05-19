@@ -82,7 +82,7 @@ class GraphData @Inject constructor(
         }
     }
 
-    fun addFullPredictionReadings(context: Context?) {
+    fun addFullPredictionReadings(context: Context?, targetMgdl: Double? = null, fromTime: Long? = null, toTime: Long? = null) {
         val lowMarkMgdl = lowPredictionMarkMgdl()
         val predictionPoints = overviewData.predictionValues.map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
         val finalAimiPoints = overviewData.finalAimiPredictionValues.map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
@@ -94,8 +94,17 @@ class GraphData @Inject constructor(
         }
 
         val padding = if (units == GlucoseUnit.MGDL) 10.0 else 0.5
-        maxY = maxOf(allPoints.maxOf { it.y }, preferences.get(UnitDoubleKey.OverviewHighMark)) + padding
-        minY = maxOf(0.0, minOf(allPoints.minOf { it.y }, preferences.get(UnitDoubleKey.OverviewLowMark)) - padding)
+        val targetY = targetMgdl?.takeIf { it.isFinite() && it > 0.0 }?.let { profileUtil.fromMgdlToUnits(it) }
+        maxY = maxOf(allPoints.maxOf { it.y }, preferences.get(UnitDoubleKey.OverviewHighMark), targetY ?: Double.MIN_VALUE) + padding
+        minY = maxOf(0.0, minOf(allPoints.minOf { it.y }, preferences.get(UnitDoubleKey.OverviewLowMark), targetY ?: Double.MAX_VALUE) - padding)
+
+        targetY?.let {
+            addFullPredictionTargetLine(
+                fromTime ?: allPoints.minOf { point -> point.x }.toLong(),
+                toTime ?: allPoints.maxOf { point -> point.x }.toLong(),
+                it
+            )
+        }
 
         val predictionSeries = PointsWithLabelGraphSeries(Array(predictionPoints.size) { i -> predictionPoints[i] })
         val finalAimiSeries = PointsWithLabelGraphSeries(Array(finalAimiPoints.size) { i -> finalAimiPoints[i] })
@@ -111,6 +120,22 @@ class GraphData @Inject constructor(
 
     private fun lowPredictionMarkMgdl(): Double =
         profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), units)
+
+    private fun addFullPredictionTargetLine(fromTime: Long, toTime: Long, targetInUnits: Double) {
+        val targetPoints = arrayOf(
+            DataPoint(fromTime.toDouble(), targetInUnits),
+            DataPoint(toTime.toDouble(), targetInUnits)
+        )
+        addSeries(LineGraphSeries(targetPoints).also {
+            it.isDrawDataPoints = false
+            it.setCustomPaint(Paint().also { paint ->
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 3f
+                paint.pathEffect = DashPathEffect(floatArrayOf(14f, 10f), 0f)
+                paint.color = rh.gac(graph.context, app.aaps.core.ui.R.attr.tempTargetBackgroundColor)
+            })
+        })
+    }
 
     fun addInRangeArea(fromTime: Long, toTime: Long, lowLine: Double, highLine: Double) {
         val inRangeAreaDataPoints = arrayOf(

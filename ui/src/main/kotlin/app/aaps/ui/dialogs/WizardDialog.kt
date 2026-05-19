@@ -24,12 +24,16 @@ import android.widget.CompoundButton
 import androidx.fragment.app.FragmentManager
 import app.aaps.core.data.configuration.Constants
 import app.aaps.core.data.model.GlucoseUnit
+import app.aaps.core.data.model.TT
 import app.aaps.core.data.time.T
+import app.aaps.core.interfaces.aps.Loop
+import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
+import app.aaps.core.interfaces.nsclient.ProcessedDeviceStatusData
 import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.profile.Profile
@@ -40,6 +44,7 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventAutosensCalculationFinished
+import app.aaps.core.interfaces.rx.events.EventRefreshOverview
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.DecimalFormatter
 import app.aaps.core.interfaces.utils.Round
@@ -52,6 +57,7 @@ import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.core.objects.extensions.formatColor
 import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.extensions.valueToUnits
+import app.aaps.core.objects.forecast.ForecastCarbsCalculator
 import app.aaps.core.objects.profile.ProfileSealed
 import app.aaps.core.objects.wizard.BolusWizard
 import app.aaps.core.ui.extensions.runOnUiThread
@@ -94,6 +100,9 @@ class WizardDialog : DaggerDialogFragment() {
     @Inject lateinit var decimalFormatter: DecimalFormatter
     @Inject lateinit var bolusWizardProvider: Provider<BolusWizard>
     @Inject lateinit var overviewData: OverviewData
+    @Inject lateinit var config: Config
+    @Inject lateinit var processedDeviceStatusData: ProcessedDeviceStatusData
+    @Inject lateinit var loop: Loop
     private val handler = Handler(HandlerThread(this::class.simpleName + "Handler").also { it.start() }.looper)
 
     private var queryingProtection = false
@@ -104,6 +113,7 @@ class WizardDialog : DaggerDialogFragment() {
     private var carbsPassedIntoWizard = 0.0
     private var notesPassedIntoWizard = ""
     private var okClicked: Boolean = false // one shot guards
+    private var lastForecastRequiredCarbsOverviewRefresh: Int? = null
     private var disposable: CompositeDisposable = CompositeDisposable()
     private var bolusStep = 0.0
     private var _binding: DialogWizardBinding? = null
@@ -227,7 +237,7 @@ class WizardDialog : DaggerDialogFragment() {
         }
         binding.carbTimeInput.setParams(
             savedInstanceState?.getDouble("carb_time_input")
-                ?: 0.0, -60.0, 60.0, 5.0, DecimalFormat("0"), false, binding.okcancel.ok, timeTextWatcher
+                ?: 0.0, -1440.0, 1440.0, 5.0, DecimalFormat("0"), false, binding.okcancel.ok, timeTextWatcher
         )
         handler.post { initDialog() }
         calculatedPercentage = preferences.get(IntKey.OverviewBolusPercentage)
@@ -319,14 +329,14 @@ class WizardDialog : DaggerDialogFragment() {
             OKDialog.show(
                 requireContext(),
                 rh.gs(R.string.food_type_label),
-                "Тип еды влияет на carb-модель AIMI. Быстрая еда усиливает ранний вклад углеводов и prebolus, обычная оставляет базовый режим, медленная растягивает вклад еды и делает ранний bolus осторожнее."
+                "Тип еды влияет на carb-модель AIMI. Быстрые углеводы всасываются рано и bolus считается осторожнее, обычная еда оставляет базовый режим, медленная растягивает вклад еды."
             )
         }
         binding.wizardAimiLogic.setOnClickListener {
             OKDialog.show(
                 requireContext(),
                 "AIMI в Мастере Болюса",
-                "AIMI использует ГК, углеводы, время углеводов, target, IC, ISF, COB, IOB, тренд и выбранный тип еды. Тип еды теперь реально влияет на bolus через carb factor и prebolus, а также на прогноз через форму carb-кривой."
+                "AIMI использует ГК, углеводы, время углеводов, target, IC, ISF, COB, IOB, тренд и выбранный тип еды. Тип еды влияет на bolus через carb factor, prebolus и прогнозную проверку, а также на форму carb-кривой."
             )
         }
         binding.wizardAimiLogicToggle.setOnClickListener {
@@ -514,7 +524,8 @@ class WizardDialog : DaggerDialogFragment() {
             // Set BG if not old
             binding.bgInput.value = iobCobCalculator.ads.actualBg()?.valueToUnits(units) ?: 0.0
 
-            binding.ttCheckbox.isEnabled = tempTarget != null
+            binding.ttCheckbox.isEnabled = binding.bgCheckbox.isChecked && tempTarget != null
+            binding.ttCheckbox.isChecked = binding.ttCheckbox.isEnabled
             binding.ttCheckboxIcon.visibility = binding.ttCheckbox.isEnabled.toVisibility()
             binding.iobInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, -bolusIob.iob - basalIob.basaliob)
 
@@ -573,6 +584,8 @@ class WizardDialog : DaggerDialogFragment() {
         val carbTime = SafeParse.stringToInt(binding.carbTimeInput.text)
         val selectedFoodType = currentSelectedFoodType()
         val foodTypeMissing = carbsAfterConstraint > 0.0 && selectedFoodType == null
+        val forecastRequiredCarbs = forecastRequiredCarbsFromFinalLine(specificProfile, tempTarget, binding.ttCheckbox.isChecked)
+        refreshOverviewIfForecastCarbsChanged(forecastRequiredCarbs)
 
         wizard = bolusWizardProvider.get().doCalc(
             specificProfile, profileName, tempTarget, carbsAfterConstraint, cob, bg, correction, preferences.get(IntKey.OverviewBolusPercentage),
@@ -588,7 +601,8 @@ class WizardDialog : DaggerDialogFragment() {
             carbTime,
             selectedFoodType ?: "balanced",
             usePercentage = usePercentage,
-            totalPercentage = percentageCorrection.toDouble()
+            totalPercentage = percentageCorrection.toDouble(),
+            forecastRequiredCarbs = forecastRequiredCarbs
         )
 
         wizard?.let { wizard ->
@@ -645,7 +659,7 @@ class WizardDialog : DaggerDialogFragment() {
                 binding.okcancel.ok.isEnabled = !foodTypeMissing
             } else {
                 // Здесь Не хватает углеводов выводится
-                binding.total.text = HtmlHelper.fromHtml(rh.gs(R.string.missing_carbs, wizard.carbsEquivalent.toInt()).formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor))
+                binding.total.text = HtmlHelper.fromHtml(rh.gs(R.string.missing_carbs, wizard.forecastRequiredCarbs).formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor))
                 binding.okcancel.ok.visibility = View.INVISIBLE
                 binding.okcancel.ok.isEnabled = false
             }
@@ -679,17 +693,21 @@ class WizardDialog : DaggerDialogFragment() {
         binding.carbTimingHint.visibility = View.VISIBLE
         binding.carbTimingHint.text = buildString {
             forecastBolusAdjustment?.let { adjustment ->
-                append("Болюс по прогнозу: ")
+                append("Болюс: ")
                 append(decimalFormatter.toPumpSupportedBolus(adjustment.originalBolus, bolusStep))
                 append(" → ")
                 append(decimalFormatter.toPumpSupportedBolus(adjustment.adjustedBolus, bolusStep))
-                append(" ед. ")
+                append(" ед.\n")
             }
-            append(suggestion.text)
+            append(suggestion.actionText)
+            if (suggestion.reasonText.isNotBlank()) {
+                append("\n")
+                append(suggestion.reasonText)
+            }
         }
         aapsLogger.debug(
             LTag.APS,
-            "Подсказка времени углеводов: ${suggestion.text}; score=${"%.1f".format(suggestion.score)} " +
+            "Подсказка времени углеводов: ${suggestion.actionText}; ${suggestion.reasonText}; score=${"%.1f".format(suggestion.score)} " +
                 "min=${"%.0f".format(suggestion.minBgMgdl)} max=${"%.0f".format(suggestion.maxBgMgdl)}"
         )
     }
@@ -701,8 +719,50 @@ class WizardDialog : DaggerDialogFragment() {
         val maxBgMgdl: Double
     )
 
+    private fun forecastRequiredCarbsFromFinalLine(profile: Profile, tempTarget: TT?, useTT: Boolean): Int {
+        val now = dateUtil.now()
+        val targetMgdl = forecastCarbsTargetMgdl(profile, tempTarget, useTT) ?: return 0
+        val result = ForecastCarbsCalculator.fromFinalForecast(
+            predictions = overviewData.finalAimiPredictionValues,
+            now = now,
+            targetMgdl = targetMgdl,
+            isfMgdl = profile.getIsfMgdlForCarbs(now, "Wizard forecast carbs", config, processedDeviceStatusData),
+            ic = profile.getIc()
+        )
+        aapsLogger.debug(
+            LTag.APS,
+            "Wizard forecast carbs from AIMI_FINAL: carbs=${result?.carbs ?: 0} " +
+                "min=${result?.minBgMgdl?.let { "%.0f".format(it) } ?: "n/a"} " +
+                "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(targetMgdl)}"
+        )
+        return result?.carbs ?: 0
+    }
+
+    private fun forecastCarbsTargetMgdl(profile: Profile, tempTarget: TT?, useTT: Boolean): Double? {
+        val apsTarget = when {
+            config.APS        -> loop.lastRun?.constraintsProcessed?.targetBG
+            config.AAPSCLIENT -> processedDeviceStatusData.getAPSResult()?.targetBG
+            else              -> null
+        }?.takeIf { it.isFinite() && it > 0.0 }
+
+        val wizardTarget = if (useTT && tempTarget != null) {
+            (tempTarget.lowTarget + tempTarget.highTarget) / 2.0
+        } else {
+            profile.getTargetMgdl()
+        }.takeIf { it.isFinite() && it > 0.0 }
+
+        return apsTarget ?: wizardTarget
+    }
+
+    private fun refreshOverviewIfForecastCarbsChanged(forecastRequiredCarbs: Int) {
+        if (lastForecastRequiredCarbsOverviewRefresh == forecastRequiredCarbs) return
+        lastForecastRequiredCarbsOverviewRefresh = forecastRequiredCarbs
+        rxBus.send(EventRefreshOverview("WizardDialog forecast carbs", now = true))
+    }
+
     private data class CarbTimingSuggestion(
-        val text: String,
+        val actionText: String,
+        val reasonText: String,
         val score: Double,
         val minBgMgdl: Double,
         val maxBgMgdl: Double
@@ -725,7 +785,8 @@ class WizardDialog : DaggerDialogFragment() {
         selectedCarbTime: Int,
         selectedFoodType: String?
     ): ForecastBolusAdjustment? {
-        if (carbs <= 0 || selectedFoodType == null) return null
+        val foodType = selectedFoodType ?: return null
+        if (carbs <= 0 || foodType !in setOf("fast", "slow")) return null
         val originalBolus = wizard.insulinAfterConstraints.coerceAtLeast(0.0)
         if (originalBolus <= 0.0) return null
 
@@ -750,12 +811,9 @@ class WizardDialog : DaggerDialogFragment() {
         val targetMgdl = (targetLowMgdl + targetHighMgdl) / 2.0
         val isfMgdl = wizard.sensToMgdl()
         val ic = wizard.ic.coerceAtLeast(1.0)
-        val carbEffectMgdl = carbs * isfMgdl / ic
+        val carbEffectMgdl = carbs * isfMgdl / ic * carbGlucoseEffectScale(foodType)
         val step = activePlugin.activePump.pumpDescription.bolusStep.coerceAtLeast(0.05)
-        val maxSteps = (originalBolus / step).toInt().coerceAtLeast(0)
-
-        var bestBolus = originalBolus
-        var bestCandidate = scoreCarbTiming(
+        val originalCandidate = scoreCarbTiming(
             forecast = forecast,
             offsetMinutes = selectedCarbTime,
             carbEffectMgdl = carbEffectMgdl,
@@ -763,10 +821,34 @@ class WizardDialog : DaggerDialogFragment() {
             targetLowMgdl = targetLowMgdl,
             targetHighMgdl = targetHighMgdl,
             targetMgdl = targetMgdl,
-            selectedFoodType = selectedFoodType
+            selectedFoodType = foodType
         )
 
-        for (idx in 0..maxSteps) {
+        val safetyFloorMgdl = targetLowMgdl - 5.0
+        if (originalCandidate.minBgMgdl >= safetyFloorMgdl) {
+            aapsLogger.debug(
+                LTag.APS,
+                "AIMI wizard forecast cap skipped: no low risk original=${"%.2f".format(originalBolus)}U " +
+                    "min=${"%.0f".format(originalCandidate.minBgMgdl)} floor=${"%.0f".format(safetyFloorMgdl)} " +
+                    "carbs=$carbs type=$foodType carbTime=$selectedCarbTime"
+            )
+            return null
+        }
+
+        val maxSteps = (originalBolus / step).toInt().coerceAtLeast(0)
+        var bestBolus = 0.0
+        var bestCandidate = scoreCarbTiming(
+            forecast = forecast,
+            offsetMinutes = selectedCarbTime,
+            carbEffectMgdl = carbEffectMgdl,
+            plannedBolusEffectMgdl = 0.0,
+            targetLowMgdl = targetLowMgdl,
+            targetHighMgdl = targetHighMgdl,
+            targetMgdl = targetMgdl,
+            selectedFoodType = foodType
+        )
+
+        for (idx in maxSteps downTo 0) {
             val candidateBolus = Round.roundTo(idx * step, step).coerceAtMost(originalBolus)
             val candidate = scoreCarbTiming(
                 forecast = forecast,
@@ -776,9 +858,14 @@ class WizardDialog : DaggerDialogFragment() {
                 targetLowMgdl = targetLowMgdl,
                 targetHighMgdl = targetHighMgdl,
                 targetMgdl = targetMgdl,
-                selectedFoodType = selectedFoodType
+                selectedFoodType = foodType
             )
-            if (candidate.score < bestCandidate.score) {
+            if (candidate.minBgMgdl >= safetyFloorMgdl) {
+                bestCandidate = candidate
+                bestBolus = candidateBolus
+                break
+            }
+            if (candidate.minBgMgdl > bestCandidate.minBgMgdl) {
                 bestCandidate = candidate
                 bestBolus = candidateBolus
             }
@@ -789,14 +876,15 @@ class WizardDialog : DaggerDialogFragment() {
 
         wizard.applyAimiForecastBolusAdjustment(
             adjustedBolus = constrainedBolus,
-            explanation = "Forecast cap: ${"%.2f".format(originalBolus)}U -> ${"%.2f".format(constrainedBolus)}U, " +
+            explanation = "Forecast safety cap: ${"%.2f".format(originalBolus)}U -> ${"%.2f".format(constrainedBolus)}U, " +
                 "post-meal min ${"%.0f".format(bestCandidate.minBgMgdl)}"
         )
         aapsLogger.debug(
             LTag.APS,
-            "AIMI wizard forecast cap applied: original=${"%.2f".format(originalBolus)}U adjusted=${"%.2f".format(constrainedBolus)}U " +
-                "min=${"%.0f".format(bestCandidate.minBgMgdl)} max=${"%.0f".format(bestCandidate.maxBgMgdl)} " +
-                "carbs=$carbs type=$selectedFoodType carbTime=$selectedCarbTime"
+            "AIMI wizard forecast safety cap applied: original=${"%.2f".format(originalBolus)}U adjusted=${"%.2f".format(constrainedBolus)}U " +
+                "originalMin=${"%.0f".format(originalCandidate.minBgMgdl)} adjustedMin=${"%.0f".format(bestCandidate.minBgMgdl)} " +
+                "max=${"%.0f".format(bestCandidate.maxBgMgdl)} floor=${"%.0f".format(safetyFloorMgdl)} " +
+                "carbs=$carbs type=$foodType carbTime=$selectedCarbTime"
         )
         return ForecastBolusAdjustment(
             originalBolus = originalBolus,
@@ -817,7 +905,9 @@ class WizardDialog : DaggerDialogFragment() {
         if (carbs <= 0) return null
 
         val now = dateUtil.now()
-        val forecast = timingForecastPoints(now, bg)
+        val finalForecast = finalAimiTimingForecastPoints(now)
+
+        val forecast = finalForecast.ifEmpty { timingForecastPoints(now, bg) }
         if (forecast.isEmpty()) return null
 
         val targetLowMgdl = profile.getTargetLowMgdl()
@@ -825,10 +915,10 @@ class WizardDialog : DaggerDialogFragment() {
         val targetMgdl = (targetLowMgdl + targetHighMgdl) / 2.0
         val isfMgdl = wizard.sensToMgdl()
         val ic = wizard.ic.coerceAtLeast(1.0)
-        val carbEffectMgdl = carbs * isfMgdl / ic
+        val carbEffectMgdl = carbs * isfMgdl / ic * carbGlucoseEffectScale(selectedFoodType)
         val plannedBolusEffectMgdl = wizard.insulinAfterConstraints.coerceAtLeast(0.0) * isfMgdl
 
-        val candidates = (-30..60 step 5).map { offsetMinutes ->
+        val candidates = timingCandidateOffsets(forecast, selectedFoodType).map { offsetMinutes ->
             scoreCarbTiming(
                 forecast = forecast,
                 offsetMinutes = offsetMinutes,
@@ -840,30 +930,55 @@ class WizardDialog : DaggerDialogFragment() {
                 selectedFoodType = selectedFoodType
             )
         }
-        val best = candidates.minByOrNull { it.score } ?: return null
+        val chosen = candidates.minWithOrNull(compareBy<CarbTimingCandidate> { it.score }.thenBy { it.offsetMinutes }) ?: return null
         val nowCandidate = candidates.firstOrNull { it.offsetMinutes == 0 }
-        val selectedTimeText = if (selectedCarbTime != best.offsetMinutes) {
-            ". Ты указал: ${formatSelectedCarbTiming(selectedCarbTime)}"
-        } else ""
-        val comparisonText = if (nowCandidate != null && best.offsetMinutes > 0 && nowCandidate.score > best.score * 1.12) {
-            ". Если съесть сейчас, прогноз хуже"
-        } else ""
-        val riskText = when {
-            best.minBgMgdl < targetLowMgdl - 5.0 ->
-                ". Минимум ${profileUtil.fromMgdlToStringInUnits(best.minBgMgdl)} ниже цели"
+        val details = mutableListOf<String>()
+        if (selectedCarbTime != chosen.offsetMinutes) {
+            details += "Ты указал: ${formatSelectedCarbTiming(selectedCarbTime)}"
+        }
+        if (nowCandidate != null && chosen.offsetMinutes > 0 && nowCandidate.score > chosen.score * 1.12) {
+            details += "Если съесть сейчас: прогноз хуже"
+        }
+        val currentBgMgdl = forecast.firstOrNull()?.bgMgdl ?: 0.0
+        val baselineMaxMgdl = timingScoringPoints(forecast)
+            .maxOfOrNull { it.bgMgdl } ?: currentBgMgdl
+        val carbAddedPeakMgdl = chosen.maxBgMgdl - baselineMaxMgdl
+        if (chosen.offsetMinutes > 0 && carbAddedPeakMgdl <= 5.0 && baselineMaxMgdl > targetHighMgdl + 25.0) {
+            details += "Пик уже есть в текущем прогнозе; время еды не должно лечить этот пик"
+        }
+        val mainReason = when {
+            chosen.minBgMgdl < targetLowMgdl - 5.0 ->
+                "мин ${profileUtil.fromMgdlToStringInUnits(chosen.minBgMgdl)} ниже цели"
 
-            best.maxBgMgdl > targetHighMgdl + 25.0 ->
-                ". Возможен пик ${profileUtil.fromMgdlToStringInUnits(best.maxBgMgdl)}"
+            chosen.maxBgMgdl > max(targetHighMgdl + 25.0, currentBgMgdl + 10.0) && carbAddedPeakMgdl > 5.0 ->
+                "углеводы добавляют пик до ${profileUtil.fromMgdlToStringInUnits(chosen.maxBgMgdl)}"
+
+            baselineMaxMgdl > max(targetHighMgdl + 25.0, currentBgMgdl + 10.0) ->
+                "текущий прогноз уже с пиком ${profileUtil.fromMgdlToStringInUnits(baselineMaxMgdl)}"
 
             else ->
-                ". Ближе всего к цели ${profileUtil.fromMgdlToStringInUnits(targetMgdl)}"
+                "минимальное отклонение от цели ${profileUtil.fromMgdlToStringInUnits(targetMgdl)}"
         }
         return CarbTimingSuggestion(
-            text = "Когда есть углеводы: ${formatRecommendedCarbTiming(best.offsetMinutes)}$selectedTimeText$comparisonText$riskText",
-            score = best.score,
-            minBgMgdl = best.minBgMgdl,
-            maxBgMgdl = best.maxBgMgdl
+            actionText = "Углеводы: ${formatRecommendedCarbTiming(chosen.offsetMinutes)}",
+            reasonText = buildString {
+                append("Причина: ")
+                append(mainReason)
+                if (details.isNotEmpty()) {
+                    append("\n")
+                    append(details.joinToString("\n"))
+                }
+            },
+            score = chosen.score,
+            minBgMgdl = chosen.minBgMgdl,
+            maxBgMgdl = chosen.maxBgMgdl
         )
+    }
+
+    private fun timingCandidateOffsets(forecast: List<TimingForecastPoint>, selectedFoodType: String): List<Int> {
+        val latestForecastMinute = timingScoringPoints(forecast).maxOfOrNull { it.minutes } ?: return listOf(0)
+        val latestOffsetWithVisiblePeak = (latestForecastMinute - carbTimingPeakMinutes(selectedFoodType)).coerceAtLeast(0)
+        return (0..latestOffsetWithVisiblePeak step 5).toList().ifEmpty { listOf(0) }
     }
 
     private fun scoreCarbTiming(
@@ -880,44 +995,51 @@ class WizardDialog : DaggerDialogFragment() {
         var weightSum = 0.0
         var minBg = Double.POSITIVE_INFINITY
         var maxBg = Double.NEGATIVE_INFINITY
-        forecast
-            .filter { it.minutes in 10..180 }
+        timingScoringPoints(forecast)
             .forEach { point ->
-                val carbFraction = carbAbsorbedFraction(point.minutes - offsetMinutes, selectedFoodType)
+                val minutesSinceCarb = point.minutes - offsetMinutes
+                val carbFraction = carbEffectFraction(minutesSinceCarb, selectedFoodType)
                 val bolusFraction = insulinActionFraction(point.minutes)
                 val adjustedBg = point.bgMgdl + carbEffectMgdl * carbFraction - plannedBolusEffectMgdl * bolusFraction
                 minBg = min(minBg, adjustedBg)
                 maxBg = max(maxBg, adjustedBg)
 
                 val distance = abs(adjustedBg - targetMgdl)
-                val lowPenalty = if (adjustedBg < targetLowMgdl) (targetLowMgdl - adjustedBg) * 5.0 else 0.0
-                val highPenalty = if (adjustedBg > targetHighMgdl) (adjustedBg - targetHighMgdl) * 1.8 else 0.0
-                val timeWeight = when (point.minutes) {
-                    in 20..120 -> 1.0
-                    else       -> 0.55
-                }
+                val lowPenaltyFactor = if (selectedFoodType == "fast" && minutesSinceCarb >= 45) 8.0 else 5.0
+                val highPenaltyFactor = if (selectedFoodType == "fast" && minutesSinceCarb in 0..45) 0.9 else 1.8
+                val lowPenalty = if (adjustedBg < targetLowMgdl) (targetLowMgdl - adjustedBg) * lowPenaltyFactor else 0.0
+                val highPenalty = if (adjustedBg > targetHighMgdl) (adjustedBg - targetHighMgdl) * highPenaltyFactor else 0.0
+                val timeWeight = forecastPointWeight(point.minutes) * if (selectedFoodType == "fast" && minutesSinceCarb >= 45) 1.25 else 1.0
                 score += (distance + lowPenalty + highPenalty) * timeWeight
                 weightSum += timeWeight
             }
+        val baseScore = if (weightSum > 0.0) score / weightSum else Double.MAX_VALUE
         return CarbTimingCandidate(
             offsetMinutes = offsetMinutes,
-            score = if (weightSum > 0.0) score / weightSum else Double.MAX_VALUE,
+            score = baseScore,
             minBgMgdl = if (minBg.isFinite()) minBg else forecast.first().bgMgdl,
             maxBgMgdl = if (maxBg.isFinite()) maxBg else forecast.first().bgMgdl
         )
     }
 
+    private fun timingScoringPoints(forecast: List<TimingForecastPoint>): List<TimingForecastPoint> =
+        forecast.filter { it.minutes >= 10 }
+
+    private fun forecastPointWeight(minutes: Int): Double =
+        if (minutes < 20) 0.55 else 1.0
+
     private fun timingForecastPoints(now: Long, bg: Double): List<TimingForecastPoint> {
-        val predicted = (overviewData.finalAimiPredictionValues.ifEmpty { overviewData.predictionValues })
-            .filter { it.timestamp >= now - T.mins(2).msecs() }
-            .sortedBy { it.timestamp }
-            .map {
-                TimingForecastPoint(
-                    minutes = max(0, ((it.timestamp - now) / T.mins(1).msecs()).toInt()),
-                    bgMgdl = it.value
-                )
-            }
-            .filter { it.minutes <= 240 }
+        val predicted = (finalAimiTimingForecastPoints(now).ifEmpty {
+            overviewData.predictionValues
+                .filter { it.timestamp >= now - T.mins(2).msecs() }
+                .sortedBy { it.timestamp }
+                .map {
+                    TimingForecastPoint(
+                        minutes = max(0, ((it.timestamp - now) / T.mins(1).msecs()).toInt()),
+                        bgMgdl = it.value
+                    )
+                }
+        })
         if (predicted.isNotEmpty()) return predicted
 
         val units = profileFunction.getUnits()
@@ -933,6 +1055,17 @@ class WizardDialog : DaggerDialogFragment() {
         }
     }
 
+    private fun finalAimiTimingForecastPoints(now: Long): List<TimingForecastPoint> =
+        overviewData.finalAimiPredictionValues
+            .filter { it.timestamp >= now - T.mins(2).msecs() }
+            .sortedBy { it.timestamp }
+            .map {
+                TimingForecastPoint(
+                    minutes = max(0, ((it.timestamp - now) / T.mins(1).msecs()).toInt()),
+                    bgMgdl = it.value
+                )
+            }
+
     private fun carbAbsorbedFraction(minutesSinceCarb: Int, selectedFoodType: String): Double {
         val (peakMinutes, absorptionMinutes) = when (selectedFoodType) {
             "fast" -> 15.0 to 45.0
@@ -941,6 +1074,29 @@ class WizardDialog : DaggerDialogFragment() {
         }
         return cumulativeGaussianFraction(minutesSinceCarb.toDouble(), peakMinutes, absorptionMinutes)
     }
+
+    private fun carbTimingPeakMinutes(selectedFoodType: String): Int =
+        when (selectedFoodType) {
+            "fast" -> 15
+            "slow" -> 80
+            else -> 50
+        }
+
+    private fun carbEffectFraction(minutesSinceCarb: Int, selectedFoodType: String): Double {
+        if (selectedFoodType != "fast") return carbAbsorbedFraction(minutesSinceCarb, selectedFoodType)
+        if (minutesSinceCarb <= 0) return 0.0
+        return when {
+            minutesSinceCarb <= 15 -> 0.85 * minutesSinceCarb / 15.0
+            minutesSinceCarb <= 45 -> 0.85 + 0.15 * (minutesSinceCarb - 15) / 30.0
+            else -> 1.0
+        }.coerceIn(0.0, 1.0)
+    }
+
+    private fun carbGlucoseEffectScale(selectedFoodType: String): Double =
+        when (selectedFoodType) {
+            "fast", "slow" -> 1.0
+            else           -> 1.0
+        }
 
     private fun insulinActionFraction(minutesSinceBolus: Int): Double =
         cumulativeGaussianFraction(minutesSinceBolus.toDouble() - 10.0, 65.0, 300.0)
@@ -967,16 +1123,16 @@ class WizardDialog : DaggerDialogFragment() {
 
     private fun formatRecommendedCarbTiming(minutes: Int): String =
         when {
-            minutes < 0 -> "сейчас; лучшее окно было ${-minutes} мин назад"
+            minutes < 0 -> "сейчас (окно было ${-minutes} мин назад)"
             minutes == 0 -> "сейчас"
             else -> "через $minutes мин"
         }
 
     private fun formatSelectedCarbTiming(minutes: Int): String =
         when {
-            minutes < 0 -> "углеводы уже были ${-minutes} мин назад"
-            minutes == 0 -> "съесть сейчас"
-            else -> "съесть через $minutes мин"
+            minutes < 0 -> "${-minutes} мин назад"
+            minutes == 0 -> "сейчас"
+            else -> "через $minutes мин"
         }
 
     private fun buildAimiLogicSummary(
@@ -1026,7 +1182,7 @@ class WizardDialog : DaggerDialogFragment() {
                 append(", prebolus ")
                 append(decimalFormatter.to2Decimal(decision.prebolusBonus))
                 append(" ед.<br/>")
-                append("Логика: базовая часть без carb-компонента + carb-компонент × factor + prebolus, затем ограничения болюса. Тип еды меняет factor/prebolus и форму COB-кривой в прогнозе.<br/>")
+                append("Логика: базовая часть без carb-компонента + carb-компонент × factor + prebolus, затем ограничения болюса. Быстрые углеводы считаются как быстрое всасывание с осторожным покрытием bolus, а не как исчезающий до нуля всплеск.<br/>")
                 append("Результат AIMI: <b>")
                 append(rh.gs(app.aaps.core.ui.R.string.format_insulin_units, decision.recommendedBolus))
                 append("</b>. Объяснение: ")
@@ -1046,9 +1202,9 @@ class WizardDialog : DaggerDialogFragment() {
             "IOB" to GlossaryDefinition("IOB", "Insulin On Board — ещё действующий инсулин, который продолжает влиять на глюкозу."),
             "ISF" to GlossaryDefinition("ISF", "Insulin Sensitivity Factor — насколько 1 единица инсулина, по оценке системы, снижает глюкозу."),
             "IC" to GlossaryDefinition("IC", "Insulin to Carb ratio — сколько граммов углеводов покрывает 1 единица инсулина."),
-            "prebolus" to GlossaryDefinition("prebolus", "Часть стратегии до еды. Для быстрой еды он усиливается, для медленной ослабляется."),
-            "factor" to GlossaryDefinition("factor", "Множитель carb-компонента. Теперь на него влияет и meal mode AIMI, и выбранный тип еды."),
-            "тип еды" to GlossaryDefinition("Тип еды", "Переключатель carb-модели. Быстрая еда усиливает ранний углеводный вклад, обычная оставляет базовую форму, медленная растягивает влияние углеводов во времени."),
+            "prebolus" to GlossaryDefinition("prebolus", "Часть стратегии до еды. Для быстрых углеводов он выключается, для медленной еды ослабляется."),
+            "factor" to GlossaryDefinition("factor", "Множитель carb-компонента. На него влияет meal mode AIMI и выбранный тип еды."),
+            "тип еды" to GlossaryDefinition("Тип еды", "Переключатель carb-модели. Быстрые углеводы всасываются рано и покрываются осторожнее, обычная еда оставляет базовую форму, медленная растягивает влияние углеводов во времени."),
             "meal mode" to GlossaryDefinition("meal mode", "Контекст еды, который AIMI определяет по размеру приёма пищи и времени суток: snack, breakfast, lunch, dinner, meal, highcarb."),
             "target" to GlossaryDefinition("Target", "Целевая зона глюкозы, к которой AIMI старается вести расчёт.")
         )

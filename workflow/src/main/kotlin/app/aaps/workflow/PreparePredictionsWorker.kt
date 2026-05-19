@@ -9,6 +9,7 @@ import app.aaps.core.graph.data.DataPointWithLabelInterface
 import app.aaps.core.graph.data.GlucoseValueDataPoint
 import app.aaps.core.graph.data.PointsWithLabelGraphSeries
 import app.aaps.core.interfaces.aps.Loop
+import app.aaps.core.interfaces.aps.APSResult
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.logging.LTag
@@ -65,9 +66,11 @@ class PreparePredictionsWorker(
         val predictionsAreStaleByBg = apsResult?.let { isPredictionStale(it) } == true
         val predictionsAreStaleByContext = apsResult?.let { isPredictionContextStale(it) } == true
         val predictionsAreStaleByCarbs = apsResult?.let { isPredictionStaleByCarbs(it) } == true
-        val predictionsAreStale = predictionsAreStaleByBg || predictionsAreStaleByContext || predictionsAreStaleByCarbs
-        val hidePredictions = predictionsAreStaleByBg
-        val markPredictionPendingRecalc = !hidePredictions && (predictionsAreStaleByContext || predictionsAreStaleByCarbs)
+        val predictionsAreStaleByActions = apsResult?.let { isPredictionStaleByRecentActions(it) } == true
+        val predictionsAreMissingMealContext = apsResult?.let { isPredictionMissingMealContext(it) } == true
+        val predictionsAreStale = predictionsAreStaleByBg || predictionsAreStaleByContext || predictionsAreStaleByCarbs || predictionsAreStaleByActions || predictionsAreMissingMealContext
+        val hidePredictions = predictionsAreStaleByBg || predictionsAreMissingMealContext
+        val markPredictionPendingRecalc = !hidePredictions && (predictionsAreStaleByContext || predictionsAreStaleByCarbs || predictionsAreStaleByActions)
         val predictionsAvailable =
             apsResult?.predictionsAsGv?.isNotEmpty() == true ||
                 (if (config.APS) loop.lastRun?.request?.hasPredictions == true else config.AAPSCLIENT)
@@ -156,14 +159,16 @@ class PreparePredictionsWorker(
         aapsLogger.debug(
             LTag.WORKER,
             "AIMI final prediction prepared: points=${finalAimiListArray.size} stale=$predictionsAreStale " +
-                "hide=$hidePredictions pendingRecalc=$markPredictionPendingRecalc contextStale=$predictionsAreStaleByContext carbsStale=$predictionsAreStaleByCarbs" +
+                "hide=$hidePredictions pendingRecalc=$markPredictionPendingRecalc contextStale=$predictionsAreStaleByContext " +
+                "carbsStale=$predictionsAreStaleByCarbs actionStale=$predictionsAreStaleByActions " +
+                "missingMealContext=$predictionsAreMissingMealContext" +
                 (firstFinalPoint?.let { " first=${dateUtil.dateAndTimeString(it.data.timestamp)} ${profileUtil.fromMgdlToStringInUnits(it.data.value)}" } ?: "") +
                 (lastFinalPoint?.let { " last=${dateUtil.dateAndTimeString(it.data.timestamp)} ${profileUtil.fromMgdlToStringInUnits(it.data.value)}" } ?: "")
         )
         return Result.success()
     }
 
-    private fun isPredictionStale(apsResult: app.aaps.core.interfaces.aps.APSResult): Boolean {
+    private fun isPredictionStale(apsResult: APSResult): Boolean {
         val actualBg = currentBgSnapshot() ?: return true
         val predictionBgTimestamp = apsResult.glucoseStatus?.date ?: apsResult.date
         val predictionBgValue = apsResult.glucoseStatus?.glucose
@@ -185,7 +190,41 @@ class PreparePredictionsWorker(
         return isStaleByTime || isStaleByValue
     }
 
-    private fun isPredictionStaleByCarbs(apsResult: app.aaps.core.interfaces.aps.APSResult): Boolean {
+    private fun isPredictionMissingMealContext(apsResult: APSResult): Boolean {
+        val resultCob = apsResult.mealData?.mealCOB ?: return false
+        if (resultCob > 1.0) return false
+        val currentCob = try {
+            activePlugin.activeIobCobCalculator.getCobInfo("AIMI prediction missing meal context").displayCob
+        } catch (_: Throwable) {
+            null
+        }
+        if (currentCob != null) return false
+
+        val now = dateUtil.now()
+        val recentCarbs = try {
+            persistenceLayer.getCarbsFromTimeExpanded(now - T.hours(3).msecs(), true)
+                .filter { it.isValid && it.amount > 0.0 && it.timestamp <= now }
+        } catch (_: Throwable) {
+            listOfNotNull(
+                persistenceLayer.getNewestCarbs()
+                    ?.takeIf { it.isValid && it.amount > 0.0 && it.timestamp in (now - T.hours(3).msecs())..now }
+            )
+        }
+        val recentCarbAmount = recentCarbs.sumOf { it.amount }
+        val latestCarbTime = recentCarbs.maxOfOrNull { it.timestamp }
+        if (recentCarbAmount >= 5.0 && latestCarbTime != null) {
+            aapsLogger.debug(
+                LTag.WORKER,
+                "Hiding AIMI prediction by missing COB context: result=${dateUtil.dateAndTimeString(apsResult.date)} " +
+                    "resultCOB=${"%.1f".format(resultCob)} currentCOB=unknown " +
+                    "recentCarbs=${"%.1f".format(recentCarbAmount)}g latestCarb=${dateUtil.dateAndTimeString(latestCarbTime)}"
+            )
+            return true
+        }
+        return false
+    }
+
+    private fun isPredictionStaleByCarbs(apsResult: APSResult): Boolean {
         val resultTime = apsResult.date
         val resultCob = apsResult.mealData?.mealCOB
         val currentCob = try {
@@ -222,6 +261,121 @@ class PreparePredictionsWorker(
         return true
     }
 
+    private fun isPredictionStaleByRecentActions(apsResult: APSResult): Boolean {
+        val resultTime = apsResult.date
+        val now = dateUtil.now()
+        val lookback = resultTime - T.hours(24).msecs()
+        val futureMargin = now + T.hours(6).msecs()
+
+        fun isRelevant(timestamp: Long, dateCreated: Long): Boolean =
+            (timestamp in lookback..futureMargin) && (timestamp > resultTime || dateCreated > resultTime)
+
+        fun logPending(kind: String, timestamp: Long, dateCreated: Long, details: String = ""): Boolean {
+            aapsLogger.debug(
+                LTag.WORKER,
+                "AIMI prediction pending recalculation by action: $kind " +
+                    "result=${dateUtil.dateAndTimeString(resultTime)} " +
+                    "event=${dateUtil.dateAndTimeString(timestamp)} " +
+                    "created=${if (dateCreated > 0) dateUtil.dateAndTimeString(dateCreated) else "unknown"}" +
+                    details
+            )
+            return true
+        }
+
+        try {
+            val bolus = persistenceLayer.getBolusesFromTimeIncludingInvalid(lookback, false)
+                .blockingGet()
+                .firstOrNull { it.type != app.aaps.core.data.model.BS.Type.PRIMING && isRelevant(it.timestamp, it.dateCreated) }
+            if (bolus != null) return logPending(
+                kind = "bolus",
+                timestamp = bolus.timestamp,
+                dateCreated = bolus.dateCreated,
+                details = " amount=${"%.2f".format(bolus.amount)}U type=${bolus.type} valid=${bolus.isValid}"
+            )
+        } catch (_: Throwable) {
+        }
+
+        try {
+            val carbs = persistenceLayer.getCarbsFromTimeIncludingInvalid(lookback, false)
+                .blockingGet()
+                .firstOrNull { isRelevant(it.timestamp, it.dateCreated) }
+            if (carbs != null) return logPending(
+                kind = "carbs",
+                timestamp = carbs.timestamp,
+                dateCreated = carbs.dateCreated,
+                details = " amount=${"%.1f".format(carbs.amount)}g valid=${carbs.isValid}"
+            )
+        } catch (_: Throwable) {
+        }
+
+        try {
+            val profileSwitch = persistenceLayer.getProfileSwitchesIncludingInvalidFromTime(lookback, false)
+                .blockingGet()
+                .firstOrNull { isRelevant(it.timestamp, it.dateCreated) }
+            if (profileSwitch != null) return logPending(
+                kind = "profile",
+                timestamp = profileSwitch.timestamp,
+                dateCreated = profileSwitch.dateCreated,
+                details = " percentage=${profileSwitch.percentage}% duration=${profileSwitch.duration / T.mins(1).msecs()}m valid=${profileSwitch.isValid}"
+            )
+        } catch (_: Throwable) {
+        }
+
+        try {
+            val effectiveProfileSwitch = persistenceLayer.getEffectiveProfileSwitchesIncludingInvalidFromTime(lookback, false)
+                .blockingGet()
+                .firstOrNull { isRelevant(it.timestamp, it.dateCreated) }
+            if (effectiveProfileSwitch != null) return logPending(
+                kind = "effective profile",
+                timestamp = effectiveProfileSwitch.timestamp,
+                dateCreated = effectiveProfileSwitch.dateCreated,
+                details = " percentage=${effectiveProfileSwitch.originalPercentage}% valid=${effectiveProfileSwitch.isValid}"
+            )
+        } catch (_: Throwable) {
+        }
+
+        try {
+            val tempTarget = persistenceLayer.getTemporaryTargetDataIncludingInvalidFromTime(lookback, false)
+                .blockingGet()
+                .firstOrNull { isRelevant(it.timestamp, it.dateCreated) }
+            if (tempTarget != null) return logPending(
+                kind = "temporary target",
+                timestamp = tempTarget.timestamp,
+                dateCreated = tempTarget.dateCreated,
+                details = " target=${tempTarget.target()} duration=${tempTarget.duration / T.mins(1).msecs()}m valid=${tempTarget.isValid}"
+            )
+        } catch (_: Throwable) {
+        }
+
+        try {
+            val tempBasal = persistenceLayer.getTemporaryBasalsStartingFromTimeIncludingInvalid(lookback, false)
+                .blockingGet()
+                .firstOrNull { isRelevant(it.timestamp, it.dateCreated) }
+            if (tempBasal != null) return logPending(
+                kind = "temporary basal",
+                timestamp = tempBasal.timestamp,
+                dateCreated = tempBasal.dateCreated,
+                details = " rate=${"%.2f".format(tempBasal.rate)} duration=${tempBasal.duration / T.mins(1).msecs()}m valid=${tempBasal.isValid}"
+            )
+        } catch (_: Throwable) {
+        }
+
+        try {
+            val extendedBolus = persistenceLayer.getExtendedBolusStartingFromTimeIncludingInvalid(lookback, false)
+                .blockingGet()
+                .firstOrNull { isRelevant(it.timestamp, it.dateCreated) }
+            if (extendedBolus != null) return logPending(
+                kind = "extended bolus",
+                timestamp = extendedBolus.timestamp,
+                dateCreated = extendedBolus.dateCreated,
+                details = " amount=${"%.2f".format(extendedBolus.amount)}U duration=${extendedBolus.duration / T.mins(1).msecs()}m valid=${extendedBolus.isValid}"
+            )
+        } catch (_: Throwable) {
+        }
+
+        return false
+    }
+
     private data class BgSnapshot(val timestamp: Long, val value: Double, val source: String)
 
     private fun currentBgSnapshot(): BgSnapshot? {
@@ -232,12 +386,13 @@ class PreparePredictionsWorker(
         return listOfNotNull(adsBg, dbBg).maxByOrNull { it.timestamp }
     }
 
-    private fun isPredictionContextStale(apsResult: app.aaps.core.interfaces.aps.APSResult): Boolean {
+    private fun isPredictionContextStale(apsResult: APSResult): Boolean {
         val aimiProfile = apsResult.oapsProfileAimi ?: return false
         val now = dateUtil.now()
         val currentProfile = profileFunction.getProfile(now) ?: return true
-        val currentProfileSwitch = persistenceLayer.getEffectiveProfileSwitchActiveAt(now)
-        val currentPercentage = currentProfileSwitch?.originalPercentage ?: currentProfile.percentage
+        val requestedProfileSwitch = persistenceLayer.getProfileSwitchActiveAt(now)
+        val effectiveProfileSwitch = persistenceLayer.getEffectiveProfileSwitchActiveAt(now)
+        val currentPercentage = requestedProfileSwitch?.percentage ?: effectiveProfileSwitch?.originalPercentage ?: currentProfile.percentage
         val currentTempTarget = persistenceLayer.getTemporaryTargetActiveAt(now)
         val currentTempTargetSet = currentTempTarget != null
         val currentTarget = currentTempTarget?.target() ?: currentProfile.getTargetMgdl()
@@ -251,14 +406,16 @@ class PreparePredictionsWorker(
                 LTag.WORKER,
                 "AIMI prediction pending recalculation by context: resultTarget=${aimiProfile.target_bg} currentTarget=$currentTarget " +
                     "resultTempTarget=${aimiProfile.temptargetSet} currentTempTarget=$currentTempTargetSet " +
-                    "resultProfile=${aimiProfile.profile_percentage}% currentProfile=$currentPercentage%"
+                    "resultProfile=${aimiProfile.profile_percentage}% currentProfile=$currentPercentage% " +
+                    "requestedProfile=${requestedProfileSwitch?.percentage?.let { "$it%" } ?: "none"} " +
+                    "effectiveProfile=${effectiveProfileSwitch?.originalPercentage?.let { "$it%" } ?: "none"}"
             )
         }
 
         return tempTargetMismatch || targetMismatch || profileMismatch
     }
 
-    private fun resolveBestApsResult(): app.aaps.core.interfaces.aps.APSResult? {
+    private fun resolveBestApsResult(): APSResult? {
         val now = dateUtil.now()
         val actualBgTimestamp = activePlugin.activeIobCobCalculator.ads.actualBg()?.timestamp ?: now
         val inMemoryResult = if (config.APS) loop.lastRun?.constraintsProcessed else processedDeviceStatusData.getAPSResult()
@@ -286,10 +443,10 @@ class PreparePredictionsWorker(
         return bestResult
     }
 
-    private fun predictionTimestamp(apsResult: app.aaps.core.interfaces.aps.APSResult): Long =
+    private fun predictionTimestamp(apsResult: APSResult): Long =
         apsResult.glucoseStatus?.date ?: apsResult.date
 
-    private fun latestVisiblePredictionTime(apsResult: app.aaps.core.interfaces.aps.APSResult): Long =
+    private fun latestVisiblePredictionTime(apsResult: APSResult): Long =
         max(
             apsResult.latestPredictionsTime,
             apsResult.predictionsAsGv.maxOfOrNull { it.timestamp } ?: apsResult.latestPredictionsTime

@@ -1,6 +1,7 @@
 package app.aaps.plugins.aps.openAPSAIMI.pkpd
 
 import kotlin.math.exp
+import kotlin.math.ceil
 import kotlin.math.pow
 
 object CarbAbsorptionModel {
@@ -77,11 +78,13 @@ object CarbAbsorptionModel {
             delta < -2.0 -> 20.0
             else -> 0.0
         }
+        val absorptionMinutes = (foodType.absorptionMinutes + absorptionShift).coerceAtLeast(
+            if (foodType == FoodType.FAST) 35.0 else 90.0
+        )
+        val minPeakMinutes = if (foodType == FoodType.FAST) 15.0 else 20.0
         return Parameters(
-            peakMinutes = (foodType.peakMinutes + peakShift).coerceAtLeast(20.0),
-            absorptionMinutes = (foodType.absorptionMinutes + absorptionShift).coerceAtLeast(
-                if (foodType == FoodType.FAST) 35.0 else 90.0
-            )
+            peakMinutes = (foodType.peakMinutes + peakShift).coerceIn(minPeakMinutes, absorptionMinutes),
+            absorptionMinutes = absorptionMinutes
         )
     }
 
@@ -111,4 +114,42 @@ object CarbAbsorptionModel {
 
     fun buildWeights(steps: Int, foodType: FoodType): DoubleArray =
         buildWeights(steps, foodType.peakMinutes, foodType.absorptionMinutes)
+
+    fun remainingFraction(
+        elapsedMinutes: Double,
+        selectedFoodType: String?,
+        delta: Double = 0.0
+    ): Double {
+        if (elapsedMinutes <= 0.0) return 1.0
+
+        val foodType = normalizeFoodType(selectedFoodType)
+        val parameters = resolveParameters(
+            cobG = 1.0,
+            delta = delta,
+            selectedFoodType = when (foodType) {
+                FoodType.FAST -> "fast"
+                FoodType.SLOW -> "slow"
+                FoodType.BALANCED -> "balanced"
+            }
+        )
+        if (elapsedMinutes >= parameters.absorptionMinutes) return 0.0
+
+        val steps = ceil(parameters.absorptionMinutes / 5.0).toInt().coerceAtLeast(1)
+        val weights = buildWeights(
+            steps = steps,
+            peakMinutes = parameters.peakMinutes,
+            absorptionMinutes = parameters.absorptionMinutes
+        )
+        val absorbedFraction = weights.withIndex().sumOf { (index, weight) ->
+            val stepStart = index * 5.0
+            val stepEnd = (index + 1) * 5.0
+            when {
+                elapsedMinutes >= stepEnd -> weight
+                elapsedMinutes <= stepStart -> 0.0
+                else -> weight * ((elapsedMinutes - stepStart) / 5.0).coerceIn(0.0, 1.0)
+            }
+        }
+
+        return (1.0 - absorbedFraction).coerceIn(0.0, 1.0)
+    }
 }

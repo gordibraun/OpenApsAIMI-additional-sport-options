@@ -48,6 +48,7 @@ class BasalPlanner @Inject constructor(
         val long = ctx.bg.longAvgDelta ?: d5
 
         val profileBasal = ctx.profile.basalProfileUph
+        val target = ctx.profile.targetMgdl.takeIf { it.isFinite() && it > 0.0 } ?: 100.0
         val pump = ctx.pump
 
         val maxBasal = pump.maxBasal.coerceAtLeast(profileBasal)
@@ -61,6 +62,10 @@ class BasalPlanner @Inject constructor(
         val minutesSinceLastChange = hist.minutesSinceLastChange()
 
         if (profileBasal <= 0.0) return null
+
+        val belowTarget = mgdl < target
+        val forecastNotClearlyAboveTarget = ctx.eventualBg <= target + 5.0
+        val conservativeBelowTarget = belowTarget && forecastNotClearlyAboveTarget
 
         // 1) Hypo guard / suspend
         // A) Hard limit : BG <= 60 -> Suspend immédiat
@@ -96,6 +101,9 @@ class BasalPlanner @Inject constructor(
 
         // 2) Micro-resume après 0 basal prolongé
         if (lastTempIsZero && zeroSinceMin >= ZERO_RESUME_MIN) {
+            if (conservativeBelowTarget && d5 < 1.5 && short < 1.0) {
+                return null
+            }
             val base = max(KICK_MIN_UPH, profileBasal * ZERO_RESUME_FRAC)
             val rate = clampAndQuantize(base, profileBasal, maxBasal, step)
             val dur = min(ZERO_RESUME_MAX_MIN, max(minDur, minutesSinceLastChange / 2))
@@ -108,7 +116,7 @@ class BasalPlanner @Inject constructor(
 
         // 3) Kicker plateau haut (BG élevé & plat)
         val plateau = (abs(d5) <= PLATEAU_DELTA_ABS) && (abs(short) <= PLATEAU_DELTA_ABS) && (abs(long) <= PLATEAU_DELTA_ABS)
-        if (plateau && mgdl >= HIGH_BG) {
+        if (plateau && mgdl >= max(HIGH_BG, target + 5.0)) {
             val baseKick = max(KICK_MIN_UPH, profileBasal * (1.0 + KICK_FRAC))
             val rate = clampAndQuantize(baseKick, profileBasal, maxBasal, step)
             val dur = max(minDur, KICK_MINUTES)
@@ -121,7 +129,7 @@ class BasalPlanner @Inject constructor(
 
         // 4) Anti-stall léger (Δ≈0 et pas franchement positif)
         val nearFlat = abs(d5) <= PLATEAU_DELTA_ABS && abs(short) <= PLATEAU_DELTA_ABS
-        if (nearFlat && d5 < DELTA_POS_RELEASE) {
+        if (nearFlat && d5 < DELTA_POS_RELEASE && mgdl >= target && ctx.eventualBg >= target + 5.0) {
             val base = profileBasal * (1.0 + ANTI_STALL_FRAC)
             val rate = clampAndQuantize(base, profileBasal, maxBasal, step)
             return BasalPlan(

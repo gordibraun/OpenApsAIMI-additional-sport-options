@@ -97,6 +97,7 @@ import app.aaps.core.objects.extensions.directionToIcon
 import app.aaps.core.objects.extensions.displayText
 import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.profile.ProfileSealed
+import app.aaps.core.objects.forecast.ForecastCarbsCalculator
 import app.aaps.core.objects.wizard.QuickWizard
 import app.aaps.core.ui.UIRunnable
 import app.aaps.core.ui.dialogs.OKDialog
@@ -1030,6 +1031,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val wizardLine: String? =
             if (profile != null && profileStore != null) {
                 val profileName = profileFunction.getProfileName()
+                val forecastRequiredCarbs = forecastRequiredCarbsFromFinalLine(profile, fullPredictionTargetMgdl())
                 val w = bolusWizardProvider.get().doCalc(
                     profile,                       // specificProfile
                     profileName,                   // profileName
@@ -1050,20 +1052,24 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     "",                            // notes
                     0,                             // carbTime
                     usePercentage = wizardUsePercentage,
-                    totalPercentage = preferences.get(app.aaps.core.keys.IntKey.OverviewBolusPercentage).toDouble()
+                    totalPercentage = preferences.get(app.aaps.core.keys.IntKey.OverviewBolusPercentage).toDouble(),
+                    forecastRequiredCarbs = forecastRequiredCarbs
                 )
 
                 aapsLogger.debug(
                     LTag.UI,
                     "Overview wizard line: insulin=${"%.2f".format(w.calculatedTotalInsulin)} bg=$bg displayCob=$displayCob " +
-                        "usedCob=$cob useCob=$wizardUseCob useTrend=$wizardUseTrend usePercentage=$wizardUsePercentage"
+                        "usedCob=$cob useCob=$wizardUseCob useTrend=$wizardUseTrend usePercentage=$wizardUsePercentage " +
+                        "forecastRequiredCarbs=${w.forecastRequiredCarbs} source=${w.forecastRequiredCarbsSource}"
                 )
 
                 // “Результат / Не хватает” без текста, только значение+единица
-                if (w.calculatedTotalInsulin > 0.0) {
+                if (w.forecastRequiredCarbs > 0) {
+                    rh.gs(app.aaps.core.objects.R.string.format_carbs, w.forecastRequiredCarbs)
+                } else if (w.calculatedTotalInsulin > 0.0) {
                     rh.gs(app.aaps.core.ui.R.string.format_insulin_units, w.calculatedTotalInsulin)
                 } else {
-                    rh.gs(app.aaps.core.objects.R.string.format_carbs, w.carbsEquivalent.toInt())
+                    rh.gs(app.aaps.core.objects.R.string.format_carbs, 0)
                 }
             } else null
         // ---- /NEW ----
@@ -1265,7 +1271,12 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             preferences.get(UnitDoubleKey.OverviewLowMark),
             preferences.get(UnitDoubleKey.OverviewHighMark)
         )
-        fullPredictionGraphData.addFullPredictionReadings(context)
+        fullPredictionGraphData.addFullPredictionReadings(
+            context = context,
+            targetMgdl = fullPredictionTargetMgdl(),
+            fromTime = predictionBounds.first,
+            toTime = predictionBounds.second
+        )
         fullPredictionGraphData.addNowLine(dateUtil.now())
         fullPredictionGraphData.setNumVerticalLabels()
         fullPredictionGraphData.formatAxis(predictionBounds.first, predictionBounds.second)
@@ -1279,6 +1290,36 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val start = min(points.minOf { it.timestamp }, dateUtil.now()) - T.mins(5).msecs()
         val end = max(points.maxOf { it.timestamp }, dateUtil.now()) + T.mins(5).msecs()
         return start to end
+    }
+
+    private fun fullPredictionTargetMgdl(): Double? {
+        val targetUsed = when {
+            config.APS        -> loop.lastRun?.constraintsProcessed?.targetBG
+            config.AAPSCLIENT -> processedDeviceStatusData.getAPSResult()?.targetBG
+            else              -> null
+        }?.takeIf { it.isFinite() && it > 0.0 }
+
+        return targetUsed ?: profileFunction.getProfile()?.getTargetMgdl()?.takeIf { it.isFinite() && it > 0.0 }
+    }
+
+    private fun forecastRequiredCarbsFromFinalLine(profile: app.aaps.core.interfaces.profile.Profile, targetMgdl: Double?): Int {
+        val target = targetMgdl ?: return 0
+        val now = dateUtil.now()
+        val isfMgdl = profile.getIsfMgdlForCarbs(now, "Overview forecast carbs", config, processedDeviceStatusData)
+        val result = ForecastCarbsCalculator.fromFinalForecast(
+            predictions = overviewData.finalAimiPredictionValues,
+            now = now,
+            targetMgdl = target,
+            isfMgdl = isfMgdl,
+            ic = profile.getIc()
+        )
+        aapsLogger.debug(
+            LTag.UI,
+            "Overview forecast carbs from AIMI_FINAL: carbs=${result?.carbs ?: 0} " +
+                "min=${result?.minBgMgdl?.let { "%.0f".format(it) } ?: "n/a"} " +
+                "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(target)}"
+        )
+        return result?.carbs ?: 0
     }
 
     private fun updateCalcProgress() {

@@ -21,6 +21,7 @@ import app.aaps.core.interfaces.aps.APS
 import app.aaps.core.interfaces.aps.APSResult
 import app.aaps.core.interfaces.aps.AutosensResult
 import app.aaps.core.interfaces.aps.CurrentTemp
+import app.aaps.core.interfaces.aps.MealData
 import app.aaps.core.interfaces.aps.OapsProfileAimi
 import app.aaps.core.interfaces.bgQualityCheck.BgQualityCheck
 import app.aaps.core.interfaces.configuration.Config
@@ -161,6 +162,29 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 normalized.trimEnd() + "\n" + finalSummary
             }
         )
+    }
+
+    private fun shouldDelayAimiForMissingMealContext(mealData: MealData, now: Long): Boolean {
+        if (mealData.mealCOB > 1.0) return false
+        val currentCob = try {
+            iobCobCalculator.getCobInfo("AIMI meal context guard").displayCob
+        } catch (_: Throwable) {
+            null
+        }
+        if (currentCob != null) return false
+
+        val latestCarbAgeMin = mealData.lastCarbTime.takeIf { it > 0L }?.let { (now - it) / 60_000.0 } ?: return false
+        val recentCarbsLikelyActive = mealData.carbs >= 5.0 && latestCarbAgeMin in 0.0..180.0
+        if (!recentCarbsLikelyActive) return false
+
+        aapsLogger.debug(
+            LTag.APS,
+            "Расчет AIMI отложен: контекст COB еще не готов после еды. " +
+                "mealCOB=${"%.1f".format(mealData.mealCOB)}, displayCOB=unknown, " +
+                "carbs=${"%.1f".format(mealData.carbs)}g, lastCarbAge=${"%.0f".format(latestCarbAgeMin)}m. " +
+                "Жду следующий цикл, чтобы не показывать ложный финальный прогноз."
+        )
+        return true
     }
 
     override fun onStart() {
@@ -614,6 +638,11 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
 
             val iobArray = iobCobCalculator.calculateIobArrayForSMB(autosensResult, SMBDefaults.exercise_mode, SMBDefaults.half_basal_exercise_target, isTempTarget)
             val mealData = iobCobCalculator.getMealDataWithWaitingForCalculationFinish()
+            if (shouldDelayAimiForMissingMealContext(mealData, now)) {
+                rxBus.send(EventResetOpenAPSGui("Расчет AIMI отложен: контекст COB после еды еще не готов"))
+                rxBus.send(EventOpenAPSUpdateGui())
+                return
+            }
             var currentActivity = 0.0
             for (i in -4..0) { //MP: -4 to 0 calculates all the insulin active during the last 5 minutes
                 val iob = iobCobCalculator.calculateFromTreatmentsAndTemps(System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(i.toLong()), profile)

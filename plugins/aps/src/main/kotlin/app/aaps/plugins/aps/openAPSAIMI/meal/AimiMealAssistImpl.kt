@@ -8,6 +8,7 @@ import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
+import app.aaps.plugins.aps.openAPSAIMI.pkpd.CarbAbsorptionModel
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -28,7 +29,7 @@ class AimiMealAssistImpl @Inject constructor(
         val label: String
     )
 
-    private val activeEpisodeRef = AtomicReference<AimiMealEpisode?>()
+    private val activeEpisodesRef = AtomicReference<List<AimiMealEpisode>>(emptyList())
 
     override fun evaluate(input: AimiMealInput): AimiMealDecision {
         val targetBg = (input.targetBgLow + input.targetBgHigh) / 2.0
@@ -61,21 +62,24 @@ class AimiMealAssistImpl @Inject constructor(
             input.carbs <= 0 -> 0.0
             else -> netCarbs.toDouble() / input.carbs.toDouble()
         }
+        val manualCorrection = input.correction
         val carbComponent = input.wizardInsulinFromCarbs * carbCoverageRatio
         val baseWithoutCarbs = input.wizardCalculatedBolus - input.wizardInsulinFromCarbs
+        val baseWithoutCarbsAndManualCorrection = baseWithoutCarbs - manualCorrection
         val effectiveBaseWithoutCarbs = when {
-            protectiveCarbs > 0 -> max(0.0, baseWithoutCarbs)
-            else -> baseWithoutCarbs
+            protectiveCarbs > 0 -> max(0.0, baseWithoutCarbsAndManualCorrection)
+            else -> baseWithoutCarbsAndManualCorrection
         }
         val adjustedCarbComponent = when {
             netCarbs <= 0 -> 0.0
             else             -> carbComponent * modeFactor
         }
         val prebolusApplied = if (protectiveCarbs == 0 && netCarbs > 0 && input.carbTimeMinutes >= 0) prebolusBonus else 0.0
-        val rawRecommendation = when {
+        val recommendationBeforeManualCorrection = when {
             protectiveCarbs > 0 && input.carbs < protectiveCarbs -> 0.0
             else -> max(0.0, effectiveBaseWithoutCarbs + adjustedCarbComponent + prebolusApplied)
         }
+        val rawRecommendation = max(0.0, recommendationBeforeManualCorrection + manualCorrection)
         val expectedEventualBg = when {
             netCarbs > 0 && rawRecommendation > 0.0 -> targetBg
             input.carbs > 0                          -> max(targetBg, input.bg)
@@ -104,10 +108,13 @@ class AimiMealAssistImpl @Inject constructor(
                 } else if (protectiveCarbs > 0 && netCarbs > 0) {
                     append("Protective carbs covered, dosing only excess carbs above requirement. ")
                 }
-                append("Base(without carbs)=${"%.2f".format(baseWithoutCarbs)}U, ")
+                append("Base(without carbs)=${"%.2f".format(baseWithoutCarbsAndManualCorrection)}U, ")
                 append("carbs ${"%.2f".format(carbComponent)}U x ${"%.2f".format(modeFactor)} = ${"%.2f".format(adjustedCarbComponent)}U")
                 if (prebolusApplied > 0.0) {
                     append(", prebolus +${"%.2f".format(prebolusApplied)}U")
+                }
+                if (manualCorrection != 0.0) {
+                    append(", ручная коррекция ${"%.2f".format(manualCorrection)}U")
                 }
                 append(" -> bolus ${"%.2f".format(roundedRecommendation)}U")
             }
@@ -127,7 +134,8 @@ class AimiMealAssistImpl @Inject constructor(
             source = decision.source,
             notes = input.notes
         )
-        activeEpisodeRef.set(episode)
+        val activeEpisodes = pruneActiveEpisodes(activeEpisodesRef.get(), input.timestamp)
+        activeEpisodesRef.set((activeEpisodes + episode).takeLast(MAX_ACTIVE_EPISODES))
         logger.debug(
             LTag.APS,
             "AIMI meal episode activated: carbs=${input.carbs} bolus=${"%.2f".format(decision.recommendedBolus)} target=${"%.0f".format(decision.targetBg)} expected=${"%.0f".format(decision.expectedEventualBg)}"
@@ -135,7 +143,14 @@ class AimiMealAssistImpl @Inject constructor(
         return episode
     }
 
-    override fun activeEpisode(): AimiMealEpisode? = activeEpisodeRef.get()
+    override fun activeEpisode(): AimiMealEpisode? {
+        val now = System.currentTimeMillis()
+        val activeEpisodes = pruneActiveEpisodes(activeEpisodesRef.get(), now)
+        if (activeEpisodes.size != activeEpisodesRef.get().size) {
+            activeEpisodesRef.set(activeEpisodes)
+        }
+        return effectiveForecastEpisode(activeEpisodes, now)
+    }
 
     private fun detectMealMode(input: AimiMealInput): String {
         if (input.carbs <= 0) return "correction"
@@ -154,9 +169,9 @@ class AimiMealAssistImpl @Inject constructor(
     private fun foodTypeModifier(selectedFoodType: String?): FoodTypeModifier =
         when (selectedFoodType?.lowercase()) {
             "fast" -> FoodTypeModifier(
-                carbFactor = 1.08,
-                prebolusFactor = 1.25,
-                label = "быстрая еда"
+                carbFactor = 0.80,
+                prebolusFactor = 0.0,
+                label = "быстрые углеводы: раннее всасывание, bolus осторожнее"
             )
             "slow" -> FoodTypeModifier(
                 carbFactor = 0.92,
@@ -169,4 +184,81 @@ class AimiMealAssistImpl @Inject constructor(
                 label = "обычная еда"
             )
         }
+
+    private fun effectiveForecastEpisode(episodes: List<AimiMealEpisode>, now: Long): AimiMealEpisode? {
+        if (episodes.isEmpty()) return null
+
+        val remainingByType = episodes
+            .groupBy { normalizeFoodType(it.selectedFoodType) }
+            .mapValues { (_, typedEpisodes) ->
+                typedEpisodes.sumOf { episode -> episode.carbs * remainingFraction(episode, now) }
+            }
+            .filterValues { it > 0.5 }
+        if (remainingByType.isEmpty()) {
+            logger.debug(LTag.APS, "AIMI активные углеводы закончились: остаток меньше 0.5 г")
+            return null
+        }
+
+        val totalRemaining = remainingByType.values.sum()
+        val dominant = remainingByType.maxByOrNull { it.value }
+        val dominantShare = dominant?.value?.div(totalRemaining) ?: 0.0
+        val forecastFoodType = if (dominant != null && dominantShare >= DOMINANT_TYPE_SHARE) {
+            dominant.key
+        } else {
+            "balanced"
+        }
+        if (forecastFoodType == "balanced" && remainingByType.size > 1) {
+            logger.debug(
+                LTag.APS,
+                "AIMI mixed active carb types: " +
+                    remainingByType.entries.joinToString { "${it.key}=${"%.1f".format(it.value)}g" } +
+                    " -> balanced forecast"
+            )
+        }
+
+        val latest = episodes.maxByOrNull { it.startedAt } ?: return null
+        return latest.copy(
+            startedAt = episodes.minOf { it.startedAt },
+            selectedFoodType = forecastFoodType,
+            carbs = totalRemaining.roundToInt().coerceAtLeast(0),
+            deliveredBolus = episodes.sumOf { it.deliveredBolus },
+            carbTimeMinutes = 0,
+            notes = "AIMI активные углеводы: " + remainingByType.entries.joinToString { "${it.key}=${"%.1f".format(it.value)}g" }
+        )
+    }
+
+    private fun pruneActiveEpisodes(episodes: List<AimiMealEpisode>, now: Long): List<AimiMealEpisode> =
+        episodes.filter { episode ->
+            episode.carbs > 0 &&
+                now - episode.startedAt <= activeWindowMinutes(normalizeFoodType(episode.selectedFoodType)) * 60_000L &&
+                episode.carbs * remainingFraction(episode, now) > 0.5
+        }
+
+    private fun remainingFraction(episode: AimiMealEpisode, now: Long): Double {
+        val carbStart = episode.startedAt + episode.carbTimeMinutes * 60_000L
+        val minutesSinceCarbs = (now - carbStart) / 60_000.0
+        return CarbAbsorptionModel.remainingFraction(
+            elapsedMinutes = minutesSinceCarbs,
+            selectedFoodType = normalizeFoodType(episode.selectedFoodType)
+        )
+    }
+
+    private fun normalizeFoodType(selectedFoodType: String?): String =
+        when (selectedFoodType?.lowercase()) {
+            "fast" -> "fast"
+            "slow" -> "slow"
+            else -> "balanced"
+        }
+
+    private fun activeWindowMinutes(foodType: String): Long =
+        when (foodType) {
+            "fast" -> 75L
+            "slow" -> 300L
+            else -> 210L
+        }
+
+    companion object {
+        private const val MAX_ACTIVE_EPISODES = 12
+        private const val DOMINANT_TYPE_SHARE = 0.75
+    }
 }

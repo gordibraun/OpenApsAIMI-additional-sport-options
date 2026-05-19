@@ -99,6 +99,43 @@ class AdvancedPredictionEngineTest {
     }
 
     @Test
+    fun `below target unannounced rise uses short rebound momentum`() {
+        val profile = mockk<OapsProfileAimi>(relaxed = true)
+        every { profile.carb_ratio } returns 10.0
+        every { profile.peakTime } returns 75.0
+
+        val ordinaryUam = AdvancedPredictionEngine.predict(
+            currentBG = 107.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 43.0,
+            cobG = 0.0,
+            profile = profile,
+            delta = 4.0,
+            observedCarbImpactMgdlPer5m = 8.0,
+            remainingCiPeakMgdlPer5m = 8.0,
+            uamConfidence = 0.8,
+            targetBG = 100.0,
+            horizonMinutes = 120
+        )
+        val belowTargetRebound = AdvancedPredictionEngine.predict(
+            currentBG = 107.0,
+            iobArray = emptyArray(),
+            finalSensitivity = 43.0,
+            cobG = 0.0,
+            profile = profile,
+            delta = 4.0,
+            observedCarbImpactMgdlPer5m = 8.0,
+            remainingCiPeakMgdlPer5m = 8.0,
+            uamConfidence = 0.8,
+            targetBG = 117.0,
+            horizonMinutes = 120
+        )
+
+        assertTrue(belowTargetRebound.last() < ordinaryUam.last())
+        assertTrue((belowTargetRebound.maxOrNull() ?: 0.0) <= (ordinaryUam.maxOrNull() ?: 0.0))
+    }
+
+    @Test
     fun `unified momentum is shorter for fast carbs than slow carbs`() {
         val profile = mockk<OapsProfileAimi>(relaxed = true)
         every { profile.carb_ratio } returns 10.0
@@ -128,6 +165,45 @@ class AdvancedPredictionEngineTest {
         )
 
         assertTrue(fast.last() < slow.last())
+    }
+
+    @Test
+    fun `fast explicit carbs do not keep a long observed carb impact plateau`() {
+        val profile = mockk<OapsProfileAimi>(relaxed = true)
+        every { profile.carb_ratio } returns 6.0
+        every { profile.peakTime } returns 75.0
+
+        val now = System.currentTimeMillis()
+        val activeInsulin = Array(49) { index ->
+            IobTotal(
+                time = now + index * 5 * 60_000L,
+                iob = 7.7,
+                activity = (0.046 - index * 0.00055).coerceAtLeast(0.010)
+            )
+        }
+
+        val forecast = AdvancedPredictionEngine.predict(
+            currentBG = 98.0,
+            iobArray = activeInsulin,
+            finalSensitivity = 40.0,
+            cobG = 57.0,
+            profile = profile,
+            selectedFoodType = "fast",
+            delta = 9.0,
+            plannedSmbU = 0.0,
+            plannedRateUph = 0.4,
+            profileBasalUph = 0.95,
+            plannedDurationMin = 30,
+            piShare = 1.0,
+            observedCarbImpactMgdlPer5m = 19.0,
+            remainingCiPeakMgdlPer5m = 29.0,
+            explicitCarbEntry = true,
+            freshSmbPressureU = 1.1,
+            horizonMinutes = 240
+        )
+
+        assertTrue(forecast.drop(20).any { it < 401.0 })
+        assertTrue(forecast.last() < 360.0)
     }
 
     @Test
