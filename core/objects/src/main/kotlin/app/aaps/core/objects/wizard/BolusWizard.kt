@@ -603,6 +603,8 @@ class BolusWizard @Inject constructor(
         val confirmMessage = confirmMessageAfterConstraints(ctx, advisor = false, quickWizardEntry)
         OKDialog.showConfirmation(ctx, rh.gs(app.aaps.core.ui.R.string.boluswizard), confirmMessage, {
             if (insulinAfterConstraints > 0 || carbs > 0) {
+                aimiMealAssist.markTreatmentAccepted(dateUtil.now())
+                rxBus.send(EventRefreshOverview("WizardDialog treatment accepted", now = true))
                 if (useSuperBolus) {
                     if (loop.allowedNextModes().contains(RM.Mode.SUPER_BOLUS)) {
                         loop.handleRunningModeChange(
@@ -663,13 +665,16 @@ class BolusWizard @Inject constructor(
                         commandQueue.bolus(this, object : Callback() {
                             override fun run() {
                                 if (!result.success) {
+                                    aimiMealAssist.clearPendingTreatment()
                                     uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
                                 } else if (useAlarm && carbs > 0 && carbTime > 0) {
                                     automation.scheduleTimeToEatReminder(T.mins(carbTime.toLong()).secs().toInt())
                                 }
                                 if (result.success) {
+                                    aimiMealAssist.markTreatmentAccepted(dateUtil.now())
                                     aimiMealDecision?.let { aimiMealAssist.activate(buildAimiMealInput(), it) }
                                 }
+                                rxBus.send(EventRefreshOverview("WizardDialog treatment delivered", now = true))
                             }
                         })
                     }

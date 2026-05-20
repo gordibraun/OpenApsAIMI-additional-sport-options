@@ -60,4 +60,7 @@ interface AimiMealAssist {
     fun evaluate(input: AimiMealInput): AimiMealDecision
     fun activate(input: AimiMealInput, decision: AimiMealDecision): AimiMealEpisode
     fun activeEpisode(): AimiMealEpisode?
+    fun markTreatmentAccepted(timestamp: Long) {}
+    fun clearPendingTreatment() {}
+    fun lastTreatmentAcceptedAt(): Long = 0L
 }

@@ -10,6 +10,7 @@ import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.CarbAbsorptionModel
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import java.time.Instant
@@ -30,6 +31,7 @@ class AimiMealAssistImpl @Inject constructor(
     )
 
     private val activeEpisodesRef = AtomicReference<List<AimiMealEpisode>>(emptyList())
+    private val lastAcceptedTreatmentAtRef = AtomicLong(0L)
 
     override fun evaluate(input: AimiMealInput): AimiMealDecision {
         val targetBg = (input.targetBgLow + input.targetBgHigh) / 2.0
@@ -151,6 +153,16 @@ class AimiMealAssistImpl @Inject constructor(
         }
         return effectiveForecastEpisode(activeEpisodes, now)
     }
+
+    override fun markTreatmentAccepted(timestamp: Long) {
+        lastAcceptedTreatmentAtRef.set(timestamp.coerceAtLeast(0L))
+    }
+
+    override fun clearPendingTreatment() {
+        lastAcceptedTreatmentAtRef.set(0L)
+    }
+
+    override fun lastTreatmentAcceptedAt(): Long = lastAcceptedTreatmentAtRef.get()
 
     private fun detectMealMode(input: AimiMealInput): String {
         if (input.carbs <= 0) return "correction"

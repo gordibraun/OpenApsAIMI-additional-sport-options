@@ -35,6 +35,7 @@ import app.aaps.core.interfaces.rx.events.EventEffectiveProfileSwitchChanged
 import app.aaps.core.interfaces.rx.events.EventNewBG
 import app.aaps.core.interfaces.rx.events.EventNewHistoryData
 import app.aaps.core.interfaces.rx.events.EventPreferenceChange
+import app.aaps.core.interfaces.rx.events.EventRefreshOverview
 import app.aaps.core.interfaces.rx.events.EventRunningModeChange
 import app.aaps.core.interfaces.rx.events.EventTherapyEventChange
 import app.aaps.core.interfaces.utils.DateUtil
@@ -62,6 +63,7 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -347,16 +349,29 @@ class IobCobCalculatorPlugin @Inject constructor(
         var futureCarbs = 0.0
         val now = dateUtil.now()
         var timestamp = now
-        val carbs = persistenceLayer.getCarbsFromTimeExpanded(autosensData?.time ?: now, true)
+        val autosensTime = autosensData?.time ?: now
+        val carbs = persistenceLayer.getCarbsFromTimeExpanded(autosensTime - T.hours(6).msecs(), true)
         if (autosensData != null) {
             displayCob = autosensData.cob
+            val activeCarbs = autosensData.activeCarbsList
             carbs.forEach { carb ->
-                if (carb.timestamp > autosensData.time && carb.timestamp <= now) {
-                    displayCob = displayCob!! + carb.amount
-                    displayCob = max(displayCob, 0.0)
+                if (carb.timestamp <= now) {
+                    val alreadyRepresented = activeCarbs.any {
+                        abs(it.time - carb.timestamp) <= 1000L && abs(it.carbs - carb.amount) < 0.01
+                    }
+                    val addedAfterAutosens = carb.timestamp > autosensTime || carb.dateCreated > autosensTime
+                    if (!alreadyRepresented && addedAfterAutosens) {
+                        displayCob = max((displayCob ?: 0.0) + carb.amount, 0.0)
+                        aapsLogger.debug(
+                            LTag.AUTOSENS,
+                            "COB display includes pending carb: reason=$reason " +
+                                "carbTime=${dateUtil.dateAndTimeAndSecondsString(carb.timestamp)} " +
+                                "amount=${carb.amount} autosensTime=${dateUtil.dateAndTimeAndSecondsString(autosensTime)}"
+                        )
+                    }
                 }
             }
-            timestamp = autosensData.time
+            timestamp = autosensTime
         }
         // Future carbs
         carbs.forEach { carb -> if (carb.timestamp > now) futureCarbs += carb.amount }
@@ -432,8 +447,10 @@ class IobCobCalculatorPlugin @Inject constructor(
 
     @Synchronized
     private fun scheduleHistoryDataChange(event: EventNewHistoryData) {
-        aapsLogger.debug(LTag.AUTOSENS, "Refreshing predictions immediately after history data change")
+        aapsLogger.debug(LTag.AUTOSENS, "Refreshing overview data immediately after history data change")
         calculationWorkflow.runOnReceivedPredictions(overviewData)
+        calculationWorkflow.runOnEventTherapyEventChange(overviewData)
+        rxBus.send(EventRefreshOverview("History data changed", now = true))
 
         // if there is nothing scheduled or asking reload deeper to the past
         if (scheduledEvent == null || event.oldDataTimestamp < (scheduledEvent?.oldDataTimestamp ?: 0L)) {

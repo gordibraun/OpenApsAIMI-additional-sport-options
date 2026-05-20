@@ -514,9 +514,9 @@ class LoopPlugin @Inject constructor(
     override fun invoke(initiator: String, allowNotification: Boolean, tempBasalFallback: Boolean) {
         try {
             aapsLogger.debug(LTag.APS, "invoke from $initiator")
-            val startupForecastOnly = initiator == "EventAppInitialized"
-            val currentMode = if (startupForecastOnly) persistenceLayer.getRunningModeActiveAt(dateUtil.now()) else runningModeRecord
-            if (currentMode.mode == RM.Mode.DISABLED_LOOP && !startupForecastOnly) {
+            val forecastOnly = initiator == "EventAppInitialized" || initiator.startsWith("ForecastOnly")
+            val currentMode = if (forecastOnly) persistenceLayer.getRunningModeActiveAt(dateUtil.now()) else runningModeRecord
+            if (currentMode.mode == RM.Mode.DISABLED_LOOP && !forecastOnly) {
                 val message = rh.gs(app.aaps.core.ui.R.string.loop_disabled) + "\n" + currentMode.reasons
                 aapsLogger.debug(LTag.APS, message)
                 rxBus.send(EventLoopSetLastRunGui(message))
@@ -533,7 +533,7 @@ class LoopPlugin @Inject constructor(
             }
 
             // Check if pump info is loaded
-            if (!startupForecastOnly && pump.baseBasalRate < 0.01) return
+            if (!forecastOnly && pump.baseBasalRate < 0.01) return
             val usedAPS = activePlugin.activeAPS
             if (usedAPS.isEnabled()) {
                 usedAPS.invoke(initiator, tempBasalFallback)
@@ -591,8 +591,8 @@ class LoopPlugin @Inject constructor(
                 lastRun.lastSMBRequest = 0
                 scheduleBuildAndStoreDeviceStatus("APS result")
 
-                if (startupForecastOnly) {
-                    aapsLogger.debug(LTag.APS, "Startup forecast-only invoke finished; skipping enactment path")
+                if (forecastOnly) {
+                    aapsLogger.debug(LTag.APS, "Forecast-only invoke finished; skipping enactment path")
                     rxBus.send(EventLoopUpdateGui())
                     return
                 }

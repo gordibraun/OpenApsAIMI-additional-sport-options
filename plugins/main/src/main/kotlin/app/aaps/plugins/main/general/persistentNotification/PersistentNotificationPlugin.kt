@@ -9,6 +9,7 @@ import androidx.core.app.RemoteInput
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.aps.Loop
+import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.db.ProcessedTbrEbData
 import app.aaps.core.interfaces.iob.GlucoseStatusProvider
 import app.aaps.core.interfaces.iob.IobCobCalculator
@@ -59,7 +60,8 @@ class PersistentNotificationPlugin @Inject constructor(
     private val glucoseStatusProvider: GlucoseStatusProvider,
     private val config: Config,
     private val decimalFormatter: DecimalFormatter,
-    private val loop: Loop
+    private val loop: Loop,
+    private val persistenceLayer: PersistenceLayer
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.GENERAL)
@@ -151,20 +153,21 @@ class PersistentNotificationPlugin @Inject constructor(
             //IOB
             val bolusIob = iobCobCalculator.calculateIobFromBolus().round()
             val basalIob = iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended().round()
+            val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
             line2 =
                 rh.gs(app.aaps.core.ui.R.string.treatments_iob_label_string) + " " + rh.gs(app.aaps.core.ui.R.string.format_insulin_units, (bolusIob.iob + basalIob.basaliob)) + " " + rh.gs(
                     app.aaps.core.ui.R
                         .string.cob
                 ) + ": " + iobCobCalculator.getCobInfo(
                     "PersistentNotificationPlugin"
-                ).withAimiResultCob(loop, System.currentTimeMillis()).generateCOBString(decimalFormatter)
+                ).withAimiResultCob(loop, System.currentTimeMillis(), lastCarbsChangeTime).generateCOBString(decimalFormatter)
             val line2aa =
                 rh.gs(app.aaps.core.ui.R.string.treatments_iob_label_string) + " " + rh.gs(app.aaps.core.ui.R.string.format_insulin_units, (bolusIob.iob + basalIob.basaliob)) + ". " + rh.gs(
                     app.aaps.core.ui.R
                         .string.cob
                 ) + ": " + iobCobCalculator.getCobInfo(
                     "PersistentNotificationPlugin"
-                ).withAimiResultCob(loop, System.currentTimeMillis()).generateCOBString(decimalFormatter) + "."
+                ).withAimiResultCob(loop, System.currentTimeMillis(), lastCarbsChangeTime).generateCOBString(decimalFormatter) + "."
             line3 = rh.gs(app.aaps.core.ui.R.string.pump_base_basal_rate, pump.baseBasalRate)
             var line3aa = rh.gs(app.aaps.core.ui.R.string.pump_base_basal_rate, pump.baseBasalRate) + "."
             line3 += " - " + profileFunction.getProfileName()

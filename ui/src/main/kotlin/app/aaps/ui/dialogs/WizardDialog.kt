@@ -26,6 +26,7 @@ import app.aaps.core.data.configuration.Constants
 import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.TT
 import app.aaps.core.data.time.T
+import app.aaps.core.interfaces.aps.AimiMealAssist
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
@@ -103,6 +104,7 @@ class WizardDialog : DaggerDialogFragment() {
     @Inject lateinit var config: Config
     @Inject lateinit var processedDeviceStatusData: ProcessedDeviceStatusData
     @Inject lateinit var loop: Loop
+    @Inject lateinit var aimiMealAssist: AimiMealAssist
     private val handler = Handler(HandlerThread(this::class.simpleName + "Handler").also { it.start() }.looper)
 
     private var queryingProtection = false
@@ -721,6 +723,7 @@ class WizardDialog : DaggerDialogFragment() {
 
     private fun forecastRequiredCarbsFromFinalLine(profile: Profile, tempTarget: TT?, useTT: Boolean): Int {
         val now = dateUtil.now()
+        if (finalForecastPendingTreatmentRecalculation(now, "Wizard forecast carbs")) return 0
         val targetMgdl = forecastCarbsTargetMgdl(profile, tempTarget, useTT) ?: return 0
         val result = ForecastCarbsCalculator.fromFinalForecast(
             predictions = overviewData.finalAimiPredictionValues,
@@ -736,6 +739,21 @@ class WizardDialog : DaggerDialogFragment() {
                 "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(targetMgdl)}"
         )
         return result?.carbs ?: 0
+    }
+
+    private fun finalForecastPendingTreatmentRecalculation(now: Long, caller: String): Boolean {
+        val lastRunTime = loop.lastRun?.lastAPSRun ?: return false
+        val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
+        val lastBolusChangeTime = persistenceLayer.getNewestBolus()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
+        val lastAcceptedTreatmentTime = aimiMealAssist.lastTreatmentAcceptedAt()
+        val latestTreatmentChangeTime = maxOf(lastCarbsChangeTime, lastBolusChangeTime, lastAcceptedTreatmentTime)
+        if (latestTreatmentChangeTime <= lastRunTime) return false
+        aapsLogger.debug(
+            LTag.APS,
+            "$caller waits for treatment-aware APS recalculation: latestTreatment=${dateUtil.dateAndTimeString(latestTreatmentChangeTime)} " +
+                "lastAPS=${dateUtil.dateAndTimeString(lastRunTime)} now=${dateUtil.dateAndTimeString(now)}"
+        )
+        return true
     }
 
     private fun forecastCarbsTargetMgdl(profile: Profile, tempTarget: TT?, useTT: Boolean): Double? {
@@ -929,7 +947,11 @@ class WizardDialog : DaggerDialogFragment() {
             targetHighMgdl = targetHighMgdl,
             selectedFoodType = selectedFoodType
         )
-        val candidateOffsets = timingCandidateOffsets(forecast, selectedFoodType)
+        val candidateOffsets = timingCandidateOffsets(
+            forecast = forecast,
+            selectedFoodType = selectedFoodType,
+            plannedBolusEffectMgdl = plannedBolusEffectMgdl
+        )
             .let { offsets ->
                 urgency.maxOffsetMinutes?.let { maxOffset ->
                     offsets.filter { it <= maxOffset }
@@ -950,7 +972,15 @@ class WizardDialog : DaggerDialogFragment() {
                 selectedFoodType = selectedFoodType
             )
         }
-        val chosen = candidates.minWithOrNull(compareBy<CarbTimingCandidate> { it.score }.thenBy { it.offsetMinutes }) ?: return null
+        val currentBgMgdl = forecast.firstOrNull()?.bgMgdl ?: 0.0
+        val comfortableLowMgdl = targetLowMgdl - 5.0
+        val comfortableHighMgdl = max(targetHighMgdl + 35.0, currentBgMgdl + 25.0)
+        val comfortableCandidates = candidates
+            .filter { it.minBgMgdl >= comfortableLowMgdl && it.maxBgMgdl <= comfortableHighMgdl }
+        val chosen = comfortableCandidates.minByOrNull { it.offsetMinutes }
+            ?: candidates.minWithOrNull(compareBy<CarbTimingCandidate> { it.score }.thenBy { it.offsetMinutes })
+            ?: return null
+        val noComfortableTime = comfortableCandidates.isEmpty()
         val nowCandidate = candidates.firstOrNull { it.offsetMinutes == 0 }
         val details = mutableListOf<String>()
         if (selectedCarbTime != chosen.offsetMinutes) {
@@ -960,7 +990,6 @@ class WizardDialog : DaggerDialogFragment() {
         if (nowCandidate != null && chosen.offsetMinutes > 0 && nowCandidate.score > chosen.score * 1.12) {
             details += "Если съесть сейчас: прогноз хуже"
         }
-        val currentBgMgdl = forecast.firstOrNull()?.bgMgdl ?: 0.0
         val baselineMaxMgdl = timingScoringPoints(forecast)
             .maxOfOrNull { it.bgMgdl } ?: currentBgMgdl
         val carbAddedPeakMgdl = chosen.maxBgMgdl - baselineMaxMgdl
@@ -968,6 +997,9 @@ class WizardDialog : DaggerDialogFragment() {
             details += "Пик уже есть в текущем прогнозе; время еды не должно лечить этот пик"
         }
         val mainReason = when {
+            noComfortableTime && chosen.maxBgMgdl > comfortableHighMgdl ->
+                "лучшее время в ближайшем окне все еще дает пик до ${profileUtil.fromMgdlToStringInUnits(chosen.maxBgMgdl)}"
+
             chosen.minBgMgdl < targetLowMgdl - 5.0 ->
                 "мин ${profileUtil.fromMgdlToStringInUnits(chosen.minBgMgdl)} ниже цели"
 
@@ -996,10 +1028,16 @@ class WizardDialog : DaggerDialogFragment() {
         )
     }
 
-    private fun timingCandidateOffsets(forecast: List<TimingForecastPoint>, selectedFoodType: String): List<Int> {
+    private fun timingCandidateOffsets(
+        forecast: List<TimingForecastPoint>,
+        selectedFoodType: String,
+        plannedBolusEffectMgdl: Double
+    ): List<Int> {
         val latestForecastMinute = timingScoringPoints(forecast).maxOfOrNull { it.minutes } ?: return listOf(0)
-        val latestOffsetWithVisiblePeak = (latestForecastMinute - carbTimingPeakMinutes(selectedFoodType)).coerceAtLeast(0)
-        return (0..latestOffsetWithVisiblePeak step 5).toList().ifEmpty { listOf(0) }
+        val latestOffsetWithVisibleAbsorption = (latestForecastMinute - carbAbsorptionMinutes(selectedFoodType)).coerceAtLeast(0)
+        val actionableOffset = carbTimingActionableWindowMinutes(selectedFoodType, plannedBolusEffectMgdl)
+        val maxOffset = min(latestOffsetWithVisibleAbsorption, actionableOffset)
+        return (0..maxOffset step 5).toList().ifEmpty { listOf(0) }
     }
 
     private fun carbTimingUrgency(
@@ -1144,6 +1182,22 @@ class WizardDialog : DaggerDialogFragment() {
             "slow" -> 80
             else -> 50
         }
+
+    private fun carbAbsorptionMinutes(selectedFoodType: String): Int =
+        when (selectedFoodType) {
+            "fast" -> 45
+            "slow" -> 240
+            else -> 165
+        }
+
+    private fun carbTimingActionableWindowMinutes(selectedFoodType: String, plannedBolusEffectMgdl: Double): Int {
+        val hasMeaningfulBolus = plannedBolusEffectMgdl >= 5.0
+        return when (selectedFoodType) {
+            "fast" -> if (hasMeaningfulBolus) 60 else 45
+            "slow" -> if (hasMeaningfulBolus) 180 else 120
+            else -> if (hasMeaningfulBolus) 120 else 90
+        }
+    }
 
     private fun carbUsefulLeadMinutes(selectedFoodType: String): Int =
         when (selectedFoodType) {

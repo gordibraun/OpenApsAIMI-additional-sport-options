@@ -209,8 +209,9 @@ class Widget : AppWidgetProvider() {
     private fun updateIobCob(views: RemoteViews) {
         views.setTextViewText(R.id.iob, iobText())
         // cob
+        val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
         var cobText = iobCobCalculator.getCobInfo("Overview COB")
-            .withAimiResultCob(loop, dateUtil.now())
+            .withAimiResultCob(loop, dateUtil.now(), lastCarbsChangeTime)
             .displayText(rh, decimalFormatter)
             ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short)
 

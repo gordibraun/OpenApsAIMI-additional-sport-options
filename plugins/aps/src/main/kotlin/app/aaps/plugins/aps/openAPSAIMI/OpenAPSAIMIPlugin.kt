@@ -476,7 +476,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
 
     override fun invoke(initiator: String, tempBasalFallback: Boolean) {
         aapsLogger.debug(LTag.APS, "invoke from $initiator tempBasalFallback: $tempBasalFallback")
-        val startupForecastOnly = initiator == "EventAppInitialized"
+        val forecastOnly = initiator == "EventAppInitialized" || initiator.startsWith("ForecastOnly")
         val glucoseStatus = getGlucoseStatusData(false)
         if (glucoseStatus == null) {
             rxBus.send(EventResetOpenAPSGui(rh.gs(R.string.openapsma_no_glucose_data)))
@@ -495,10 +495,10 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         val profileBasalFallback = profile.getBasal()
         val activeProfileIsf = profile.getProfileIsfMgdl()
         val currentBasalForInvoke =
-            if (startupForecastOnly && pump.baseBasalRate < 0.01) {
+            if (forecastOnly && pump.baseBasalRate < 0.01) {
                 aapsLogger.debug(
                     LTag.APS,
-                    "Startup invoke: pump base basal is unavailable, using profile basal fallback $profileBasalFallback U/h"
+                    "Forecast-only invoke: pump base basal is unavailable, using profile basal fallback $profileBasalFallback U/h"
                 )
                 profileBasalFallback
             } else {

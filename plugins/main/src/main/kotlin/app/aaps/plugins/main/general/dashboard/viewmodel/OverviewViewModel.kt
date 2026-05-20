@@ -162,9 +162,10 @@ class OverviewViewModel(
             profileUtil.fromMgdlToSignedStringInUnits(it)
         } ?: resourceHelper.gs(app.aaps.core.ui.R.string.value_unavailable_short)
         val iobText = totalIobText()
+        val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
         val cobText = iobCobCalculator
             .getCobInfo("Dashboard COB")
-            .withAimiResultCob(loop, dateUtil.now())
+            .withAimiResultCob(loop, dateUtil.now(), lastCarbsChangeTime)
             .displayText(resourceHelper, decimalFormatter)
             ?: resourceHelper.gs(app.aaps.core.ui.R.string.value_unavailable_short)
         val timeAgo = dateUtil.minAgoShort(lastBg?.timestamp)

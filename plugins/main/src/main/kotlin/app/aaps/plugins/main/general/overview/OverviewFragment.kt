@@ -33,6 +33,7 @@ import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
 import app.aaps.core.graph.data.GraphViewWithCleanup
+import app.aaps.core.interfaces.aps.AimiMealAssist
 import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.automation.Automation
@@ -170,6 +171,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     @Inject lateinit var commandQueue: CommandQueue
     @Inject lateinit var notificationUiBinder: NotificationUiBinder
     @Inject lateinit var bolusWizardProvider: Provider<BolusWizard>
+    @Inject lateinit var aimiMealAssist: AimiMealAssist
 
     private val disposable = CompositeDisposable()
 
@@ -1111,9 +1113,11 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     private fun updateIobCob() {
         val iobText = iobText()
         val iobDialogText = iobDialogText()
-        val cobInfo = iobCobCalculator.getCobInfo("Overview COB").withAimiResultCob(loop, dateUtil.now())
+        val lastCarbs = persistenceLayer.getNewestCarbs()
+        val lastCarbsChangeTime = lastCarbs?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
+        val cobInfo = iobCobCalculator.getCobInfo("Overview COB").withAimiResultCob(loop, dateUtil.now(), lastCarbsChangeTime)
         val displayText = cobInfo.displayText(rh, decimalFormatter)
-        val lastCarbsTime = persistenceLayer.getNewestCarbs()?.timestamp ?: 0L
+        val lastCarbsTime = lastCarbs?.timestamp ?: 0L
 
         // ---- NEW: посчитать то же ядро, что в WizardDialog, но без UI ----
         val profileStore = activePlugin.activeProfileSource.profile
@@ -1131,10 +1135,12 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val wizardUsePercentage = preferences.get(BooleanKey.WizardCorrectionPercent)
         val cob = if (wizardUseCob) displayCob else 0.0
 
+        var overviewForecastRequiredCarbs = 0
         val wizardLine: String? =
             if (profile != null && profileStore != null) {
                 val profileName = profileFunction.getProfileName()
                 val forecastRequiredCarbs = forecastRequiredCarbsFromFinalLine(profile, fullPredictionTargetMgdl())
+                overviewForecastRequiredCarbs = forecastRequiredCarbs
                 val w = bolusWizardProvider.get().doCalc(
                     profile,                       // specificProfile
                     profileName,                   // profileName
@@ -1195,7 +1201,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                 }
 
                 // Анимация — оставляем по старой логике
-                if (constraintsProcessed.carbsReq > 0) {
+                if (overviewForecastRequiredCarbs > 0) {
                     if (carbAnimation?.isRunning == false) carbAnimation?.start()
                 } else {
                     carbAnimation?.stop()
@@ -1387,7 +1393,8 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     }
 
     private fun fullPredictionBounds(): Pair<Long, Long>? {
-        val points = overviewData.predictionValues + freshFinalAimiPredictionValues()
+        val finalPoints = freshFinalAimiPredictionValues()
+        val points = finalPoints.takeIf { it.isNotEmpty() } ?: overviewData.predictionValues
         if (points.isEmpty()) return null
 
         val start = min(points.minOf { it.timestamp }, dateUtil.now()) - T.mins(5).msecs()
@@ -1423,7 +1430,9 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     private fun SourceSensor.isFinalAimiDisplaySource(): Boolean =
         this == SourceSensor.AIMI_FINAL_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
-            this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
+            this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION ||
+            this == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||
+            this == SourceSensor.AIMI_FINAL_PREDICTION_STALE
 
     private fun fullPredictionTargetMgdl(): Double? {
         val targetUsed = when {
@@ -1438,6 +1447,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     private fun forecastRequiredCarbsFromFinalLine(profile: app.aaps.core.interfaces.profile.Profile, targetMgdl: Double?): Int {
         val target = targetMgdl ?: return 0
         val now = dateUtil.now()
+        if (finalForecastPendingTreatmentRecalculation(now, "Overview forecast carbs")) return 0
         val isfMgdl = profile.getIsfMgdlForCarbs(now, "Overview forecast carbs", config, processedDeviceStatusData)
         val result = ForecastCarbsCalculator.fromFinalForecast(
             predictions = freshFinalAimiPredictionValues(),
@@ -1453,6 +1463,21 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                 "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(target)}"
         )
         return result?.carbs ?: 0
+    }
+
+    private fun finalForecastPendingTreatmentRecalculation(now: Long, caller: String): Boolean {
+        val lastRunTime = loop.lastRun?.lastAPSRun ?: return false
+        val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
+        val lastBolusChangeTime = persistenceLayer.getNewestBolus()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
+        val lastAcceptedTreatmentTime = aimiMealAssist.lastTreatmentAcceptedAt()
+        val latestTreatmentChangeTime = maxOf(lastCarbsChangeTime, lastBolusChangeTime, lastAcceptedTreatmentTime)
+        if (latestTreatmentChangeTime <= lastRunTime) return false
+        aapsLogger.debug(
+            LTag.UI,
+            "$caller waits for treatment-aware APS recalculation: latestTreatment=${dateUtil.dateAndTimeString(latestTreatmentChangeTime)} " +
+                "lastAPS=${dateUtil.dateAndTimeString(lastRunTime)} now=${dateUtil.dateAndTimeString(now)}"
+        )
+        return true
     }
 
     private fun updateCalcProgress() {

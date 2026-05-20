@@ -72,13 +72,14 @@ class GraphData @Inject constructor(
             .map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowPredictionMarkMgdl()) }
         val finalAimiSeries = PointsWithLabelGraphSeries(Array(finalAimiPoints.size) { i -> finalAimiPoints[i] })
         val predictionSeries = overviewData.predictionsGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
+        val showLegacyPredictions = addPredictions && finalAimiPoints.isEmpty()
 
         maxY = max(maxY, finalAimiSeries.highestValueY)
-        if (addPredictions) maxY = max(maxY, predictionSeries.highestValueY)
+        if (showLegacyPredictions) maxY = max(maxY, predictionSeries.highestValueY)
 
         addSeries(bgSeries)
         addSeries(finalAimiSeries)
-        if (addPredictions) addSeries(predictionSeries)
+        if (showLegacyPredictions) addSeries(predictionSeries)
         bgSeries.setOnDataPointTapListener { _, dataPoint ->
             if (dataPoint is GlucoseValueDataPoint) ToastUtils.infoToast(context, dataPoint.label)
         }
@@ -89,8 +90,12 @@ class GraphData @Inject constructor(
 
     fun addFullPredictionReadings(context: Context?, targetMgdl: Double? = null, fromTime: Long? = null, toTime: Long? = null) {
         val lowMarkMgdl = lowPredictionMarkMgdl()
-        val predictionPoints = overviewData.predictionValues.map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
         val finalAimiPoints = finalAimiPredictionValuesForDisplay().map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
+        val predictionPoints = if (finalAimiPoints.isEmpty()) {
+            overviewData.predictionValues.map { GlucoseValueDataPoint(it, profileUtil, rh, dateUtil, lowMarkMgdl) }
+        } else {
+            emptyList()
+        }
         val allPoints = predictionPoints + finalAimiPoints
         if (allPoints.isEmpty()) {
             maxY = if (units == GlucoseUnit.MGDL) 180.0 else 10.0
@@ -146,7 +151,9 @@ class GraphData @Inject constructor(
     private fun SourceSensor.isFinalAimiDisplaySource(): Boolean =
         this == SourceSensor.AIMI_FINAL_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
-            this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
+            this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION ||
+            this == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||
+            this == SourceSensor.AIMI_FINAL_PREDICTION_STALE
 
     private fun addFullPredictionTargetLine(fromTime: Long, toTime: Long, targetInUnits: Double) {
         val targetPoints = arrayOf(

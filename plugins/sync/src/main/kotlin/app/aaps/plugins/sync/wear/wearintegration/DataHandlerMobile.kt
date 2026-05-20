@@ -21,6 +21,7 @@ import app.aaps.core.data.time.T
 import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
 import app.aaps.core.data.ue.ValueWithUnit
+import app.aaps.core.interfaces.aps.AimiMealAssist
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.automation.Automation
 import app.aaps.core.interfaces.automation.AutomationEvent
@@ -35,6 +36,7 @@ import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.logging.UserEntryLogger
 import app.aaps.core.interfaces.maintenance.ImportExportPrefs
 import app.aaps.core.interfaces.nsclient.ProcessedDeviceStatusData
+import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.profile.Profile
@@ -74,6 +76,7 @@ import app.aaps.core.objects.extensions.withAimiResultCob
 import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.extensions.toStringShort
 import app.aaps.core.objects.extensions.valueToUnits
+import app.aaps.core.objects.forecast.ForecastCarbsCalculator
 import app.aaps.core.objects.wizard.BolusWizard
 import app.aaps.core.objects.wizard.QuickWizard
 import app.aaps.core.objects.wizard.QuickWizardEntry
@@ -112,6 +115,8 @@ class DataHandlerMobile @Inject constructor(
     private val profileUtil: ProfileUtil,
     private val loop: Loop,
     private val processedDeviceStatusData: ProcessedDeviceStatusData,
+    private val overviewData: OverviewData,
+    private val aimiMealAssist: AimiMealAssist,
     private val receiverStatusStore: ReceiverStatusStore,
     private val quickWizard: QuickWizard,
     private val trendCalculator: TrendCalculator,
@@ -1295,37 +1300,46 @@ class DataHandlerMobile @Inject constructor(
         }
     }
 
-    // Используем ту же логику, что и Bolus Wizard,
-    // чтобы получить "Missing __ g"
-    private fun computeWizardCarbsReq(profile: Profile): Int {
-        val bgReading = iobCobCalculator.ads.actualBg() ?: return 0
-        val cobInfo = iobCobCalculator.getCobInfo("WearStatusWizard").withAimiResultCob(loop, dateUtil.now())
-        val displayCob = cobInfo.displayCob ?: return 0
-        val tempTarget = persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())
-        val profileName = profileFunction.getProfileName()
+    private fun computeForecastCarbsReq(profile: Profile): Int {
+        val now = dateUtil.now()
+        if (finalForecastPendingTreatmentRecalculation(now, "Wear forecast carbs")) return 0
+        val targetMgdl = when {
+            config.APS        -> loop.lastRun?.constraintsProcessed?.targetBG
+            config.AAPSCLIENT -> processedDeviceStatusData.getAPSResult()?.targetBG
+            else              -> null
+        }?.takeIf { it.isFinite() && it > 0.0 }
+            ?: profile.getTargetMgdl().takeIf { it.isFinite() && it > 0.0 }
+            ?: return 0
 
-        val wizard = bolusWizardProvider.get().doCalc(
-            profile = profile,
-            profileName = profileName,
-            tempTarget = tempTarget,
-            carbs = 0,
-            cob = displayCob,
-            bg = bgReading.valueToUnits(profileFunction.getUnits()),
-            correction = 0.0,
-            percentageCorrection = 100,
-            useBg = preferences.get(BooleanKey.WearWizardBg),
-            useCob = preferences.get(BooleanKey.WearWizardCob),
-            includeBolusIOB = preferences.get(BooleanKey.WearWizardIob),
-            includeBasalIOB = preferences.get(BooleanKey.WearWizardIob),
-            useSuperBolus = false,
-            useTT = preferences.get(BooleanKey.WearWizardTt),
-            useTrend = preferences.get(BooleanKey.WearWizardTrend),
-            useAlarm = false
+        val result = ForecastCarbsCalculator.fromFinalForecast(
+            predictions = overviewData.finalAimiPredictionValues,
+            now = now,
+            targetMgdl = targetMgdl,
+            isfMgdl = profile.getIsfMgdlForCarbs(now, "Wear forecast carbs", config, processedDeviceStatusData),
+            ic = profile.getIc()
         )
+        aapsLogger.debug(
+            LTag.WEAR,
+            "Wear forecast carbs from AIMI_FINAL: carbs=${result?.carbs ?: 0} " +
+                "min=${result?.minBgMgdl?.let { "%.0f".format(it) } ?: "n/a"} " +
+                "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(targetMgdl)}"
+        )
+        return result?.carbs ?: 0
+    }
 
-        val carbsEq = wizard.carbsEquivalent
-        aapsLogger.debug(LTag.WEAR, "computeWizardCarbsReq: carbsEq=$carbsEq")
-        return if (carbsEq > 0.0) carbsEq.toInt() else 0
+    private fun finalForecastPendingTreatmentRecalculation(now: Long, caller: String): Boolean {
+        val lastRunTime = loop.lastRun?.lastAPSRun ?: return false
+        val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
+        val lastBolusChangeTime = persistenceLayer.getNewestBolus()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
+        val lastAcceptedTreatmentTime = aimiMealAssist.lastTreatmentAcceptedAt()
+        val latestTreatmentChangeTime = maxOf(lastCarbsChangeTime, lastBolusChangeTime, lastAcceptedTreatmentTime)
+        if (latestTreatmentChangeTime <= lastRunTime) return false
+        aapsLogger.debug(
+            LTag.WEAR,
+            "$caller waits for treatment-aware APS recalculation: latestTreatment=${dateUtil.dateAndTimeString(latestTreatmentChangeTime)} " +
+                "lastAPS=${dateUtil.dateAndTimeString(lastRunTime)} now=${dateUtil.dateAndTimeString(now)}"
+        )
+        return true
     }
 
     // активность Exercise mode dвыделение - true, если сейчас активен Exercise Mode (TT c reason = ACTIVITY)
@@ -1352,8 +1366,9 @@ class DataHandlerMobile @Inject constructor(
             val basalIob = iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended().round()
             iobSum = decimalFormatter.to2Decimal(bolusIob.iob + basalIob.basaliob)
             iobDetail = "(${decimalFormatter.to2Decimal(bolusIob.iob)}|${decimalFormatter.to2Decimal(basalIob.basaliob)})"
+            val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
             cobString = iobCobCalculator.getCobInfo("WatcherUpdaterService")
-                .withAimiResultCob(loop, dateUtil.now())
+                .withAimiResultCob(loop, dateUtil.now(), lastCarbsChangeTime)
                 .generateCOBString(decimalFormatter)
             currentBasal =
                 processedTbrEbData.getTempBasalIncludingConvertedExtended(System.currentTimeMillis())?.toStringShort(rh)
@@ -1368,15 +1383,14 @@ class DataHandlerMobile @Inject constructor(
 
             status = generateStatusString(profile)
 
-            // 🔹 Вместо APS-carbs берём "Missing __ g" из BolusWizard
-            carbsReq = computeWizardCarbsReq(profile)
+            carbsReq = computeForecastCarbsReq(profile)
 
             // 🔹 Проверяем, активен ли Exercise Mode (TT ACTIVITY)
             exerciseModeActive = isExerciseModeActive()
 
             Log.d(
                 TAG,
-                "sendStatus: caller=$caller, wizardCarbsReq=$carbsReq, exerciseModeActive=$exerciseModeActive"
+                "sendStatus: caller=$caller, forecastCarbsReq=$carbsReq, exerciseModeActive=$exerciseModeActive"
             )
         }
 
