@@ -2687,9 +2687,13 @@ class Pump(
         // First few operations will run in command mode.
         pumpIO.switchMode(PumpIO.Mode.COMMAND)
 
-        // Read history delta, quickinfo etc. as a preparation
-        // for further evaluating the current pump state.
+        // Read the history delta first. The Combo considers the retrieved
+        // history blocks processed after they are confirmed, so emit their
+        // bolus events before any later status check can fail and make us lose
+        // the just-confirmed delta.
         val historyDelta = fetchHistoryDelta()
+
+        scanHistoryDeltaForBolusToEmit(historyDelta)
 
         // This reads information from the main screen and quickinfo screen.
         // Don't switch states. The caller does that.
@@ -2708,9 +2712,6 @@ class Pump(
         // are in that mode before reading the datetime.
         pumpIO.switchMode(PumpIO.Mode.COMMAND)
         val timestampOfStatusUpdate = pumpIO.readCMDDateTime()
-
-        // Scan history delta for unaccounted bolus(es). Report all discovered ones.
-        scanHistoryDeltaForBolusToEmit(historyDelta)
 
         if (pumpSuspended) {
             // If the pump is suspended, no insulin is delivered. This behaves like

@@ -29,5 +29,18 @@ fun fromCarbs(
     } else {
         min5minCarbImpact = if (isOref1) preferences.get(DoubleKey.ApsSmbMin5MinCarbsImpact) else preferences.get(DoubleKey.ApsAmaMin5MinCarbsImpact)
     }
-    return AutosensData.CarbsInPast(time, carbs, min5minCarbImpact, remaining)
+    return AutosensData.CarbsInPast(time, carbs, min5minCarbImpact, remaining, carbFoodTypeFromNotes(t.notes))
 }
+
+private fun carbFoodTypeFromNotes(notes: String?): String? =
+    sequenceOf("type", "carbType", "foodType")
+        .mapNotNull { key -> Regex("""(?:^|\s)$key=([A-Za-z_]+)""").find(notes.orEmpty())?.groupValues?.getOrNull(1) }
+        .mapNotNull { value ->
+            when (value.lowercase()) {
+                "fast" -> "fast"
+                "slow" -> "slow"
+                "balanced", "normal", "ordinary" -> "balanced"
+                else -> null
+            }
+        }
+        .firstOrNull()

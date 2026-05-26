@@ -7,7 +7,8 @@ interface AutosensData {
         var time: Long,
         var carbs: Double,
         var min5minCarbImpact: Double = 0.0,
-        var remaining: Double
+        var remaining: Double,
+        var foodType: String? = null
     ) {
         // override fun toString(): String =
         //     String.format(Locale.ENGLISH, "CarbsInPast: time: %s carbs: %.02f min5minCI: %.02f remaining: %.2f", dateUtil.dateAndTimeString(time), carbs, min5minCarbImpact, remaining)

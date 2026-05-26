@@ -401,6 +401,23 @@ class BolusWizard @Inject constructor(
 
     private fun wizardBgToMgdl(): Double = profileUtil.convertToMgdl(bg, profileFunction.getUnits())
 
+    private fun notesWithAimiFoodType(): String {
+        if (carbs <= 0) return notes
+        val normalizedType = when (selectedFoodType.lowercase()) {
+            "fast" -> "fast"
+            "slow" -> "slow"
+            else -> "balanced"
+        }
+        val token = "AIMI_CARB_TYPE type=$normalizedType"
+        val trimmedNotes = notes.trim()
+        if (trimmedNotes.contains("AIMI_CARB_TYPE") || trimmedNotes.contains("type=$normalizedType")) {
+            return trimmedNotes
+        }
+        return listOf(trimmedNotes, token)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+    }
+
     fun createBolusCalculatorResult(): BCR {
         val unit = profileFunction.getUnits()
         return BCR(
@@ -433,7 +450,7 @@ class BolusWizard @Inject constructor(
             totalInsulin = calculatedTotalInsulin,
             percentageCorrection = percentageCorrection,
             profileName = profileName,
-            note = notes
+            note = notesWithAimiFoodType()
         )
     }
 
@@ -544,7 +561,7 @@ class BolusWizard @Inject constructor(
                 glucoseType = TE.MeterType.MANUAL
                 carbTime = 0
                 bolusCalculatorResult = createBolusCalculatorResult()
-                notes = this@BolusWizard.notes
+                notes = this@BolusWizard.notesWithAimiFoodType()
                 uel.log(
                     action = Action.BOLUS_ADVISOR,
                     source = if (quickWizard) Sources.QuickWizard else Sources.WizardDialog,
@@ -644,7 +661,7 @@ class BolusWizard @Inject constructor(
                     glucoseType = TE.MeterType.MANUAL
                     carbsTimestamp = now + T.mins(this@BolusWizard.carbTime.toLong()).msecs()
                     bolusCalculatorResult = createBolusCalculatorResult()
-                    notes = this@BolusWizard.notes
+                    notes = this@BolusWizard.notesWithAimiFoodType()
                     if (insulin > 0 || carbs > 0) {
                         val action = when {
                             insulinAfterConstraints == 0.0 -> Action.CARBS
