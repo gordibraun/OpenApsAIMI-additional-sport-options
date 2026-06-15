@@ -57,6 +57,7 @@ class AimiMealAssistImpl @Inject constructor(
         val foodTypeModifier = foodTypeModifier(input.selectedFoodType)
         val modeFactor = baseModeFactor * foodTypeModifier.carbFactor
         val prebolusBonus = basePrebolusBonus * foodTypeModifier.prebolusFactor
+        val activityNewInsulinFactor = input.activityNewInsulinFactor.coerceIn(0.55, 1.0)
 
         val protectiveCarbs = input.requiredCarbs.coerceAtLeast(0)
         val netCarbs = (input.carbs - protectiveCarbs).coerceAtLeast(0)
@@ -77,10 +78,14 @@ class AimiMealAssistImpl @Inject constructor(
             else             -> carbComponent * modeFactor
         }
         val prebolusApplied = if (protectiveCarbs == 0 && netCarbs > 0 && input.carbTimeMinutes >= 0) prebolusBonus else 0.0
-        val recommendationBeforeManualCorrection = when {
+        val baseRecommendationBeforeForecast = when {
             protectiveCarbs > 0 && input.carbs < protectiveCarbs -> 0.0
             else -> max(0.0, effectiveBaseWithoutCarbs + adjustedCarbComponent + prebolusApplied)
         }
+        val recommendationBeforeActivity = baseRecommendationBeforeForecast
+        val recommendationBeforeManualCorrection =
+            if (activityNewInsulinFactor < 0.999) recommendationBeforeActivity * activityNewInsulinFactor
+            else recommendationBeforeActivity
         val rawRecommendation = max(0.0, recommendationBeforeManualCorrection + manualCorrection)
         val expectedEventualBg = when {
             netCarbs > 0 && rawRecommendation > 0.0 -> targetBg
@@ -115,6 +120,10 @@ class AimiMealAssistImpl @Inject constructor(
                 if (prebolusApplied > 0.0) {
                     append(", prebolus +${"%.2f".format(prebolusApplied)}U")
                 }
+                if (activityNewInsulinFactor < 0.999) {
+                    append(", нагрузка новый инсулин x${"%.2f".format(activityNewInsulinFactor)}")
+                    input.activityDescription?.let { append(" ($it)") }
+                }
                 if (manualCorrection != 0.0) {
                     append(", ручная коррекция ${"%.2f".format(manualCorrection)}U")
                 }
@@ -124,11 +133,18 @@ class AimiMealAssistImpl @Inject constructor(
     }
 
     override fun activate(input: AimiMealInput, decision: AimiMealDecision): AimiMealEpisode {
+        val protectiveCarbs = input.requiredCarbs.coerceAtLeast(0).coerceAtMost(input.carbs)
+        val cobHandledCarbs = when {
+            input.carbs <= 0                    -> 0
+            decision.recommendedBolus > 0.0     -> input.carbs
+            else                                -> protectiveCarbs
+        }
         val episode = AimiMealEpisode(
             startedAt = input.timestamp,
             profileName = input.profileName,
             selectedFoodType = input.selectedFoodType,
             carbs = input.carbs,
+            cobHandledCarbs = cobHandledCarbs,
             deliveredBolus = decision.recommendedBolus,
             carbTimeMinutes = input.carbTimeMinutes,
             targetBg = decision.targetBg,
@@ -140,7 +156,8 @@ class AimiMealAssistImpl @Inject constructor(
         activeEpisodesRef.set((activeEpisodes + episode).takeLast(MAX_ACTIVE_EPISODES))
         logger.debug(
             LTag.APS,
-            "AIMI meal episode activated: carbs=${input.carbs} bolus=${"%.2f".format(decision.recommendedBolus)} target=${"%.0f".format(decision.targetBg)} expected=${"%.0f".format(decision.expectedEventualBg)}"
+            "AIMI meal episode activated: carbs=${input.carbs} cobHandled=$cobHandledCarbs bolus=${"%.2f".format(decision.recommendedBolus)} " +
+                "target=${"%.0f".format(decision.targetBg)} expected=${"%.0f".format(decision.expectedEventualBg)}"
         )
         return episode
     }
@@ -212,6 +229,9 @@ class AimiMealAssistImpl @Inject constructor(
         }
 
         val totalRemaining = remainingByType.values.sum()
+        val totalHandledRemaining = episodes
+            .sumOf { episode -> episode.cobHandledCarbs * remainingFraction(episode, now) }
+            .coerceIn(0.0, totalRemaining)
         val dominant = remainingByType.maxByOrNull { it.value }
         val dominantShare = dominant?.value?.div(totalRemaining) ?: 0.0
         val forecastFoodType = if (dominant != null && dominantShare >= DOMINANT_TYPE_SHARE) {
@@ -233,9 +253,11 @@ class AimiMealAssistImpl @Inject constructor(
             startedAt = episodes.minOf { it.startedAt },
             selectedFoodType = forecastFoodType,
             carbs = totalRemaining.roundToInt().coerceAtLeast(0),
+            cobHandledCarbs = totalHandledRemaining.roundToInt().coerceAtLeast(0),
             deliveredBolus = episodes.sumOf { it.deliveredBolus },
             carbTimeMinutes = 0,
-            notes = "AIMI активные углеводы: " + remainingByType.entries.joinToString { "${it.key}=${"%.1f".format(it.value)}g" }
+            notes = "AIMI активные углеводы: " + remainingByType.entries.joinToString { "${it.key}=${"%.1f".format(it.value)}g" } +
+                "; COB уже покрыто=${"%.1f".format(totalHandledRemaining)}г"
         )
     }
 

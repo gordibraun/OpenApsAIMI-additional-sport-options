@@ -150,6 +150,7 @@ class GraphData @Inject constructor(
 
     private fun SourceSensor.isFinalAimiDisplaySource(): Boolean =
         this == SourceSensor.AIMI_FINAL_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION ||
             this == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||

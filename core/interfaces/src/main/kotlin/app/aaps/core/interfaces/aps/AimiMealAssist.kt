@@ -27,7 +27,9 @@ data class AimiMealInput(
     val wizardInsulinFromSuperBolus: Double,
     val correction: Double,
     val trendInsulin: Double,
-    val notes: String
+    val notes: String,
+    val activityNewInsulinFactor: Double = 1.0,
+    val activityDescription: String? = null
 )
 
 data class AimiMealDecision(
@@ -48,6 +50,7 @@ data class AimiMealEpisode(
     val profileName: String,
     val selectedFoodType: String,
     val carbs: Int,
+    val cobHandledCarbs: Int = carbs,
     val deliveredBolus: Double,
     val carbTimeMinutes: Int,
     val targetBg: Double,

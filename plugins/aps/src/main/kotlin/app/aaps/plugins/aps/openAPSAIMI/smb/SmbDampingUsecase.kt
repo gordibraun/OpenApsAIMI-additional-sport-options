@@ -24,7 +24,7 @@ object SmbDampingUsecase {
 
     fun run(pkpdRuntime: PkPdRuntime?, input: Input): Output {
         if (pkpdRuntime == null) return Output(input.smbDecision, null)
-        val bypass = input.mealModeRun || input.highBgRiseActive
+        val bypass = input.mealModeRun || (input.highBgRiseActive && !input.exercise)
         val audit = pkpdRuntime.dampSmbWithAudit(
             smb = input.smbDecision,
             exercise = input.exercise,

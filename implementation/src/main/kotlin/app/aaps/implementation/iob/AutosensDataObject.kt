@@ -91,16 +91,34 @@ class AutosensDataObject @Inject constructor(
         val maxAbsorptionHours: Double =
             if (isAAPSOrWeighted) preferences.get(DoubleKey.AbsorptionMaxTime)
             else preferences.get(DoubleKey.AbsorptionMaxTime)
+        val maxAbsorptionMs = (maxAbsorptionHours * 60 * 60 * 1000L).toLong()
         var i = 0
         while (i < activeCarbsList.size) {
             val c = activeCarbsList[i]
-            if (c.time + maxAbsorptionHours * 60 * 60 * 1000L < toTime) {
+            val expirationMs = carbExpirationMs(c.foodType, maxAbsorptionMs)
+            if (c.time + expirationMs < toTime) {
                 activeCarbsList.removeAt(i--)
                 if (c.remaining > 0) cob -= c.remaining
-                aapsLogger.debug(LTag.AUTOSENS, "Removing carbs at " + dateUtil.dateAndTimeString(toTime) + " after " + maxAbsorptionHours + "h > " + c.toString())
+                aapsLogger.debug(
+                    LTag.AUTOSENS,
+                    "Removing carbs at " + dateUtil.dateAndTimeString(toTime) +
+                        " after " + expirationMs / 60_000L + "m > " + c.toString()
+                )
             }
             i++
         }
+    }
+
+    private fun carbExpirationMs(foodType: String?, maxAbsorptionMs: Long): Long {
+        val typedAbsorptionMinutes = when (foodType?.lowercase()) {
+            "fast" -> 45.0
+            "balanced" -> 165.0
+            "slow" -> 240.0
+            else -> null
+        }
+        return typedAbsorptionMinutes
+            ?.let { min(maxAbsorptionMs.toDouble(), it * 60_000.0).toLong() }
+            ?: maxAbsorptionMs
     }
 
     override fun deductAbsorbedCarbs() {

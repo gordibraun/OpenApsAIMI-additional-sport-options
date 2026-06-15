@@ -120,6 +120,31 @@ class AimiMealAssistImplTest {
     }
 
     @Test
+    fun `future activity factor reduces ordinary meal bolus`() {
+        val withoutActivity = sut.evaluate(
+            baseInput(
+                carbs = 20,
+                requiredCarbs = 0,
+                wizardCalculatedBolus = 2.0,
+                wizardInsulinFromCarbs = 2.0,
+                activityNewInsulinFactor = 1.0
+            )
+        )
+        val withWalk = sut.evaluate(
+            baseInput(
+                carbs = 20,
+                requiredCarbs = 0,
+                wizardCalculatedBolus = 2.0,
+                wizardInsulinFromCarbs = 2.0,
+                activityNewInsulinFactor = 0.8
+            )
+        )
+
+        assertEquals(2.0, withoutActivity.recommendedBolus, 0.0)
+        assertEquals(1.6, withWalk.recommendedBolus, 0.0)
+    }
+
+    @Test
     fun `manual negative correction reduces final AIMI bolus even with protective carbs`() {
         val withoutCorrection = sut.evaluate(
             baseInput(
@@ -142,6 +167,53 @@ class AimiMealAssistImplTest {
 
         assertEquals(0.7, withoutCorrection.recommendedBolus, 0.0)
         assertEquals(0.2, withCorrection.recommendedBolus, 0.0)
+    }
+
+    @Test
+    fun `protective carbs are handled but later unbolused extra carbs remain available for COB insulin`() {
+        val now = System.currentTimeMillis()
+        val protectiveInput = baseInput(
+            timestamp = now,
+            carbs = 12,
+            requiredCarbs = 12,
+            wizardCalculatedBolus = 0.0,
+            wizardInsulinFromCarbs = 2.0,
+            selectedFoodType = "fast"
+        )
+        sut.activate(protectiveInput, sut.evaluate(protectiveInput))
+
+        val extraInput = baseInput(
+            timestamp = now + 1_000L,
+            carbs = 8,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 0.0,
+            wizardInsulinFromCarbs = 1.33,
+            selectedFoodType = "balanced"
+        )
+        sut.activate(extraInput, sut.evaluate(extraInput))
+
+        val activeEpisode = checkNotNull(sut.activeEpisode())
+        assertEquals(20, activeEpisode.carbs)
+        assertEquals(12, activeEpisode.cobHandledCarbs)
+    }
+
+    @Test
+    fun `bolused fast carbs are fully handled for later COB insulin`() {
+        val now = System.currentTimeMillis()
+        val fastInput = baseInput(
+            timestamp = now,
+            carbs = 12,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 1.0,
+            wizardInsulinFromCarbs = 1.5,
+            selectedFoodType = "fast"
+        )
+
+        sut.activate(fastInput, sut.evaluate(fastInput))
+
+        val activeEpisode = checkNotNull(sut.activeEpisode())
+        assertEquals(12, activeEpisode.carbs)
+        assertEquals(12, activeEpisode.cobHandledCarbs)
     }
 
     @Test
@@ -311,13 +383,18 @@ class AimiMealAssistImplTest {
         wizardCalculatedBolus: Double,
         wizardInsulinFromCarbs: Double,
         selectedFoodType: String = "balanced",
-        correction: Double = 0.0
+        correction: Double = 0.0,
+        activityNewInsulinFactor: Double = 1.0,
+        bg: Double = 81.0,
+        delta: Double = 0.0,
+        bolusIob: Double = 0.0,
+        basalIob: Double = 0.0
     ) = AimiMealInput(
         timestamp = timestamp,
         profileName = "test",
         selectedFoodType = selectedFoodType,
-        bg = 81.0,
-        delta = 0.0,
+        bg = bg,
+        delta = delta,
         carbs = carbs,
         requiredCarbs = requiredCarbs,
         cob = 0.0,
@@ -326,8 +403,8 @@ class AimiMealAssistImplTest {
         targetBgHigh = 117.0,
         ic = 10.0,
         isf = 54.0,
-        bolusIob = 0.0,
-        basalIob = 0.0,
+        bolusIob = bolusIob,
+        basalIob = basalIob,
         wizardRecommendedBolus = wizardCalculatedBolus,
         wizardCalculatedBolus = wizardCalculatedBolus,
         wizardInsulinFromCarbs = wizardInsulinFromCarbs,
@@ -339,6 +416,7 @@ class AimiMealAssistImplTest {
         wizardInsulinFromSuperBolus = 0.0,
         correction = correction,
         trendInsulin = 0.0,
-        notes = ""
+        notes = "",
+        activityNewInsulinFactor = activityNewInsulinFactor
     )
 }

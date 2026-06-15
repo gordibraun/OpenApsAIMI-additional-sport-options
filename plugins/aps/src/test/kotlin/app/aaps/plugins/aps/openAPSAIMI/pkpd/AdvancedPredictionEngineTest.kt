@@ -207,6 +207,49 @@ class AdvancedPredictionEngineTest {
     }
 
     @Test
+    fun `fast carb timeline is capped to avoid impossible early spike`() {
+        val profile = mockk<OapsProfileAimi>(relaxed = true)
+        every { profile.carb_ratio } returns 6.0
+        every { profile.peakTime } returns 75.0
+
+        val now = System.currentTimeMillis()
+        val activeInsulin = Array(49) { index ->
+            IobTotal(
+                time = now + index * 5 * 60_000L,
+                iob = (2.15 - index * 0.07).coerceAtLeast(0.0),
+                activity = (0.0124 + index * 0.00045).coerceAtMost(0.0175)
+            )
+        }
+        val aggressiveFastTimeline = listOf(76.0, 76.0, 71.0, 48.0, 42.0, 36.0, 30.0, 24.0, 18.0)
+
+        val forecast = AdvancedPredictionEngine.predict(
+            currentBG = 130.0,
+            iobArray = activeInsulin,
+            finalSensitivity = 70.0,
+            cobG = 36.3,
+            profile = profile,
+            selectedFoodType = "fast",
+            carbSensitivityMgdlPerGram = 11.6,
+            delta = 3.3,
+            plannedSmbU = 0.0,
+            plannedRateUph = 4.65,
+            profileBasalUph = 0.95,
+            plannedDurationMin = 30,
+            observedCarbImpactMgdlPer5m = 4.8,
+            remainingCiPeakMgdlPer5m = 10.0,
+            explicitCarbEntry = true,
+            freshSmbPressureU = 0.3,
+            targetBG = 117.0,
+            carbImpactTimelineMgdlPer5m = aggressiveFastTimeline,
+            horizonMinutes = 120
+        )
+
+        assertTrue(forecast[1] < 165.0)
+        assertTrue((forecast.maxOrNull() ?: 401.0) < 330.0)
+        assertTrue(forecast.last() < 300.0)
+    }
+
+    @Test
     fun `activity boosted insulin sensitivity does not amplify carb effect when csf override is provided`() {
         val profile = mockk<OapsProfileAimi>(relaxed = true)
         every { profile.carb_ratio } returns 10.0

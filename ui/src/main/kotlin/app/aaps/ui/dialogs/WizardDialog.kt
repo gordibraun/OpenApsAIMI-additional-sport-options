@@ -24,6 +24,7 @@ import android.widget.CompoundButton
 import androidx.fragment.app.FragmentManager
 import app.aaps.core.data.configuration.Constants
 import app.aaps.core.data.model.GlucoseUnit
+import app.aaps.core.data.model.TE
 import app.aaps.core.data.model.TT
 import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.aps.AimiMealAssist
@@ -587,6 +588,7 @@ class WizardDialog : DaggerDialogFragment() {
         val selectedFoodType = currentSelectedFoodType()
         val foodTypeMissing = carbsAfterConstraint > 0.0 && selectedFoodType == null
         val forecastRequiredCarbs = forecastRequiredCarbsFromFinalLine(specificProfile, tempTarget, binding.ttCheckbox.isChecked)
+        val activityBolusContext = futureActivityBolusContext(dateUtil.now())
         refreshOverviewIfForecastCarbsChanged(forecastRequiredCarbs)
 
         wizard = bolusWizardProvider.get().doCalc(
@@ -604,12 +606,14 @@ class WizardDialog : DaggerDialogFragment() {
             selectedFoodType ?: "balanced",
             usePercentage = usePercentage,
             totalPercentage = percentageCorrection.toDouble(),
-            forecastRequiredCarbs = forecastRequiredCarbs
+            forecastRequiredCarbs = forecastRequiredCarbs,
+            activityNewInsulinFactor = activityBolusContext?.factor ?: 1.0,
+            activityDescription = activityBolusContext?.description
         )
 
         wizard?.let { wizard ->
-            val forecastBolusAdjustment = applyForecastAwareWizardBolus(wizard, specificProfile, bg, carbsAfterConstraint.toInt(), carbTime, selectedFoodType)
-            updateCarbTimingHint(wizard, specificProfile, bg, carbsAfterConstraint.toInt(), carbTime, selectedFoodType, forecastBolusAdjustment)
+            updateCarbTimingHint(wizard, specificProfile, bg, carbsAfterConstraint.toInt(), carbTime, selectedFoodType)
+            updateFutureActivityNote()
             binding.wizardAimiLogic.text = makeInteractiveGlossary(buildAimiLogicSummary(wizard, specificProfile, bg, carbsAfterConstraint, cob, carbTime))
             binding.wizardAimiLogic.movementMethod = LinkMovementMethod.getInstance()
             binding.wizardAimiLogic.highlightColor = Color.TRANSPARENT
@@ -640,7 +644,13 @@ class WizardDialog : DaggerDialogFragment() {
 
             // COB
             if (binding.cobCheckbox.isChecked) {
-                binding.cob.text = rh.gs(R.string.format_cob_ic, cob, wizard.ic)
+                binding.cob.text = if (wizard.cobAlreadyHandledByAimi > 0.0) {
+                    val handledLabel = if (wizard.cobAlreadyHandledByActivity > 0.0) "AIMI/нагрузка уже учли " else "AIMI уже учел "
+                    rh.gs(R.string.format_cob_ic, wizard.cobUsedForInsulin, wizard.ic) +
+                        " (" + handledLabel + decimalFormatter.to0Decimal(wizard.cobAlreadyHandledByAimi) + "г)"
+                } else {
+                    rh.gs(R.string.format_cob_ic, cob, wizard.ic)
+                }
                 binding.cobInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, wizard.insulinFromCOB)
             } else {
                 binding.cob.text = ""
@@ -657,11 +667,21 @@ class WizardDialog : DaggerDialogFragment() {
                 ) else ""
                 // Работаем со следующей строкой чтобы вывести на главное активити результат
                 binding.total.text = HtmlHelper.fromHtml(rh.gs(R.string.result_insulin_carbs, insulinText, carbsText))
+                if (wizard.calculatedTotalInsulin <= 0.0 && carbsAfterConstraint > 0.0 && wizard.insulinFromCarbs > 0.0) {
+                    binding.totalReason.visibility = View.VISIBLE
+                    binding.totalReason.text = rh.gs(
+                        R.string.wizard_zero_bolus_reason,
+                        rh.gs(app.aaps.core.ui.R.string.format_insulin_units, wizard.insulinFromCarbs)
+                    )
+                } else {
+                    binding.totalReason.visibility = View.GONE
+                }
                 binding.okcancel.ok.visibility = View.VISIBLE
                 binding.okcancel.ok.isEnabled = !foodTypeMissing
             } else {
                 // Здесь Не хватает углеводов выводится
                 binding.total.text = HtmlHelper.fromHtml(rh.gs(R.string.missing_carbs, wizard.forecastRequiredCarbs).formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor))
+                binding.totalReason.visibility = View.GONE
                 binding.okcancel.ok.visibility = View.INVISIBLE
                 binding.okcancel.ok.isEnabled = false
             }
@@ -678,8 +698,7 @@ class WizardDialog : DaggerDialogFragment() {
         bg: Double,
         carbs: Int,
         selectedCarbTime: Int,
-        selectedFoodType: String?,
-        forecastBolusAdjustment: ForecastBolusAdjustment? = null
+        selectedFoodType: String?
     ) {
         if (carbs > 0 && selectedFoodType == null) {
             binding.carbTimingHint.visibility = View.VISIBLE
@@ -694,13 +713,6 @@ class WizardDialog : DaggerDialogFragment() {
         }
         binding.carbTimingHint.visibility = View.VISIBLE
         binding.carbTimingHint.text = buildString {
-            forecastBolusAdjustment?.let { adjustment ->
-                append("Болюс: ")
-                append(decimalFormatter.toPumpSupportedBolus(adjustment.originalBolus, bolusStep))
-                append(" → ")
-                append(decimalFormatter.toPumpSupportedBolus(adjustment.adjustedBolus, bolusStep))
-                append(" ед.\n")
-            }
             append(suggestion.actionText)
             if (suggestion.reasonText.isNotBlank()) {
                 append("\n")
@@ -714,13 +726,6 @@ class WizardDialog : DaggerDialogFragment() {
         )
     }
 
-    private data class ForecastBolusAdjustment(
-        val originalBolus: Double,
-        val adjustedBolus: Double,
-        val minBgMgdl: Double,
-        val maxBgMgdl: Double
-    )
-
     private fun forecastRequiredCarbsFromFinalLine(profile: Profile, tempTarget: TT?, useTT: Boolean): Int {
         val now = dateUtil.now()
         if (finalForecastPendingTreatmentRecalculation(now, "Wizard forecast carbs")) return 0
@@ -732,13 +737,48 @@ class WizardDialog : DaggerDialogFragment() {
             isfMgdl = profile.getIsfMgdlForCarbs(now, "Wizard forecast carbs", config, processedDeviceStatusData),
             ic = profile.getIc()
         )
+        val apsCarbsReq = loopForecastCarbsReq(now, "Wizard forecast carbs")
+        val carbsReq = max(result?.carbs ?: 0, apsCarbsReq)
         aapsLogger.debug(
             LTag.APS,
-            "Wizard forecast carbs from AIMI_FINAL: carbs=${result?.carbs ?: 0} " +
+            "Wizard forecast carbs from AIMI_FINAL: carbs=$carbsReq graph=${result?.carbs ?: 0} aps=$apsCarbsReq " +
                 "min=${result?.minBgMgdl?.let { "%.0f".format(it) } ?: "n/a"} " +
                 "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(targetMgdl)}"
         )
-        return result?.carbs ?: 0
+        return carbsReq
+    }
+
+    private fun loopForecastCarbsReq(now: Long, caller: String): Int {
+        var carbs = 0
+        var within = 0
+        var source = ""
+        loop.lastRun?.let { lastRun ->
+            if (now - lastRun.lastAPSRun <= T.mins(15).msecs()) {
+                val result = lastRun.constraintsProcessed ?: lastRun.request
+                val candidate = result?.carbsReq ?: 0
+                if (candidate > carbs) {
+                    carbs = candidate
+                    within = result?.carbsReqWithin ?: 0
+                    source = "loop"
+                }
+            }
+        }
+        val deviceTime = processedDeviceStatusData.openAPSData.clockSuggested
+        if (deviceTime > 0L && now - deviceTime <= T.mins(15).msecs()) {
+            val result = processedDeviceStatusData.getAPSResult()
+            val candidate = result?.carbsReq ?: 0
+            if (candidate > carbs) {
+                carbs = candidate
+                within = result?.carbsReqWithin ?: 0
+                source = "deviceStatus"
+            }
+        }
+        if (carbs <= 0) return 0
+        aapsLogger.debug(
+            LTag.APS,
+            "$caller uses APS carbsReq candidate: carbs=$carbs within=${within}m source=$source"
+        )
+        return carbs
     }
 
     private fun finalForecastPendingTreatmentRecalculation(now: Long, caller: String): Boolean {
@@ -746,7 +786,8 @@ class WizardDialog : DaggerDialogFragment() {
         val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
         val lastBolusChangeTime = persistenceLayer.getNewestBolus()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
         val lastAcceptedTreatmentTime = aimiMealAssist.lastTreatmentAcceptedAt()
-        val latestTreatmentChangeTime = maxOf(lastCarbsChangeTime, lastBolusChangeTime, lastAcceptedTreatmentTime)
+        val lastActivityChangeTime = latestAimiActivityChangeTime(now)
+        val latestTreatmentChangeTime = maxOf(lastCarbsChangeTime, lastBolusChangeTime, lastAcceptedTreatmentTime, lastActivityChangeTime)
         if (latestTreatmentChangeTime <= lastRunTime) return false
         aapsLogger.debug(
             LTag.APS,
@@ -755,6 +796,130 @@ class WizardDialog : DaggerDialogFragment() {
         )
         return true
     }
+
+    private fun updateFutureActivityNote() {
+        val now = dateUtil.now()
+        val note = futureActivityNote(now)
+        if (note == null) {
+            binding.futureActivityNote.visibility = View.GONE
+        } else {
+            binding.futureActivityNote.visibility = View.VISIBLE
+            binding.futureActivityNote.text = note
+        }
+    }
+
+    private fun futureActivityNote(now: Long): String? {
+        val event = aimiActivityEvents(now)
+            .filter { it.timestamp > now }
+            .minByOrNull { it.timestamp } ?: return null
+        val mode = tokenFromNote(event.note, "mode") ?: "ACTIVITY"
+        val startIn = ((event.timestamp - now) / T.mins(1).msecs()).toInt().coerceAtLeast(0)
+        val createdAt = aimiActivityCreatedAt(event)
+        val lastRunTime = loop.lastRun?.lastAPSRun ?: 0L
+        return if (lastRunTime >= createdAt) {
+            "Будущая нагрузка учтена: $mode через ${startIn} мин"
+        } else {
+            "Будущая нагрузка включена: $mode через ${startIn} мин. Жду пересчет прогноза"
+        }
+    }
+
+    private data class ActivityBolusContext(
+        val factor: Double,
+        val description: String
+    )
+
+    private fun futureActivityBolusContext(now: Long): ActivityBolusContext? {
+        val event = aimiActivityEvents(now)
+            .mapNotNull { event ->
+                val mode = tokenFromNote(event.note, "mode")?.uppercase() ?: return@mapNotNull null
+                val effect = activityEffectFraction(event, mode)
+                if (effect <= 0.0) return@mapNotNull null
+                val duration = (tokenFromNote(event.note, "duration")?.toLongOrNull() ?: (event.duration / T.mins(1).msecs()))
+                    .coerceAtLeast(0L)
+                val tail = (tokenFromNote(event.note, "tail")?.toLongOrNull() ?: 0L).coerceAtLeast(0L)
+                val start = event.timestamp
+                val activeEnd = start + T.mins(duration).msecs()
+                val tailEnd = activeEnd + T.mins(tail).msecs()
+                if (start > now + T.hours(2).msecs() || tailEnd < now - T.mins(5).msecs()) return@mapNotNull null
+                event to ActivityWindowForBolus(mode, effect, start, activeEnd, tailEnd, tail)
+            }
+            .minByOrNull { abs(it.first.timestamp - now) }
+            ?: return null
+
+        val window = event.second
+        val startOffset = ((window.start - now) / T.mins(1).msecs()).toInt()
+        val overlap = when {
+            now in window.start..window.activeEnd -> 1.0
+            now in (window.activeEnd + 1)..window.tailEnd && window.tailMinutes > 0L ->
+                ((window.tailEnd - now).toDouble() / T.mins(window.tailMinutes).msecs().toDouble()).coerceIn(0.0, 1.0)
+            startOffset in 1..75 -> 1.0
+            startOffset in 76..120 -> ((120 - startOffset).toDouble() / 45.0).coerceIn(0.0, 1.0)
+            else -> 0.0
+        }
+        if (overlap <= 0.0) return null
+
+        val factor = (1.0 - window.effectFraction * overlap).coerceIn(0.55, 1.0)
+        val phase = when {
+            now < window.start -> "старт через ${startOffset.coerceAtLeast(0)} мин"
+            now <= window.activeEnd -> "активна"
+            else -> "хвост"
+        }
+        return ActivityBolusContext(
+            factor = factor,
+            description = "${window.mode} $phase, новый инсулин x${"%.2f".format(factor)}"
+        )
+    }
+
+    private data class ActivityWindowForBolus(
+        val mode: String,
+        val effectFraction: Double,
+        val start: Long,
+        val activeEnd: Long,
+        val tailEnd: Long,
+        val tailMinutes: Long
+    )
+
+    private fun activityEffectFraction(event: TE, mode: String): Double {
+        tokenFromNote(event.note, "effect")?.toDoubleOrNull()?.let { return (it / 100.0).coerceIn(0.0, 0.45) }
+        return when (mode) {
+            "WALK"  -> 0.20
+            "SPORT" -> 0.30
+            else    -> 0.0
+        }
+    }
+
+    private fun latestAimiActivityChangeTime(now: Long): Long =
+        aimiActivityEvents(now)
+            .maxOfOrNull { aimiActivityCreatedAt(it) }
+            ?: 0L
+
+    private fun aimiActivityEvents(now: Long): List<TE> =
+        try {
+            persistenceLayer.getTherapyEventDataFromToTime(
+                now - T.hours(12).msecs(),
+                now + T.hours(6).msecs()
+            ).blockingGet()
+                .filter { it.isValid && it.type == TE.Type.EXERCISE && it.note?.contains("AIMI_ACTIVITY_V2") == true }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+    private fun aimiActivityCreatedAt(event: TE): Long {
+        if (event.dateCreated > 0) return event.dateCreated
+        val startOffset = tokenFromNote(event.note, "startOffset")?.toLongOrNull()
+        return if (startOffset != null && startOffset > 0) {
+            event.timestamp - T.mins(startOffset).msecs()
+        } else {
+            event.timestamp
+        }
+    }
+
+    private fun tokenFromNote(note: String?, key: String): String? =
+        note
+            ?.split(' ')
+            ?.firstOrNull { it.startsWith("$key=") }
+            ?.substringAfter('=')
+            ?.takeIf { it.isNotBlank() }
 
     private fun forecastCarbsTargetMgdl(profile: Profile, tempTarget: TT?, useTT: Boolean): Double? {
         val apsTarget = when {
@@ -799,123 +964,6 @@ class WizardDialog : DaggerDialogFragment() {
     )
 
     private data class TimingForecastPoint(val minutes: Int, val bgMgdl: Double)
-
-    private fun applyForecastAwareWizardBolus(
-        wizard: BolusWizard,
-        profile: Profile,
-        bg: Double,
-        carbs: Int,
-        selectedCarbTime: Int,
-        selectedFoodType: String?
-    ): ForecastBolusAdjustment? {
-        val foodType = selectedFoodType ?: return null
-        if (carbs <= 0 || foodType !in setOf("fast", "slow")) return null
-        val originalBolus = wizard.insulinAfterConstraints.coerceAtLeast(0.0)
-        if (originalBolus <= 0.0) return null
-
-        val now = dateUtil.now()
-        val forecast = timingForecastPoints(now, bg)
-        if (forecast.isEmpty()) return null
-
-        val units = profileFunction.getUnits()
-        val currentBgMgdl = if (bg > 0.0) profileUtil.convertToMgdl(bg, units) else persistenceLayer.getLastGlucoseValue()?.value ?: return null
-        val firstPoint = forecast.first()
-        if (firstPoint.minutes > 15 || abs(firstPoint.bgMgdl - currentBgMgdl) > 35.0) {
-            aapsLogger.debug(
-                LTag.APS,
-                "AIMI wizard forecast cap skipped: forecast is not fresh enough first=${firstPoint.minutes}m " +
-                    "forecastBg=${"%.0f".format(firstPoint.bgMgdl)} currentBg=${"%.0f".format(currentBgMgdl)}"
-            )
-            return null
-        }
-
-        val targetLowMgdl = profile.getTargetLowMgdl()
-        val targetHighMgdl = profile.getTargetHighMgdl()
-        val targetMgdl = (targetLowMgdl + targetHighMgdl) / 2.0
-        val isfMgdl = wizard.sensToMgdl()
-        val ic = wizard.ic.coerceAtLeast(1.0)
-        val carbEffectMgdl = carbs * isfMgdl / ic * carbGlucoseEffectScale(foodType)
-        val step = activePlugin.activePump.pumpDescription.bolusStep.coerceAtLeast(0.05)
-        val originalCandidate = scoreCarbTiming(
-            forecast = forecast,
-            offsetMinutes = selectedCarbTime,
-            carbEffectMgdl = carbEffectMgdl,
-            plannedBolusEffectMgdl = originalBolus * isfMgdl,
-            targetLowMgdl = targetLowMgdl,
-            targetHighMgdl = targetHighMgdl,
-            targetMgdl = targetMgdl,
-            selectedFoodType = foodType
-        )
-
-        val safetyFloorMgdl = targetLowMgdl - 5.0
-        if (originalCandidate.minBgMgdl >= safetyFloorMgdl) {
-            aapsLogger.debug(
-                LTag.APS,
-                "AIMI wizard forecast cap skipped: no low risk original=${"%.2f".format(originalBolus)}U " +
-                    "min=${"%.0f".format(originalCandidate.minBgMgdl)} floor=${"%.0f".format(safetyFloorMgdl)} " +
-                    "carbs=$carbs type=$foodType carbTime=$selectedCarbTime"
-            )
-            return null
-        }
-
-        val maxSteps = (originalBolus / step).toInt().coerceAtLeast(0)
-        var bestBolus = 0.0
-        var bestCandidate = scoreCarbTiming(
-            forecast = forecast,
-            offsetMinutes = selectedCarbTime,
-            carbEffectMgdl = carbEffectMgdl,
-            plannedBolusEffectMgdl = 0.0,
-            targetLowMgdl = targetLowMgdl,
-            targetHighMgdl = targetHighMgdl,
-            targetMgdl = targetMgdl,
-            selectedFoodType = foodType
-        )
-
-        for (idx in maxSteps downTo 0) {
-            val candidateBolus = Round.roundTo(idx * step, step).coerceAtMost(originalBolus)
-            val candidate = scoreCarbTiming(
-                forecast = forecast,
-                offsetMinutes = selectedCarbTime,
-                carbEffectMgdl = carbEffectMgdl,
-                plannedBolusEffectMgdl = candidateBolus * isfMgdl,
-                targetLowMgdl = targetLowMgdl,
-                targetHighMgdl = targetHighMgdl,
-                targetMgdl = targetMgdl,
-                selectedFoodType = foodType
-            )
-            if (candidate.minBgMgdl >= safetyFloorMgdl) {
-                bestCandidate = candidate
-                bestBolus = candidateBolus
-                break
-            }
-            if (candidate.minBgMgdl > bestCandidate.minBgMgdl) {
-                bestCandidate = candidate
-                bestBolus = candidateBolus
-            }
-        }
-
-        val constrainedBolus = constraintChecker.applyBolusConstraints(ConstraintObject(Round.roundTo(bestBolus, step), aapsLogger)).value()
-        if (constrainedBolus >= originalBolus - step / 2.0) return null
-
-        wizard.applyAimiForecastBolusAdjustment(
-            adjustedBolus = constrainedBolus,
-            explanation = "Forecast safety cap: ${"%.2f".format(originalBolus)}U -> ${"%.2f".format(constrainedBolus)}U, " +
-                "post-meal min ${"%.0f".format(bestCandidate.minBgMgdl)}"
-        )
-        aapsLogger.debug(
-            LTag.APS,
-            "AIMI wizard forecast safety cap applied: original=${"%.2f".format(originalBolus)}U adjusted=${"%.2f".format(constrainedBolus)}U " +
-                "originalMin=${"%.0f".format(originalCandidate.minBgMgdl)} adjustedMin=${"%.0f".format(bestCandidate.minBgMgdl)} " +
-                "max=${"%.0f".format(bestCandidate.maxBgMgdl)} floor=${"%.0f".format(safetyFloorMgdl)} " +
-                "carbs=$carbs type=$foodType carbTime=$selectedCarbTime"
-        )
-        return ForecastBolusAdjustment(
-            originalBolus = originalBolus,
-            adjustedBolus = constrainedBolus,
-            minBgMgdl = bestCandidate.minBgMgdl,
-            maxBgMgdl = bestCandidate.maxBgMgdl
-        )
-    }
 
     private fun carbTimingSuggestion(
         wizard: BolusWizard,

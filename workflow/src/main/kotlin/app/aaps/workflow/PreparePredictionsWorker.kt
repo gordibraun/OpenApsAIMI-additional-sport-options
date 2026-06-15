@@ -60,6 +60,7 @@ class PreparePredictionsWorker(
     )
 
     private data class ActivityWindow(
+        val created: Long,
         val start: Long,
         val activeEnd: Long,
         val tailEnd: Long,
@@ -77,7 +78,7 @@ class PreparePredictionsWorker(
         val predictionsAreStaleByActions = apsResult?.let { isPredictionStaleByRecentActions(it) } == true
         val predictionsAreMissingMealContext = apsResult?.let { isPredictionMissingMealContext(it) } == true
         val predictionsAreStale = predictionsAreStaleByBg || predictionsAreStaleByContext || predictionsAreStaleByCarbs || predictionsAreStaleByActions || predictionsAreMissingMealContext
-        val hidePredictions = false
+        val hidePredictions = predictionsAreStaleByBg || predictionsAreMissingMealContext
         val markPredictionPendingRecalc = predictionsAreStale
         val predictionsAvailable =
             apsResult?.predictionsAsGv?.isNotEmpty() == true ||
@@ -145,6 +146,7 @@ class PreparePredictionsWorker(
             for (prediction in predictions) {
                 if (prediction.data.value < 40) continue
                 if (prediction.data.sourceSensor == SourceSensor.AIMI_FINAL_PREDICTION ||
+                    prediction.data.sourceSensor == SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION ||
                     prediction.data.sourceSensor == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
                     prediction.data.sourceSensor == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION ||
                     prediction.data.sourceSensor == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||
@@ -192,12 +194,18 @@ class PreparePredictionsWorker(
         val windows = activityWindows(first, last)
         if (windows.isEmpty()) return values
 
+        var waitingPoints = 0
         var activePoints = 0
         var tailPoints = 0
         val mapped = values.map { bg ->
             if (bg.sourceSensor !in colorableSources) return@map bg
             val phase = activityPhase(bg.timestamp, windows)
             when (phase) {
+                SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION -> {
+                    waitingPoints++
+                    bg.copy(sourceSensor = phase)
+                }
+
                 SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION -> {
                     activePoints++
                     bg.copy(sourceSensor = phase)
@@ -211,12 +219,12 @@ class PreparePredictionsWorker(
                 else                                         -> bg
             }
         }
-        if (activePoints > 0 || tailPoints > 0) {
+        if (waitingPoints > 0 || activePoints > 0 || tailPoints > 0) {
             aapsLogger.debug(
                 LTag.WORKER,
-                "AIMI activity forecast coloring: activePoints=$activePoints tailPoints=$tailPoints " +
+                "AIMI activity forecast coloring: waitingPoints=$waitingPoints activePoints=$activePoints tailPoints=$tailPoints " +
                     "pendingRecalc=$pendingRecalc " +
-                    "windows=${windows.joinToString { "${it.label} active=${dateUtil.timeString(it.start)}-${dateUtil.timeString(it.activeEnd)} tailEnd=${dateUtil.timeString(it.tailEnd)}" }}"
+                    "windows=${windows.joinToString { "${it.label} waitingFrom=${dateUtil.timeString(it.created)} active=${dateUtil.timeString(it.start)}-${dateUtil.timeString(it.activeEnd)} tailEnd=${dateUtil.timeString(it.tailEnd)}" }}"
             )
         }
         return mapped
@@ -224,6 +232,7 @@ class PreparePredictionsWorker(
 
     private fun SourceSensor.isAimiFinalLineSource(): Boolean =
         this == SourceSensor.AIMI_FINAL_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION ||
             this == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||
@@ -241,11 +250,12 @@ class PreparePredictionsWorker(
                     val mode = tokenFromNote(event.note, "mode") ?: "ACTIVITY"
                     val duration = (tokenFromNote(event.note, "duration")?.toLongOrNull() ?: (event.duration / T.mins(1).msecs())).coerceAtLeast(0)
                     val tail = (tokenFromNote(event.note, "tail")?.toLongOrNull() ?: 0L).coerceAtLeast(0)
+                    val created = activityCreatedAt(event.timestamp, event.dateCreated, event.note)
                     val start = event.timestamp
                     val activeEnd = start + T.mins(duration).msecs()
                     val tailEnd = activeEnd + T.mins(tail).msecs()
-                    if (tailEnd < firstPrediction || start > lastPrediction) null
-                    else ActivityWindow(start, activeEnd, tailEnd, mode)
+                    if (tailEnd < firstPrediction || created > lastPrediction) null
+                    else ActivityWindow(created, start, activeEnd, tailEnd, mode)
                 }
                 .toList()
         } catch (e: Exception) {
@@ -260,7 +270,18 @@ class PreparePredictionsWorker(
             ?.substringAfter('=')
             ?.takeIf { it.isNotBlank() }
 
+    private fun activityCreatedAt(timestamp: Long, dateCreated: Long, note: String?): Long {
+        if (dateCreated > 0) return dateCreated
+        val startOffset = tokenFromNote(note, "startOffset")?.toLongOrNull()
+        return if (startOffset != null && startOffset > 0) {
+            timestamp - T.mins(startOffset).msecs()
+        } else {
+            timestamp
+        }
+    }
+
     private fun activityPhase(timestamp: Long, windows: List<ActivityWindow>): SourceSensor? {
+        if (windows.any { timestamp >= it.created && timestamp < it.start }) return SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION
         if (windows.any { timestamp >= it.start && timestamp <= it.activeEnd }) return SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION
         if (windows.any { timestamp > it.activeEnd && timestamp <= it.tailEnd }) return SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
         return null
@@ -484,7 +505,7 @@ class PreparePredictionsWorker(
                 .firstOrNull {
                     it.type == TE.Type.EXERCISE &&
                         it.note?.contains("AIMI_ACTIVITY_V2") == true &&
-                        isRelevant(it.timestamp, it.dateCreated)
+                        isRelevant(activityCreatedAt(it.timestamp, it.dateCreated, it.note), it.dateCreated)
                 }
             if (activity != null) return logPending(
                 kind = "activity",

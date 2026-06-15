@@ -186,6 +186,13 @@ class ActivityManager @Inject constructor() {
             else             -> 0
         }
         val effectNow = manual.mode.effectFraction * currentPhase
+        val newInsulinOverlap = when {
+            currentPhase > 0.0       -> currentPhase
+            startOffset in 1..75     -> 1.0
+            startOffset in 76..120   -> ((120 - startOffset).toDouble() / 45.0).coerceIn(0.0, 1.0)
+            else                     -> 0.0
+        }
+        val newInsulinFactor = (1.0 - manual.mode.effectFraction * newInsulinOverlap).coerceIn(0.55, 1.0)
         val state = when {
             manual.mode == ManualMode.SPORT && currentPhase > 0.0 -> ActivityState.MODERATE
             manual.mode == ManualMode.WALK && currentPhase > 0.0  -> ActivityState.LIGHT
@@ -207,10 +214,12 @@ class ActivityManager @Inject constructor() {
             protectionMode = false,
             description = "${manual.mode.label} ${manual.durationMinutes}м: $phaseDescription, " +
                 "ISF x${"%.2f".format(1.0 + effectNow)}, basal x${"%.2f".format(1.0 - effectNow)}, " +
+                "новый инсулин x${"%.2f".format(newInsulinFactor)}, " +
                 "расход ${"%.1f".format(glucoseUse)} mg/dL/5м",
             manualMode = manual.mode.label,
             effectFraction = manual.mode.effectFraction,
             currentPhase = currentPhase,
+            newInsulinFactor = newInsulinFactor,
             startOffsetMinutes = startOffset,
             activeRemainingMinutes = activeRemaining,
             tailRemainingMinutes = tailRemaining,

@@ -55,6 +55,7 @@ object ForecastCarbsCalculator {
 
     private fun SourceSensor.isFinalAimiLineSource(): Boolean =
         this == SourceSensor.AIMI_FINAL_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
 }

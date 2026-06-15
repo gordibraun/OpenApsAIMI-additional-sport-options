@@ -45,6 +45,7 @@ fun GlucoseValue.SourceSensor.fromDb(): SourceSensor =
         GlucoseValue.SourceSensor.UAM_PREDICTION         -> SourceSensor.UAM_PREDICTION
         GlucoseValue.SourceSensor.ZT_PREDICTION          -> SourceSensor.ZT_PREDICTION
         GlucoseValue.SourceSensor.AIMI_FINAL_PREDICTION  -> SourceSensor.AIMI_FINAL_PREDICTION
+        GlucoseValue.SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION -> SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION
         GlucoseValue.SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION -> SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION
         GlucoseValue.SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION -> SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
         GlucoseValue.SourceSensor.AIMI_BEFORE_DECISION_PREDICTION -> SourceSensor.AIMI_BEFORE_DECISION_PREDICTION
@@ -93,6 +94,7 @@ fun SourceSensor.toDb(): GlucoseValue.SourceSensor =
         SourceSensor.UAM_PREDICTION         -> GlucoseValue.SourceSensor.UAM_PREDICTION
         SourceSensor.ZT_PREDICTION          -> GlucoseValue.SourceSensor.ZT_PREDICTION
         SourceSensor.AIMI_FINAL_PREDICTION  -> GlucoseValue.SourceSensor.AIMI_FINAL_PREDICTION
+        SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION -> GlucoseValue.SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION
         SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION -> GlucoseValue.SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION
         SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION -> GlucoseValue.SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION
         SourceSensor.AIMI_BEFORE_DECISION_PREDICTION -> GlucoseValue.SourceSensor.AIMI_BEFORE_DECISION_PREDICTION

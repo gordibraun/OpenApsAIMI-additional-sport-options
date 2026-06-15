@@ -97,6 +97,7 @@ import javax.inject.Provider
 import javax.inject.Singleton
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.max
 import kotlin.math.min
 
 @Singleton
@@ -1292,6 +1293,7 @@ class DataHandlerMobile @Inject constructor(
             SourceSensor.UAM_PREDICTION   -> rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
             SourceSensor.ZT_PREDICTION    -> rh.gac(context, app.aaps.core.ui.R.attr.ztColor)
             SourceSensor.AIMI_FINAL_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.aimiFinalPredictionColor)
+            SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION -> rh.gc(app.aaps.core.ui.R.color.aimi_activity_waiting_prediction)
             SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION -> rh.gc(app.aaps.core.ui.R.color.aimi_activity_active_prediction)
             SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION -> rh.gc(app.aaps.core.ui.R.color.aimi_activity_tail_prediction)
             SourceSensor.AIMI_BEFORE_DECISION_PREDICTION -> rh.gac(context, app.aaps.core.ui.R.attr.carbsColor)
@@ -1318,13 +1320,48 @@ class DataHandlerMobile @Inject constructor(
             isfMgdl = profile.getIsfMgdlForCarbs(now, "Wear forecast carbs", config, processedDeviceStatusData),
             ic = profile.getIc()
         )
+        val apsCarbsReq = loopForecastCarbsReq(now, "Wear forecast carbs")
+        val carbsReq = max(result?.carbs ?: 0, apsCarbsReq)
         aapsLogger.debug(
             LTag.WEAR,
-            "Wear forecast carbs from AIMI_FINAL: carbs=${result?.carbs ?: 0} " +
+            "Wear forecast carbs from AIMI_FINAL: carbs=$carbsReq graph=${result?.carbs ?: 0} aps=$apsCarbsReq " +
                 "min=${result?.minBgMgdl?.let { "%.0f".format(it) } ?: "n/a"} " +
                 "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(targetMgdl)}"
         )
-        return result?.carbs ?: 0
+        return carbsReq
+    }
+
+    private fun loopForecastCarbsReq(now: Long, caller: String): Int {
+        var carbs = 0
+        var within = 0
+        var source = ""
+        loop.lastRun?.let { lastRun ->
+            if (now - lastRun.lastAPSRun <= T.mins(15).msecs()) {
+                val result = lastRun.constraintsProcessed ?: lastRun.request
+                val candidate = result?.carbsReq ?: 0
+                if (candidate > carbs) {
+                    carbs = candidate
+                    within = result?.carbsReqWithin ?: 0
+                    source = "loop"
+                }
+            }
+        }
+        val deviceTime = processedDeviceStatusData.openAPSData.clockSuggested
+        if (deviceTime > 0L && now - deviceTime <= T.mins(15).msecs()) {
+            val result = processedDeviceStatusData.getAPSResult()
+            val candidate = result?.carbsReq ?: 0
+            if (candidate > carbs) {
+                carbs = candidate
+                within = result?.carbsReqWithin ?: 0
+                source = "deviceStatus"
+            }
+        }
+        if (carbs <= 0) return 0
+        aapsLogger.debug(
+            LTag.WEAR,
+            "$caller uses APS carbsReq candidate: carbs=$carbs within=${within}m source=$source"
+        )
+        return carbs
     }
 
     private fun finalForecastPendingTreatmentRecalculation(now: Long, caller: String): Boolean {

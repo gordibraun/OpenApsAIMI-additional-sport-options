@@ -81,7 +81,9 @@ object SmbInstructionExecutor {
         val insulinStep: Float,
         val highBgOverrideUsed: Boolean,
         val profileCurrentBasal: Double,
-        val cob: Float
+        val cob: Float,
+        val plannedActivityForNewInsulin: Boolean,
+        val plannedActivityAllowsHighBgInsulin: Boolean
     )
 
     data class Hooks(
@@ -331,13 +333,14 @@ object SmbInstructionExecutor {
         var smbDecision = (alpha * optimalBasalMpc + (1 - alpha) * finalInsulinDose).toFloat()
 
         val suspectedLateFatMeal = input.highCarbTime && hooks.runtimeToMinutes(input.highCarbRunTime) > 90
+        val exerciseContext = input.sportTime || input.plannedActivityForNewInsulin
         smbDecision = hooks.applySafety(
             input.mealData,
             smbDecision,
             input.threshold,
             input.rT.reason,
             input.pkpdRuntime,
-            input.sportTime,
+            exerciseContext,
             suspectedLateFatMeal
         )
         input.rT.reason.appendLine(
@@ -357,12 +360,13 @@ object SmbInstructionExecutor {
         val highBgRiseActive =
             ((input.bg >= 120.0 && (input.delta >= 1.5 || input.combinedDelta >= 2.0)) || hyperPlateauActive) &&
                 (input.iob < input.maxSmb) &&
+                (!input.plannedActivityForNewInsulin || input.plannedActivityAllowsHighBgInsulin) &&
                 !hooks.isBelowHypo(input.bg, input.predictedBg.toDouble(), input.eventualBg, hypoGuard, input.delta)
         val dampingOut = SmbDampingUsecase.run(
             input.pkpdRuntime,
             SmbDampingUsecase.Input(
                 smbDecision = smbDecision.toDouble(),
-                exercise = input.sportTime,
+                exercise = exerciseContext,
                 suspectedLateFatMeal = input.lateFatRiseFlag,
                 mealModeRun = mealModeRun,
                 highBgRiseActive = highBgRiseActive
@@ -395,23 +399,27 @@ object SmbInstructionExecutor {
         var highBgOverrideUsed = input.highBgOverrideUsed
         var newInterval = input.currentInterval
 
-        HighBgOverride.apply(
-            bg = input.bg,
-            delta = input.delta,
-            predictedBg = input.predictedBg.toDouble(),
-            eventualBg = input.eventualBg,
-            hypoGuard = hypoGuard,
-            iob = input.iob.toDouble(),
-            maxSmb = input.maxSmb,
-            currentDose = smbAfterDamping,
-            pumpStep = input.insulinStep.toDouble()
-        ).also { res ->
-            smbAfterDamping = res.dose
-            if (res.overrideUsed) {
-                highBgOverrideFlag = true
-                highBgOverrideUsed = true
-                newInterval = res.newInterval ?: newInterval
+        if (!input.plannedActivityForNewInsulin || input.plannedActivityAllowsHighBgInsulin) {
+            HighBgOverride.apply(
+                bg = input.bg,
+                delta = input.delta,
+                predictedBg = input.predictedBg.toDouble(),
+                eventualBg = input.eventualBg,
+                hypoGuard = hypoGuard,
+                iob = input.iob.toDouble(),
+                maxSmb = input.maxSmb,
+                currentDose = smbAfterDamping,
+                pumpStep = input.insulinStep.toDouble()
+            ).also { res ->
+                smbAfterDamping = res.dose
+                if (res.overrideUsed) {
+                    highBgOverrideFlag = true
+                    highBgOverrideUsed = true
+                    newInterval = res.newInterval ?: newInterval
+                }
             }
+        } else {
+            input.rT.reason.append("\nHighBG override skipped: planned activity already in forecast")
         }
 
         val finalSmb = SmbQuantizer.quantizeToPumpStep(

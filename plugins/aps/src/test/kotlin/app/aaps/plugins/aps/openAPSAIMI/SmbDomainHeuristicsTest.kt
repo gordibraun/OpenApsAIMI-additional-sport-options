@@ -9,6 +9,7 @@ import app.aaps.plugins.aps.openAPSAIMI.pkpd.PkPdRuntime
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.SmbDamping
 import app.aaps.plugins.aps.openAPSAIMI.safety.HighBgOverride
 import app.aaps.plugins.aps.openAPSAIMI.safety.HypoTools
+import app.aaps.plugins.aps.openAPSAIMI.safety.RecentSmbOverdeliveryGuard
 import app.aaps.plugins.aps.openAPSAIMI.smb.SmbDampingUsecase
 import app.aaps.plugins.aps.openAPSAIMI.smb.SmbQuantizer
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -186,6 +187,101 @@ class SmbDomainHeuristicsTest {
         assertTrue(res.overrideUsed)
         assertEquals(Constants.DEFAULT_INSULIN_STEP_U, res.dose, 1e-6)
         assertEquals(0, res.newInterval)
+    }
+
+    @Test
+    fun recentSmbGuardBlocksCumulativeHighBgBurstWithoutFood() {
+        val decision = RecentSmbOverdeliveryGuard.evaluate(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = false,
+                bg = 205.0,
+                iobU = 5.95,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 3.8,
+                recentSmb30U = 5.6
+            )
+        )
+
+        assertTrue(decision.blockSmb)
+    }
+
+    @Test
+    fun recentSmbGuardAllowsExplicitFoodDespiteBurst() {
+        val decision = RecentSmbOverdeliveryGuard.evaluate(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = true,
+                bg = 205.0,
+                iobU = 5.95,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 3.8,
+                recentSmb30U = 5.6
+            )
+        )
+
+        assertFalse(decision.blockSmb)
+    }
+
+    @Test
+    fun recentSmbGuardBlocksModerateBgWhenIobAlreadyHeavyWithoutFood() {
+        val decision = RecentSmbOverdeliveryGuard.evaluate(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = false,
+                bg = 152.0,
+                iobU = 8.59,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 2.1,
+                recentSmb30U = 2.1
+            )
+        )
+
+        assertTrue(decision.blockSmb)
+    }
+
+    @Test
+    fun recentSmbGuardAllowsModerateBgWhenIobIsNotAlreadyHeavy() {
+        val decision = RecentSmbOverdeliveryGuard.evaluate(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = false,
+                bg = 152.0,
+                iobU = 3.2,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 0.0,
+                recentSmb30U = 0.0
+            )
+        )
+
+        assertFalse(decision.blockSmb)
+    }
+
+    @Test
+    fun recentSmbGuardLeavesExtremeBgToHighBgLogic() {
+        val decision = RecentSmbOverdeliveryGuard.evaluate(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = false,
+                bg = 280.0,
+                iobU = 5.95,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 3.8,
+                recentSmb30U = 5.6
+            )
+        )
+
+        assertFalse(decision.blockSmb)
     }
 
     @Test

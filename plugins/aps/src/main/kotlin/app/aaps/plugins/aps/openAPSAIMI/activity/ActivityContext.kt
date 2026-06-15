@@ -30,6 +30,7 @@ data class ActivityContext(
     val manualMode: String? = null,
     val effectFraction: Double = 0.0,
     val currentPhase: Double = 0.0,
+    val newInsulinFactor: Double = 1.0,
     val startOffsetMinutes: Int = 0,
     val activeRemainingMinutes: Int = 0,
     val tailRemainingMinutes: Int = 0,

@@ -234,6 +234,55 @@ connect_mdns_services() {
   return 1
 }
 
+dns_sd_browse_instances() {
+  local service_type="$1"
+  command -v dns-sd >/dev/null 2>&1 || return 1
+  dns-sd -B "$service_type" local. 2>/dev/null &
+  local pid=$!
+  sleep 5
+  kill "$pid" >/dev/null 2>&1 || true
+  wait "$pid" 2>/dev/null || true
+}
+
+dns_sd_resolve_instance() {
+  local instance="$1"
+  local service_type="$2"
+  command -v dns-sd >/dev/null 2>&1 || return 1
+  dns-sd -L "$instance" "${service_type}." local. 2>&1 &
+  local pid=$!
+  sleep 5
+  kill "$pid" >/dev/null 2>&1 || true
+  wait "$pid" 2>/dev/null || true
+}
+
+connect_dns_sd_services() {
+  command -v dns-sd >/dev/null 2>&1 || return 1
+
+  local service_type instance resolved target host port
+  for service_type in _adb-tls-connect._tcp _adb._tcp; do
+    instance="$(dns_sd_browse_instances "$service_type" | awk -v type="$service_type." '$0 ~ type { print substr($0, index($0, type) + length(type)); exit }')"
+    [ -n "$instance" ] || continue
+
+    log "Trying macOS dns-sd Android Wireless Debugging service: $instance ($service_type)..."
+    resolved="$(dns_sd_resolve_instance "$instance" "$service_type")"
+    printf '%s\n' "$resolved" | sed '/^$/d'
+    target="$(printf '%s\n' "$resolved" | awk '/can be reached at/ { host=$(NF-3); port=$(NF-2); sub(/\.$/, "", host); print host ":" port; exit }')"
+    [ -n "$target" ] || continue
+
+    "$ADB" connect "$target" || true
+    sleep 1
+    "$ADB" devices -l
+    if "$ADB" devices | awk -v target="$target" '$1 == target && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }' \
+      && target_matches_phone "$target"; then
+      printf '%s\n' "${target%:*}" > "$IP_FILE"
+      log "ADB Wi-Fi connected via macOS dns-sd: $target"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 adb_port_candidates() {
   {
     arp -an 2>/dev/null \
@@ -327,6 +376,10 @@ if [ -f "$IP_FILE" ]; then
 fi
 
 if connect_mdns_services; then
+  exit 0
+fi
+
+if connect_dns_sd_services; then
   exit 0
 fi
 

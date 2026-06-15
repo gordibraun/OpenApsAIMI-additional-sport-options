@@ -107,9 +107,15 @@ object AdvancedPredictionEngine {
         val explicitCarbTimeline = carbImpactTimelineMgdlPer5m
             ?.takeIf { it.isNotEmpty() }
             ?.map { it.coerceAtLeast(0.0) }
+        val explicitFastCarbs = explicitTypedCarbs && effectiveFoodTypeName == "fast"
+        val typedCarbImpactCapMgdlPer5m = when {
+            explicitFastCarbs -> 28.0
+            explicitTypedCarbs && effectiveFoodTypeName == "balanced" -> 42.0
+            else -> Double.POSITIVE_INFINITY
+        }
         val observedCarbImpact = observedCarbImpactMgdlPer5m.coerceAtLeast(0.0)
         val typedObservedTailFactor = when (effectiveFoodTypeName) {
-            "fast" -> 0.45
+            "fast" -> 0.25
             "slow" -> 1.0
             else -> 0.75
         }
@@ -215,7 +221,7 @@ object AdvancedPredictionEngine {
                 baseCarbImpactPer5Min,
                 liveCarbImpactPer5Min,
                 residualCarbImpactPer5Min
-            )
+            ).coerceAtMost(typedCarbImpactCapMgdlPer5m)
             val decisionLiftPer5Min = decisionLiftTotalMgDl * decisionWeights[stepIndex]
             val decisionDropPer5Min = decisionDropTotalMgDl * decisionWeights[stepIndex]
             val freshSmbDropPer5Min = freshSmbPressureDropMgDl * decisionWeights[stepIndex]

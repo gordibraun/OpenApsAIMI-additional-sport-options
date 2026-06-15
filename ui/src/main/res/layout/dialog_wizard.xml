@@ -101,6 +101,18 @@
 
         </LinearLayout>
 
+        <TextView
+            android:id="@+id/total_reason"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="14dp"
+            android:layout_marginTop="3dp"
+            android:layout_marginEnd="14dp"
+            android:textAlignment="center"
+            android:textAppearance="?android:attr/textAppearanceSmall"
+            android:visibility="gone"
+            tools:text="Углеводы учтены, но новый болюс сейчас 0" />
+
         <LinearLayout
             android:id="@+id/spacer"
             android:layout_width="match_parent"
@@ -311,6 +323,25 @@
             android:textColor="?attr/carbsColor"
             android:visibility="gone"
             tools:text="Болюс: 1.20 → 0.75 ед.\nУглеводы: через 15 мин\nПричина: ближе к цели 117\nВыбрано: сейчас; сейчас хуже" />
+
+        <TextView
+            android:id="@+id/future_activity_note"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_marginTop="2dp"
+            android:layout_marginEnd="10dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="6dp"
+            android:breakStrategy="balanced"
+            android:hyphenationFrequency="none"
+            android:includeFontPadding="false"
+            android:lineSpacingExtra="2dp"
+            android:singleLine="false"
+            android:textAppearance="?android:attr/textAppearanceSmall"
+            android:textColor="@color/aimi_activity_active_prediction"
+            android:visibility="gone"
+            tools:text="Будущая нагрузка учтена: WALK через 20 мин" />
 
         <include
             android:id="@+id/notes_layout"

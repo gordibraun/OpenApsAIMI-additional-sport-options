@@ -34,6 +34,7 @@ import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
 import app.aaps.core.graph.data.GraphViewWithCleanup
 import app.aaps.core.interfaces.aps.AimiMealAssist
+import app.aaps.core.interfaces.aps.APSResult
 import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.automation.Automation
@@ -199,6 +200,20 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val mode: String,
         val phase: ActivityButtonPhase,
         val minutes: Int
+    )
+
+    private data class ActivityBolusContext(
+        val factor: Double,
+        val description: String
+    )
+
+    private data class ActivityWindowForBolus(
+        val mode: String,
+        val effectFraction: Double,
+        val start: Long,
+        val activeEnd: Long,
+        val tailEnd: Long,
+        val tailMinutes: Long
     )
 
     // This property is only valid between onCreateView and
@@ -558,12 +573,8 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
     private fun currentActivityButtonState(now: Long = dateUtil.now()): ActivityButtonState? =
         try {
-            persistenceLayer.getTherapyEventDataFromToTime(
-                now - T.hours(12).msecs(),
-                now + T.hours(6).msecs()
-            ).blockingGet()
+            aimiActivityEvents(now)
                 .asSequence()
-                .filter { it.isValid && it.type == TE.Type.EXERCISE && it.note?.contains("AIMI_ACTIVITY_V2") == true }
                 .mapNotNull { event ->
                     val tokens = activityNoteTokens(event.note)
                     val mode = tokens["mode"]?.uppercase(Locale.US)?.takeIf { it == "WALK" || it == "SPORT" } ?: return@mapNotNull null
@@ -591,6 +602,83 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             aapsLogger.debug(LTag.UI, "Cannot read AIMI activity button state: ${e.message}")
             null
         }
+
+    private fun currentActivityBolusContext(now: Long): ActivityBolusContext? {
+        val event = aimiActivityEvents(now)
+            .mapNotNull { event ->
+                val tokens = activityNoteTokens(event.note)
+                val mode = tokens["mode"]?.uppercase(Locale.US)?.takeIf { it == "WALK" || it == "SPORT" } ?: return@mapNotNull null
+                val effect = activityEffectFraction(tokens, mode)
+                if (effect <= 0.0) return@mapNotNull null
+                val duration = (tokens["duration"]?.toLongOrNull() ?: (event.duration / T.mins(1).msecs())).coerceAtLeast(0L)
+                val tail = (tokens["tail"]?.toLongOrNull() ?: 0L).coerceAtLeast(0L)
+                val start = event.timestamp
+                val activeEnd = start + T.mins(duration).msecs()
+                val tailEnd = activeEnd + T.mins(tail).msecs()
+                if (start > now + T.hours(2).msecs() || tailEnd < now - T.mins(5).msecs()) return@mapNotNull null
+                event to ActivityWindowForBolus(mode, effect, start, activeEnd, tailEnd, tail)
+            }
+            .minByOrNull { abs(it.first.timestamp - now) }
+            ?: return null
+
+        val window = event.second
+        val startOffset = T.msecs(window.start - now).mins().toInt()
+        val overlap = when {
+            now in window.start..window.activeEnd -> 1.0
+            now in (window.activeEnd + 1)..window.tailEnd && window.tailMinutes > 0L ->
+                ((window.tailEnd - now).toDouble() / T.mins(window.tailMinutes).msecs().toDouble()).coerceIn(0.0, 1.0)
+            startOffset in 1..75 -> 1.0
+            startOffset in 76..120 -> ((120 - startOffset).toDouble() / 45.0).coerceIn(0.0, 1.0)
+            else -> 0.0
+        }
+        if (overlap <= 0.0) return null
+
+        val factor = (1.0 - window.effectFraction * overlap).coerceIn(0.55, 1.0)
+        val phase = when {
+            now < window.start -> "старт через ${startOffset.coerceAtLeast(0)} мин"
+            now <= window.activeEnd -> "активна"
+            else -> "хвост"
+        }
+        return ActivityBolusContext(
+            factor = factor,
+            description = "${window.mode} $phase, новый инсулин x${"%.2f".format(factor)}"
+        )
+    }
+
+    private fun activityEffectFraction(tokens: Map<String, String>, mode: String): Double {
+        tokens["effect"]?.toDoubleOrNull()?.let { return (it / 100.0).coerceIn(0.0, 0.45) }
+        return when (mode) {
+            "WALK" -> 0.20
+            "SPORT" -> 0.30
+            else -> 0.0
+        }
+    }
+
+    private fun latestAimiActivityChangeTime(now: Long): Long =
+        aimiActivityEvents(now)
+            .maxOfOrNull { aimiActivityCreatedAt(it) }
+            ?: 0L
+
+    private fun aimiActivityEvents(now: Long): List<TE> =
+        try {
+            persistenceLayer.getTherapyEventDataFromToTime(
+                now - T.hours(12).msecs(),
+                now + T.hours(6).msecs()
+            ).blockingGet()
+                .filter { it.isValid && it.type == TE.Type.EXERCISE && it.note?.contains("AIMI_ACTIVITY_V2") == true }
+        } catch (_: Exception) {
+            emptyList()
+        }
+
+    private fun aimiActivityCreatedAt(event: TE): Long {
+        if (event.dateCreated > 0) return event.dateCreated
+        val startOffset = activityNoteTokens(event.note)["startOffset"]?.toLongOrNull()
+        return if (startOffset != null && startOffset > 0) {
+            event.timestamp - T.mins(startOffset).msecs()
+        } else {
+            event.timestamp
+        }
+    }
 
     private fun activityNoteTokens(note: String?): Map<String, String> =
         note
@@ -1110,6 +1198,28 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             rh.gs(app.aaps.core.ui.R.string.bolus) + ": " + rh.gs(app.aaps.core.ui.R.string.format_insulin_units, bolusIob().iob) + "\n" +
             rh.gs(app.aaps.core.ui.R.string.basal) + ": " + rh.gs(app.aaps.core.ui.R.string.format_insulin_units, basalIob().basaliob)
 
+    private fun apsDecisionLine(result: APSResult?): String? {
+        result ?: return null
+        val parts = mutableListOf<String>()
+        if (result.smb > 0.0) {
+            parts += rh.gs(app.aaps.core.ui.R.string.smb_shortname) + " " +
+                rh.gs(app.aaps.core.ui.R.string.format_insulin_units, result.smb)
+        }
+        if (result.isTempBasalRequested) {
+            val duration = rh.gs(app.aaps.core.ui.R.string.format_mins, result.duration)
+            val tempBasal = if (result.percent > 0) {
+                "${rh.gs(R.string.temp_basal_overview_short_name)} ${result.percent}% $duration"
+            } else {
+                "${rh.gs(R.string.temp_basal_overview_short_name)} ${String.format(Locale.US, "%.2f", result.rate)} U/h $duration"
+            }
+            parts += tempBasal
+        }
+        if (result.carbsReq > 0) {
+            parts += rh.gs(app.aaps.core.objects.R.string.format_carbs, result.carbsReq)
+        }
+        return parts.takeIf { it.isNotEmpty() }?.joinToString(" | ")
+    }
+
     private fun updateIobCob() {
         val iobText = iobText()
         val iobDialogText = iobDialogText()
@@ -1140,6 +1250,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             if (profile != null && profileStore != null) {
                 val profileName = profileFunction.getProfileName()
                 val forecastRequiredCarbs = forecastRequiredCarbsFromFinalLine(profile, fullPredictionTargetMgdl())
+                val activityBolusContext = currentActivityBolusContext(dateUtil.now())
                 overviewForecastRequiredCarbs = forecastRequiredCarbs
                 val w = bolusWizardProvider.get().doCalc(
                     profile,                       // specificProfile
@@ -1162,14 +1273,19 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     0,                             // carbTime
                     usePercentage = wizardUsePercentage,
                     totalPercentage = preferences.get(app.aaps.core.keys.IntKey.OverviewBolusPercentage).toDouble(),
-                    forecastRequiredCarbs = forecastRequiredCarbs
+                    forecastRequiredCarbs = forecastRequiredCarbs,
+                    activityNewInsulinFactor = activityBolusContext?.factor ?: 1.0,
+                    activityDescription = activityBolusContext?.description
                 )
 
                 aapsLogger.debug(
                     LTag.UI,
                     "Overview wizard line: insulin=${"%.2f".format(w.calculatedTotalInsulin)} bg=$bg displayCob=$displayCob " +
-                        "usedCob=$cob useCob=$wizardUseCob useTrend=$wizardUseTrend usePercentage=$wizardUsePercentage " +
-                        "forecastRequiredCarbs=${w.forecastRequiredCarbs} source=${w.forecastRequiredCarbsSource}"
+                        "usedCob=${"%.1f".format(w.cobUsedForInsulin)} handledCob=${"%.1f".format(w.cobAlreadyHandledByAimi)} " +
+                        "activityHandledCob=${"%.1f".format(w.cobAlreadyHandledByActivity)} useCob=$wizardUseCob useTrend=$wizardUseTrend usePercentage=$wizardUsePercentage " +
+                        "forecastRequiredCarbs=${w.forecastRequiredCarbs} source=${w.forecastRequiredCarbsSource} " +
+                        "activityFactor=${"%.2f".format(activityBolusContext?.factor ?: 1.0)}" +
+                        (activityBolusContext?.description?.let { " activity=$it" } ?: "")
                 )
 
                 // “Результат / Не хватает” без текста, только значение+единица
@@ -1194,14 +1310,14 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             val lastRun = loop.lastRun
 
             if (config.APS && constraintsProcessed != null && lastRun != null) {
+                val decisionLine = apsDecisionLine(constraintsProcessed) ?: wizardLine
 
-                // ВСЕГДА добавляем вторую строку (результат / не хватает)
-                wizardLine?.let {
+                // Показываем то же решение, которое уже использовано для финального прогноза.
+                decisionLine?.let {
                     cobText += "\n$it"
                 }
 
-                // Анимация — оставляем по старой логике
-                if (overviewForecastRequiredCarbs > 0) {
+                if (overviewForecastRequiredCarbs > 0 || constraintsProcessed.carbsReq > 0) {
                     if (carbAnimation?.isRunning == false) carbAnimation?.start()
                 } else {
                     carbAnimation?.stop()
@@ -1429,6 +1545,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
     private fun SourceSensor.isFinalAimiDisplaySource(): Boolean =
         this == SourceSensor.AIMI_FINAL_PREDICTION ||
+            this == SourceSensor.AIMI_ACTIVITY_WAITING_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_ACTIVE_PREDICTION ||
             this == SourceSensor.AIMI_ACTIVITY_TAIL_PREDICTION ||
             this == SourceSensor.AIMI_BEFORE_DECISION_PREDICTION ||
@@ -1456,13 +1573,48 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             isfMgdl = isfMgdl,
             ic = profile.getIc()
         )
+        val apsCarbsReq = loopForecastCarbsReq(now, "Overview forecast carbs")
+        val carbsReq = max(result?.carbs ?: 0, apsCarbsReq)
         aapsLogger.debug(
             LTag.UI,
-            "Overview forecast carbs from AIMI_FINAL: carbs=${result?.carbs ?: 0} " +
+            "Overview forecast carbs from AIMI_FINAL: carbs=$carbsReq graph=${result?.carbs ?: 0} aps=$apsCarbsReq " +
                 "min=${result?.minBgMgdl?.let { "%.0f".format(it) } ?: "n/a"} " +
                 "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(target)}"
         )
-        return result?.carbs ?: 0
+        return carbsReq
+    }
+
+    private fun loopForecastCarbsReq(now: Long, caller: String): Int {
+        var carbs = 0
+        var within = 0
+        var source = ""
+        loop.lastRun?.let { lastRun ->
+            if (now - lastRun.lastAPSRun <= T.mins(15).msecs()) {
+                val result = lastRun.constraintsProcessed ?: lastRun.request
+                val candidate = result?.carbsReq ?: 0
+                if (candidate > carbs) {
+                    carbs = candidate
+                    within = result?.carbsReqWithin ?: 0
+                    source = "loop"
+                }
+            }
+        }
+        val deviceTime = processedDeviceStatusData.openAPSData.clockSuggested
+        if (deviceTime > 0L && now - deviceTime <= T.mins(15).msecs()) {
+            val result = processedDeviceStatusData.getAPSResult()
+            val candidate = result?.carbsReq ?: 0
+            if (candidate > carbs) {
+                carbs = candidate
+                within = result?.carbsReqWithin ?: 0
+                source = "deviceStatus"
+            }
+        }
+        if (carbs <= 0) return 0
+        aapsLogger.debug(
+            LTag.UI,
+            "$caller uses APS carbsReq candidate: carbs=$carbs within=${within}m source=$source"
+        )
+        return carbs
     }
 
     private fun finalForecastPendingTreatmentRecalculation(now: Long, caller: String): Boolean {
@@ -1470,7 +1622,8 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
         val lastBolusChangeTime = persistenceLayer.getNewestBolus()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
         val lastAcceptedTreatmentTime = aimiMealAssist.lastTreatmentAcceptedAt()
-        val latestTreatmentChangeTime = maxOf(lastCarbsChangeTime, lastBolusChangeTime, lastAcceptedTreatmentTime)
+        val lastActivityChangeTime = latestAimiActivityChangeTime(now)
+        val latestTreatmentChangeTime = maxOf(lastCarbsChangeTime, lastBolusChangeTime, lastAcceptedTreatmentTime, lastActivityChangeTime)
         if (latestTreatmentChangeTime <= lastRunTime) return false
         aapsLogger.debug(
             LTag.UI,

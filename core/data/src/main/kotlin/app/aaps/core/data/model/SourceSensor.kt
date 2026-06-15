@@ -41,6 +41,7 @@ enum class SourceSensor(val text: String) {
     UAM_PREDICTION("UAMPrediction"),
     ZT_PREDICTION("ZTPrediction"),
     AIMI_FINAL_PREDICTION("Фин. прогноз AIMI"),
+    AIMI_ACTIVITY_WAITING_PREDICTION("AIMI ожидание нагрузки"),
     AIMI_ACTIVITY_ACTIVE_PREDICTION("AIMI нагрузка"),
     AIMI_ACTIVITY_TAIL_PREDICTION("AIMI хвост нагрузки"),
     AIMI_BEFORE_DECISION_PREDICTION("AIMI до новой подачи"),

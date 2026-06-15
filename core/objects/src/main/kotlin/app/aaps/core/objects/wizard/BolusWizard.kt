@@ -110,6 +110,12 @@ class BolusWizard @Inject constructor(
         private set
     var insulinFromCOB = 0.0
         private set
+    var cobUsedForInsulin = 0.0
+        private set
+    var cobAlreadyHandledByAimi = 0.0
+        private set
+    var cobAlreadyHandledByActivity = 0.0
+        private set
     var insulinFromTrend = 0.0
         private set
     var trend = 0.0
@@ -163,6 +169,8 @@ class BolusWizard @Inject constructor(
     var positiveIOBOnly: Boolean = false
     private var forecastRequiredCarbsOverride: Int? = null
     private var preAimiCalculatedTotalInsulin: Double = 0.0
+    private var activityNewInsulinFactor: Double = 1.0
+    private var activityDescription: String? = null
 
     fun doCalc(
         profile: Profile,
@@ -188,7 +196,9 @@ class BolusWizard @Inject constructor(
         totalPercentage: Double = 100.0,
         quickWizard: Boolean = false,
         positiveIOBOnly: Boolean = false,
-        forecastRequiredCarbs: Int? = null
+        forecastRequiredCarbs: Int? = null,
+        activityNewInsulinFactor: Double = 1.0,
+        activityDescription: String? = null
     ): BolusWizard {
 
         this.profile = profile
@@ -217,6 +227,8 @@ class BolusWizard @Inject constructor(
         this.forecastRequiredCarbsOverride = forecastRequiredCarbs
         this.forecastRequiredCarbs = 0
         this.forecastRequiredCarbsSource = "wizard"
+        this.activityNewInsulinFactor = activityNewInsulinFactor.coerceIn(0.55, 1.0)
+        this.activityDescription = activityDescription
 
         // Insulin from BG
         sens = profileUtil.fromMgdlToUnits(profile.getIsfMgdlForCarbs(dateUtil.now(), "BolusWizard", config, processedDeviceStatusData))
@@ -247,7 +259,31 @@ class BolusWizard @Inject constructor(
         // Insulin from carbs
         ic = profile.getIc()
         insulinFromCarbs = carbs / ic
-        insulinFromCOB = if (useCob) (cob / ic) else 0.0
+        val activeMealCobAlreadyHandled = if (useCob) {
+            max(
+                aimiMealAssist.activeEpisode()
+                    ?.cobHandledCarbs
+                    ?.toDouble()
+                    ?.coerceIn(0.0, cob)
+                    ?: 0.0,
+                persistedAimiCobAlreadyHandled(cob)
+            )
+        } else 0.0
+        cobAlreadyHandledByActivity = if (useCob) activityProtectiveCobAlreadyHandled(cob - activeMealCobAlreadyHandled) else 0.0
+        cobAlreadyHandledByAimi = if (useCob) {
+            (activeMealCobAlreadyHandled + cobAlreadyHandledByActivity).coerceIn(0.0, cob)
+        } else 0.0
+        cobUsedForInsulin = if (useCob) (cob - cobAlreadyHandledByAimi).coerceAtLeast(0.0) else 0.0
+        insulinFromCOB = if (useCob) (cobUsedForInsulin / ic) else 0.0
+        if (cobAlreadyHandledByAimi > 0.0) {
+            aapsLogger.debug(
+                LTag.APS,
+                "AIMI wizard COB excludes already handled carbs: " +
+                    "displayCob=${"%.1f".format(cob)} mealHandled=${"%.1f".format(activeMealCobAlreadyHandled)} " +
+                    "activityHandled=${"%.1f".format(cobAlreadyHandledByActivity)} totalHandled=${"%.1f".format(cobAlreadyHandledByAimi)} " +
+                    "used=${"%.1f".format(cobUsedForInsulin)} insulinFromCOB=${"%.2f".format(insulinFromCOB)}"
+            )
+        }
 
         // Insulin from IOB
         // IOB calculation
@@ -310,6 +346,70 @@ class BolusWizard @Inject constructor(
         return this
     }
 
+    private fun activityProtectiveCobAlreadyHandled(availableCob: Double): Double {
+        if (!availableCob.isFinite() || availableCob <= 0.0) return 0.0
+        val now = dateUtil.now()
+        return try {
+            persistenceLayer.getCarbsFromTimeToTimeExpanded(now - T.hours(6).msecs(), now + T.hours(6).msecs(), true)
+                .asSequence()
+                .filter { it.isValid && it.amount > 0.0 && it.notes?.contains("AIMI_ACTIVITY_V2_CARBS") == true }
+                .sumOf { carb ->
+                    val note = carb.notes.orEmpty()
+                    val absorptionMinutes = when {
+                        note.contains("type=fast") -> 75.0
+                        note.contains("type=slow") -> 300.0
+                        else                       -> 210.0
+                    }
+                    val elapsedMinutes = (now - carb.timestamp).toDouble() / T.mins(1).msecs().toDouble()
+                    when {
+                        elapsedMinutes <= 0.0              -> carb.amount
+                        elapsedMinutes >= absorptionMinutes -> 0.0
+                        else                               -> carb.amount * (1.0 - elapsedMinutes / absorptionMinutes)
+                    }
+                }
+                .coerceIn(0.0, availableCob)
+        } catch (e: Exception) {
+            aapsLogger.debug(LTag.APS, "AIMI wizard activity protective COB lookup failed: ${e.message}")
+            0.0
+        }
+    }
+
+    private fun persistedAimiCobAlreadyHandled(displayCob: Double): Double {
+        if (!displayCob.isFinite() || displayCob <= 0.0) return 0.0
+        val now = dateUtil.now()
+        val handledRegex = Regex("""AIMI_COB_HANDLED\s+grams=([0-9]+(?:\.[0-9]+)?)""")
+        return try {
+            persistenceLayer.getCarbsFromTimeToTimeExpanded(now - T.hours(6).msecs(), now + T.hours(6).msecs(), true)
+                .asSequence()
+                .filter { it.isValid && it.amount > 0.0 }
+                .mapNotNull { carb ->
+                    val note = carb.notes.orEmpty()
+                    val handledCarbs = handledRegex.find(note)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toDoubleOrNull()
+                        ?.coerceIn(0.0, carb.amount)
+                        ?: return@mapNotNull null
+                    val absorptionMinutes = when {
+                        note.contains("type=fast") -> 75.0
+                        note.contains("type=slow") -> 300.0
+                        else                       -> 210.0
+                    }
+                    val elapsedMinutes = (now - carb.timestamp).toDouble() / T.mins(1).msecs().toDouble()
+                    when {
+                        elapsedMinutes <= 0.0              -> handledCarbs
+                        elapsedMinutes >= absorptionMinutes -> 0.0
+                        else                               -> handledCarbs * (1.0 - elapsedMinutes / absorptionMinutes)
+                    }
+                }
+                .sum()
+                .coerceIn(0.0, displayCob)
+        } catch (e: Exception) {
+            aapsLogger.debug(LTag.APS, "AIMI wizard persisted COB lookup failed: ${e.message}")
+            0.0
+        }
+    }
+
     private fun buildAimiMealInput(): AimiMealInput {
         val units = profileFunction.getUnits()
         val wizardProtectiveCarbs = ((-(totalBeforePercentageAdjustment - insulinFromCarbs)).coerceAtLeast(0.0) * ic).toInt()
@@ -321,7 +421,10 @@ class BolusWizard @Inject constructor(
             LTag.APS,
             "AIMI wizard protective carbs: entered=$carbs type=$selectedFoodType required=$requiredCarbs source=$forecastRequiredCarbsSource " +
                 "wizardArithmetic=$wizardProtectiveCarbs totalBeforePct=${"%.2f".format(totalBeforePercentageAdjustment)} " +
-                "preAimiTotal=${"%.2f".format(preAimiCalculatedTotalInsulin)} insulinFromCarbs=${"%.2f".format(insulinFromCarbs)} ic=${"%.2f".format(ic)}"
+                "preAimiTotal=${"%.2f".format(preAimiCalculatedTotalInsulin)} insulinFromCarbs=${"%.2f".format(insulinFromCarbs)} " +
+                "ic=${"%.2f".format(ic)} " +
+                "activityNewInsulinFactor=${"%.2f".format(activityNewInsulinFactor)}" +
+                (activityDescription?.let { " activity=$it" } ?: "")
         )
         return AimiMealInput(
             timestamp = dateUtil.now(),
@@ -350,20 +453,9 @@ class BolusWizard @Inject constructor(
             wizardInsulinFromSuperBolus = insulinFromSuperBolus,
             correction = correction,
             trendInsulin = insulinFromTrend,
-            notes = notes
-        )
-    }
-
-    fun applyAimiForecastBolusAdjustment(adjustedBolus: Double, explanation: String) {
-        calculatedTotalInsulin = adjustedBolus
-        insulinAfterConstraints = constraintChecker.applyBolusConstraints(ConstraintObject(calculatedTotalInsulin, aapsLogger)).value()
-        aimiMealDecision = aimiMealDecision?.copy(
-            recommendedBolus = insulinAfterConstraints,
-            explanation = "${aimiMealDecision?.explanation.orEmpty()}. $explanation"
-        )
-        aapsLogger.debug(
-            LTag.APS,
-            "AIMI wizard bolus adjusted by forecast: adjusted=${"%.2f".format(insulinAfterConstraints)}U explanation=$explanation"
+            notes = notes,
+            activityNewInsulinFactor = activityNewInsulinFactor,
+            activityDescription = activityDescription
         )
     }
 
@@ -409,13 +501,26 @@ class BolusWizard @Inject constructor(
             else -> "balanced"
         }
         val token = "AIMI_CARB_TYPE type=$normalizedType"
+        val cobHandledToken = aimiCobHandledCarbsForNotes()
+            ?.let { "AIMI_COB_HANDLED grams=$it" }
         val trimmedNotes = notes.trim()
-        if (trimmedNotes.contains("AIMI_CARB_TYPE") || trimmedNotes.contains("type=$normalizedType")) {
+        if ((trimmedNotes.contains("AIMI_CARB_TYPE") || trimmedNotes.contains("type=$normalizedType")) &&
+            (cobHandledToken == null || trimmedNotes.contains("AIMI_COB_HANDLED"))
+        ) {
             return trimmedNotes
         }
-        return listOf(trimmedNotes, token)
+        return listOfNotNull(trimmedNotes, token, cobHandledToken)
             .filter { it.isNotBlank() }
             .joinToString(" ")
+    }
+
+    private fun aimiCobHandledCarbsForNotes(): Int? {
+        if (carbs <= 0) return null
+        val protectiveCarbs = forecastRequiredCarbs.coerceAtLeast(0).coerceAtMost(carbs)
+        return when {
+            aimiMealDecision?.recommendedBolus ?: 0.0 > 0.0 -> carbs
+            else                                             -> protectiveCarbs
+        }
     }
 
     fun createBolusCalculatorResult(): BCR {
@@ -597,7 +702,13 @@ class BolusWizard @Inject constructor(
             )
             message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_tt, tt)
         }
-        if (useCob) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_cob, cob, insulinFromCOB)
+        if (useCob) {
+            message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_cob, cobUsedForInsulin, insulinFromCOB)
+            if (cobAlreadyHandledByAimi > 0.0) {
+                val reason = if (cobAlreadyHandledByActivity > 0.0) "AIMI/нагрузка уже учли" else "AIMI уже учел"
+                message += " ($reason ${decimalFormatter.to0Decimal(cobAlreadyHandledByAimi)}г)"
+            }
+        }
         if (useBg) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_bg, insulinFromBG)
         if (includeBolusIOB) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_iob, -insulinFromBolusIOB - insulinFromBasalIOB)
         if (useTrend) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_trend, insulinFromTrend)

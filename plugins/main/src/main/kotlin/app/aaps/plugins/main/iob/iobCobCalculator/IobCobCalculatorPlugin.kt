@@ -353,29 +353,42 @@ class IobCobCalculatorPlugin @Inject constructor(
         val carbs = persistenceLayer.getCarbsFromTimeExpanded(autosensTime - T.hours(6).msecs(), true)
         if (autosensData != null) {
             displayCob = autosensData.cob
-            val activeCarbs = autosensData.activeCarbsList
-            carbs.forEach { carb ->
-                if (carb.timestamp <= now) {
-                    val alreadyRepresented = activeCarbs.any {
-                        abs(it.time - carb.timestamp) <= 1000L && abs(it.carbs - carb.amount) < 0.01
-                    }
-                    val addedAfterAutosens = carb.timestamp > autosensTime || carb.dateCreated > autosensTime
-                    if (!alreadyRepresented && addedAfterAutosens) {
-                        displayCob = max((displayCob ?: 0.0) + carb.amount, 0.0)
-                        aapsLogger.debug(
-                            LTag.AUTOSENS,
-                            "COB display includes pending carb: reason=$reason " +
-                                "carbTime=${dateUtil.dateAndTimeAndSecondsString(carb.timestamp)} " +
-                                "amount=${carb.amount} autosensTime=${dateUtil.dateAndTimeAndSecondsString(autosensTime)}"
-                        )
-                    }
-                }
-            }
+            val pendingCarbs = pendingCarbsNotYetInAutosens(autosensData, carbs, now, reason, "COB display")
+            if (pendingCarbs > 0.0) displayCob = max((displayCob ?: 0.0) + pendingCarbs, 0.0)
             timestamp = autosensTime
         }
         // Future carbs
         carbs.forEach { carb -> if (carb.timestamp > now) futureCarbs += carb.amount }
         return CobInfo(timestamp, displayCob, futureCarbs)
+    }
+
+    private fun pendingCarbsNotYetInAutosens(
+        autosensData: AutosensData,
+        carbs: List<app.aaps.core.data.model.CA>,
+        now: Long,
+        reason: String,
+        caller: String
+    ): Double {
+        val autosensTime = autosensData.time
+        val activeCarbs = autosensData.activeCarbsList
+        var pendingCarbs = 0.0
+        carbs.forEach { carb ->
+            if (!carb.isValid || carb.amount <= 0.0 || carb.timestamp > now) return@forEach
+            val alreadyRepresented = activeCarbs.any {
+                abs(it.time - carb.timestamp) <= 1000L && abs(it.carbs - carb.amount) < 0.01
+            }
+            val addedAfterAutosens = carb.timestamp > autosensTime || carb.dateCreated > autosensTime
+            if (!alreadyRepresented && addedAfterAutosens) {
+                pendingCarbs += carb.amount
+                aapsLogger.debug(
+                    LTag.AUTOSENS,
+                    "$caller includes pending carb: reason=$reason " +
+                        "carbTime=${dateUtil.dateAndTimeAndSecondsString(carb.timestamp)} " +
+                        "amount=${carb.amount} autosensTime=${dateUtil.dateAndTimeAndSecondsString(autosensTime)}"
+                )
+            }
+        }
+        return pendingCarbs
     }
 
     override fun getMealDataWithWaitingForCalculationFinish(): MealData {
@@ -392,7 +405,9 @@ class IobCobCalculatorPlugin @Inject constructor(
             }
         val autosensData = getLastAutosensDataWithWaitForCalculationFinish("getMealData()")
         if (autosensData != null) {
-            result.mealCOB = autosensData.cob
+            val expandedCarbs = persistenceLayer.getCarbsFromTimeExpanded(autosensData.time - T.hours(6).msecs(), true)
+            val pendingCarbs = pendingCarbsNotYetInAutosens(autosensData, expandedCarbs, now, "getMealData()", "APS mealCOB")
+            result.mealCOB = max(autosensData.cob + pendingCarbs, 0.0)
             result.slopeFromMinDeviation = autosensData.slopeFromMinDeviation
             result.slopeFromMaxDeviation = autosensData.slopeFromMaxDeviation
             result.usedMinCarbsImpact = autosensData.usedMinCarbsImpact
