@@ -171,13 +171,16 @@
 
     <TextView
         android:id="@+id/version"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginEnd="10sp"
-        android:text="3.3.1.3 (hash)"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:text="1.0 - Борьба с ночным заливанием"
         android:textAlignment="viewEnd"
         android:textSize="10sp"
         app:layout_constraintEnd_toStartOf="@+id/simple_mode"
+        app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         tools:ignore="HardcodedText,SmallSp" />
 
@@ -267,12 +270,14 @@
 
     <LinearLayout
         android:id="@+id/iob_layout"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="5dp"
         android:gravity="center_horizontal"
         android:orientation="vertical"
+        android:paddingHorizontal="2dp"
         app:layout_constraintEnd_toStartOf="@+id/cob_layout"
+        app:layout_constraintHorizontal_chainStyle="spread"
+        app:layout_constraintHorizontal_weight="1"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/bg"
         tools:ignore="UseCompoundDrawables">
@@ -286,11 +291,14 @@
 
         <TextView
             android:id="@+id/iob"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:ellipsize="end"
             android:gravity="center_horizontal"
+            android:maxLines="1"
             android:paddingTop="3dp"
             android:paddingBottom="3dp"
+            android:textAlignment="center"
             tools:text="n/a"
             android:textAppearance="@style/TextAppearance.AppCompat.Medium"
             android:textStyle="bold"
@@ -299,11 +307,13 @@
 
     <LinearLayout
         android:id="@+id/cob_layout"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:gravity="center_horizontal"
         android:orientation="vertical"
+        android:paddingHorizontal="2dp"
         app:layout_constraintEnd_toStartOf="@+id/basal_layout"
+        app:layout_constraintHorizontal_weight="1"
         app:layout_constraintStart_toEndOf="@+id/iob_layout"
         app:layout_constraintTop_toTopOf="@+id/iob_layout"
         tools:ignore="UseCompoundDrawables"
@@ -319,11 +329,14 @@
 
         <TextView
             android:id="@+id/cob"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:ellipsize="end"
             android:gravity="center_horizontal"
+            android:maxLines="2"
             android:paddingTop="3dp"
             android:paddingBottom="3dp"
+            android:textAlignment="center"
             tools:text="n/a"
             android:textAppearance="@style/TextAppearance.AppCompat.Medium"
             android:textStyle="bold"
@@ -332,11 +345,13 @@
 
     <LinearLayout
         android:id="@+id/basal_layout"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:gravity="center_horizontal"
         android:orientation="vertical"
+        android:paddingHorizontal="2dp"
         app:layout_constraintEnd_toStartOf="@+id/extended_layout"
+        app:layout_constraintHorizontal_weight="1"
         app:layout_constraintStart_toEndOf="@+id/cob_layout"
         app:layout_constraintTop_toTopOf="@+id/iob_layout"
         tools:ignore="UseCompoundDrawables">
@@ -351,11 +366,14 @@
 
         <TextView
             android:id="@+id/base_basal"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:ellipsize="end"
             android:gravity="center_horizontal"
+            android:maxLines="1"
             android:paddingTop="3dp"
             android:paddingBottom="3dp"
+            android:textAlignment="center"
             tools:text="n/a"
             android:textAppearance="@style/TextAppearance.AppCompat.Medium"
             android:textStyle="bold"
@@ -364,11 +382,13 @@
 
     <LinearLayout
         android:id="@+id/extended_layout"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:gravity="center_horizontal"
         android:orientation="vertical"
+        android:paddingHorizontal="2dp"
         app:layout_constraintEnd_toStartOf="@+id/as_layout"
+        app:layout_constraintHorizontal_weight="1"
         app:layout_constraintStart_toEndOf="@+id/basal_layout"
         app:layout_constraintTop_toTopOf="@+id/iob_layout"
         tools:ignore="UseCompoundDrawables">
@@ -382,11 +402,14 @@
 
         <TextView
             android:id="@+id/extended_bolus"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:ellipsize="end"
             android:gravity="center_horizontal"
+            android:maxLines="1"
             android:paddingTop="3dp"
             android:paddingBottom="3dp"
+            android:textAlignment="center"
             tools:text="n/a"
             android:textAppearance="@style/TextAppearance.AppCompat.Medium"
             android:textStyle="bold"
@@ -395,11 +418,13 @@
 
     <LinearLayout
         android:id="@+id/as_layout"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:gravity="center_horizontal"
         android:orientation="vertical"
+        android:paddingHorizontal="2dp"
         app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_weight="1.15"
         app:layout_constraintStart_toEndOf="@+id/extended_layout"
         app:layout_constraintTop_toTopOf="@+id/iob_layout"
         tools:ignore="UseCompoundDrawables"
@@ -415,11 +440,14 @@
 
         <TextView
             android:id="@+id/sensitivity"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:ellipsize="end"
             android:gravity="center_horizontal"
+            android:maxLines="1"
             android:paddingTop="3dp"
             android:paddingBottom="3dp"
+            android:textAlignment="center"
             tools:text="n/a"
             android:textAppearance="@style/TextAppearance.AppCompat.Medium"
             android:textStyle="bold"
@@ -427,11 +455,17 @@
 
         <TextView
             android:id="@+id/variable_sensitivity"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="-9dp"
+            android:layout_marginTop="-4dp"
+            android:ellipsize="end"
             android:gravity="center_horizontal"
+            android:includeFontPadding="false"
+            android:lineSpacingExtra="0dp"
+            android:maxLines="2"
             android:paddingBottom="3dp"
+            android:textAlignment="center"
+            android:textSize="11sp"
             tools:text="n/a"
             android:textAppearance="@style/TextAppearance.AppCompat.Medium"
             android:textStyle="bold"

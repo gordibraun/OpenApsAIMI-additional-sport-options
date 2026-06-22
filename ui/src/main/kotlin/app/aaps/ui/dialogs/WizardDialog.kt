@@ -2,6 +2,7 @@ package app.aaps.ui.dialogs
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Color
 import android.graphics.Paint
 import android.os.Bundle
 import android.os.Handler
@@ -13,6 +14,7 @@ import android.text.TextPaint
 import android.text.TextWatcher
 import android.text.method.LinkMovementMethod
 import android.text.style.ClickableSpan
+import android.text.style.ForegroundColorSpan
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -79,10 +81,14 @@ import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
-import android.graphics.Color
 
 
 class WizardDialog : DaggerDialogFragment() {
+
+    private val isfDecisionColor = Color.rgb(186, 104, 200)
+    private val isfCarbsColor = Color.rgb(255, 214, 0)
+    private val isfDecisionColorHtml = "#BA68C8"
+    private val isfCarbsColorHtml = "#FFD600"
 
     @Inject lateinit var aapsLogger: AAPSLogger
     @Inject lateinit var aapsSchedulers: AapsSchedulers
@@ -618,7 +624,14 @@ class WizardDialog : DaggerDialogFragment() {
             binding.wizardAimiLogic.movementMethod = LinkMovementMethod.getInstance()
             binding.wizardAimiLogic.highlightColor = Color.TRANSPARENT
             updateAimiDetailsVisibility()
-            binding.bg.text = rh.gs(R.string.format_bg_isf, valueToUnitsToString(profileUtil.convertToMgdl(bg, profileFunction.getUnits()), profileFunction.getUnits().asText), wizard.sens)
+            val carbsIsf = profileUtil.fromMgdlToUnits(
+                specificProfile.getIsfMgdlForCarbs(dateUtil.now(), "Wizard visible carbs ISF", config, processedDeviceStatusData),
+                profileFunction.getUnits()
+            )
+            binding.bg.text = coloredIsfText(
+                rh.gs(R.string.format_bg_carbs_isf, valueToUnitsToString(profileUtil.convertToMgdl(bg, profileFunction.getUnits()), profileFunction.getUnits().asText), carbsIsf),
+                isfCarbsColor
+            )
             binding.bgInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, wizard.insulinFromBG)
 
             binding.carbs.text = rh.gs(R.string.format_carbs_ic, carbs.toDouble(), wizard.ic)
@@ -738,12 +751,14 @@ class WizardDialog : DaggerDialogFragment() {
             ic = profile.getIc()
         )
         val apsCarbsReq = loopForecastCarbsReq(now, "Wizard forecast carbs")
-        val carbsReq = max(result?.carbs ?: 0, apsCarbsReq)
+        val carbsReq = result?.carbs ?: apsCarbsReq
         aapsLogger.debug(
             LTag.APS,
-            "Wizard forecast carbs from AIMI_FINAL: carbs=$carbsReq graph=${result?.carbs ?: 0} aps=$apsCarbsReq " +
+            "Wizard forecast carbs from AIMI_FINAL: carbs=$carbsReq treatmentAware=true " +
+                "graph=${result?.carbs ?: 0} aps=$apsCarbsReq " +
                 "min=${result?.minBgMgdl?.let { "%.0f".format(it) } ?: "n/a"} " +
-                "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(targetMgdl)}"
+                "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(targetMgdl)} " +
+                "isfCarbs=${"%.1f".format(profile.getIsfMgdlForCarbs(now, "Wizard forecast carbs log", config, processedDeviceStatusData))}"
         )
         return carbsReq
     }
@@ -984,10 +999,11 @@ class WizardDialog : DaggerDialogFragment() {
         val targetLowMgdl = profile.getTargetLowMgdl()
         val targetHighMgdl = profile.getTargetHighMgdl()
         val targetMgdl = (targetLowMgdl + targetHighMgdl) / 2.0
-        val isfMgdl = wizard.sensToMgdl()
+        val decisionIsfMgdl = wizard.sensToMgdl()
+        val carbsIsfMgdl = profile.getIsfMgdlForCarbs(now, "Wizard carb timing", config, processedDeviceStatusData)
         val ic = wizard.ic.coerceAtLeast(1.0)
-        val carbEffectMgdl = carbs * isfMgdl / ic * carbGlucoseEffectScale(selectedFoodType)
-        val plannedBolusEffectMgdl = wizard.insulinAfterConstraints.coerceAtLeast(0.0) * isfMgdl
+        val carbEffectMgdl = carbs * carbsIsfMgdl / ic * carbGlucoseEffectScale(selectedFoodType)
+        val plannedBolusEffectMgdl = wizard.insulinAfterConstraints.coerceAtLeast(0.0) * decisionIsfMgdl
 
         val urgency = carbTimingUrgency(
             forecast = forecast,
@@ -1293,6 +1309,28 @@ class WizardDialog : DaggerDialogFragment() {
     private fun BolusWizard.sensToMgdl(): Double =
         if (profileFunction.getUnits() == GlucoseUnit.MGDL) sens else sens / Constants.MGDL_TO_MMOLL
 
+    private fun coloredIsfText(text: String, color: Int): SpannableStringBuilder {
+        val spannable = SpannableStringBuilder(text)
+        val start = text.indexOf("ISF")
+        if (start >= 0) spannable.setSpan(ForegroundColorSpan(color), start, text.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        return spannable
+    }
+
+    private fun colorWizardIsfLabels(text: CharSequence): SpannableStringBuilder =
+        SpannableStringBuilder(text).also { spannable ->
+            colorAllOccurrences(spannable, "ISF решения", isfDecisionColor)
+            colorAllOccurrences(spannable, "ISF еды/COB", isfCarbsColor)
+        }
+
+    private fun colorAllOccurrences(spannable: SpannableStringBuilder, label: String, color: Int) {
+        var start = spannable.indexOf(label)
+        while (start >= 0) {
+            val end = start + label.length
+            spannable.setSpan(ForegroundColorSpan(color), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            start = spannable.indexOf(label, end)
+        }
+    }
+
     private fun formatRecommendedCarbTiming(minutes: Int): String =
         when {
             minutes < 0 -> "сейчас (окно было ${-minutes} мин назад)"
@@ -1335,8 +1373,23 @@ class WizardDialog : DaggerDialogFragment() {
             append(targetText)
             append(", IC ")
             append(decimalFormatter.to1Decimal(wizard.ic))
-            append(", ISF ")
+            append(", <font color=\"")
+            append(isfDecisionColorHtml)
+            append("\">ISF решения ")
             append(decimalFormatter.to1Decimal(wizard.sens))
+            append("</font>")
+            append(", <font color=\"")
+            append(isfCarbsColorHtml)
+            append("\">ISF еды/COB ")
+            append(
+                decimalFormatter.to1Decimal(
+                    profileUtil.fromMgdlToUnits(
+                        profile.getIsfMgdlForCarbs(dateUtil.now(), "Wizard summary", config, processedDeviceStatusData),
+                        profileFunction.getUnits()
+                    )
+                )
+            )
+            append("</font>")
             append(", COB ")
             append(decimalFormatter.to1Decimal(cob))
             append(", IOB ")
@@ -1363,7 +1416,7 @@ class WizardDialog : DaggerDialogFragment() {
                 append("AIMI decision ещё не рассчитан.")
             }
         }
-        return HtmlHelper.fromHtml(summary)
+        return colorWizardIsfLabels(HtmlHelper.fromHtml(summary))
     }
 
     private data class GlossaryDefinition(val title: String, val body: String)
@@ -1398,7 +1451,6 @@ class WizardDialog : DaggerDialogFragment() {
                         }
 
                         override fun updateDrawState(ds: TextPaint) {
-                            super.updateDrawState(ds)
                             ds.isUnderlineText = true
                         }
                     }

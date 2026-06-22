@@ -266,6 +266,48 @@ class SmbDomainHeuristicsTest {
     }
 
     @Test
+    fun recentSmbGuardBlocksDoseThatWouldCreateBurstWithoutFood() {
+        val decision = RecentSmbOverdeliveryGuard.evaluate(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = false,
+                bg = 205.0,
+                iobU = 4.0,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 1.4,
+                recentSmb30U = 2.5,
+                proposedSmbU = 0.8
+            )
+        )
+
+        assertTrue(decision.blockSmb)
+    }
+
+    @Test
+    fun recentSmbGuardBlocksNightNoMealWithIobPressure() {
+        val decision = RecentSmbOverdeliveryGuard.evaluate(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = false,
+                bg = 190.0,
+                iobU = 3.3,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 0.0,
+                recentSmb30U = 0.4,
+                proposedSmbU = 0.4,
+                nightNoMeal = true,
+                eventualBg = 160.0
+            )
+        )
+
+        assertTrue(decision.blockSmb)
+    }
+
+    @Test
     fun recentSmbGuardLeavesExtremeBgToHighBgLogic() {
         val decision = RecentSmbOverdeliveryGuard.evaluate(
             RecentSmbOverdeliveryGuard.Input(
@@ -282,6 +324,124 @@ class SmbDomainHeuristicsTest {
         )
 
         assertFalse(decision.blockSmb)
+    }
+
+    @Test
+    fun recentSmbCorrectionLimitDampsNightNoFoodBeforeHardBlock() {
+        val limit = RecentSmbOverdeliveryGuard.correctionLimit(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = false,
+                bg = 152.0,
+                iobU = 3.0,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 0.0,
+                recentSmb30U = 0.6,
+                nightNoMeal = true,
+                delta = 6.0,
+                eventualBg = 170.0
+            )
+        )
+
+        assertEquals(0.0, limit.maxSmbU, 1e-6)
+        assertTrue(limit.reason.contains("нет активной еды"))
+    }
+
+    @Test
+    fun recentSmbCorrectionLimitPreservesExplicitFood() {
+        val limit = RecentSmbOverdeliveryGuard.correctionLimit(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = true,
+                bg = 152.0,
+                iobU = 3.0,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 0.0,
+                recentSmb30U = 0.6,
+                nightNoMeal = true,
+                delta = 6.0,
+                eventualBg = 170.0
+            )
+        )
+
+        assertEquals(2.5, limit.maxSmbU, 1e-6)
+        assertTrue(limit.reason.isBlank())
+    }
+
+    @Test
+    fun recentSmbGuardBlocksUnsafeLowForecastEvenWithVisibleFood() {
+        val decision = RecentSmbOverdeliveryGuard.evaluate(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = false,
+                visibleCobG = 15.9,
+                explicitFoodActive = true,
+                bg = 158.0,
+                iobU = 11.18,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 0.9,
+                recentSmb30U = 5.6,
+                proposedSmbU = 0.85,
+                eventualBg = 39.0,
+                predictedBg = 39.0,
+                minGuardBg = 39.0,
+                targetBg = 117.0
+            )
+        )
+
+        assertTrue(decision.blockSmb)
+        assertTrue(decision.reason.contains("прогноз ниже цели"))
+    }
+
+    @Test
+    fun recentSmbCorrectionLimitBlocksUnsafeLowForecastEvenWithVisibleFood() {
+        val limit = RecentSmbOverdeliveryGuard.correctionLimit(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = false,
+                visibleCobG = 15.9,
+                explicitFoodActive = true,
+                bg = 158.0,
+                iobU = 11.18,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 0.9,
+                recentSmb30U = 5.6,
+                eventualBg = 39.0,
+                predictedBg = 39.0,
+                minGuardBg = 39.0,
+                targetBg = 117.0
+            )
+        )
+
+        assertEquals(0.0, limit.maxSmbU, 1e-6)
+        assertTrue(limit.reason.contains("прогноз ниже цели"))
+    }
+
+    @Test
+    fun recentSmbCorrectionLimitLeavesExtremeHighForecast() {
+        val limit = RecentSmbOverdeliveryGuard.correctionLimit(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = true,
+                visibleCobG = 0.0,
+                explicitFoodActive = false,
+                bg = 280.0,
+                iobU = 5.95,
+                maxSmbU = 1.5,
+                highBgMaxSmbU = 2.5,
+                recentSmb15U = 3.8,
+                recentSmb30U = 5.6,
+                nightNoMeal = true,
+                delta = 8.0,
+                eventualBg = 285.0
+            )
+        )
+
+        assertEquals(2.5, limit.maxSmbU, 1e-6)
+        assertTrue(limit.reason.isBlank())
     }
 
     @Test

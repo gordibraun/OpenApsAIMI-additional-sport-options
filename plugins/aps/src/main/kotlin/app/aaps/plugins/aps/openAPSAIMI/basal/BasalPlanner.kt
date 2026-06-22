@@ -66,6 +66,14 @@ class BasalPlanner @Inject constructor(
         val belowTarget = mgdl < target
         val forecastNotClearlyAboveTarget = ctx.eventualBg <= target + 5.0
         val conservativeBelowTarget = belowTarget && forecastNotClearlyAboveTarget
+        val activeMealMode = ctx.modes.meal ||
+            ctx.modes.breakfast ||
+            ctx.modes.lunch ||
+            ctx.modes.dinner ||
+            ctx.modes.highCarb ||
+            ctx.modes.snack
+        val noFoodContext = !activeMealMode && ctx.cobG <= 6.0
+        val loadedWithoutFood = noFoodContext && ctx.iobU >= 2.5
 
         // 1) Hypo guard / suspend
         // A) Hard limit : BG <= 60 -> Suspend immédiat
@@ -116,7 +124,9 @@ class BasalPlanner @Inject constructor(
 
         // 3) Kicker plateau haut (BG élevé & plat)
         val plateau = (abs(d5) <= PLATEAU_DELTA_ABS) && (abs(short) <= PLATEAU_DELTA_ABS) && (abs(long) <= PLATEAU_DELTA_ABS)
-        if (plateau && mgdl >= max(HIGH_BG, target + 5.0)) {
+        val highFlatForecastGap = if (activeMealMode) 5.0 else 25.0
+        val highFlatForecastSupports = ctx.eventualBg >= target + highFlatForecastGap
+        if (plateau && mgdl >= max(HIGH_BG, target + 5.0) && highFlatForecastSupports && !loadedWithoutFood) {
             val baseKick = max(KICK_MIN_UPH, profileBasal * (1.0 + KICK_FRAC))
             val rate = clampAndQuantize(baseKick, profileBasal, maxBasal, step)
             val dur = max(minDur, KICK_MINUTES)
@@ -129,7 +139,7 @@ class BasalPlanner @Inject constructor(
 
         // 4) Anti-stall léger (Δ≈0 et pas franchement positif)
         val nearFlat = abs(d5) <= PLATEAU_DELTA_ABS && abs(short) <= PLATEAU_DELTA_ABS
-        if (nearFlat && d5 < DELTA_POS_RELEASE && mgdl >= target && ctx.eventualBg >= target + 5.0) {
+        if (nearFlat && d5 < DELTA_POS_RELEASE && mgdl >= target && ctx.eventualBg >= target + 5.0 && !loadedWithoutFood) {
             val base = profileBasal * (1.0 + ANTI_STALL_FRAC)
             val rate = clampAndQuantize(base, profileBasal, maxBasal, step)
             return BasalPlan(

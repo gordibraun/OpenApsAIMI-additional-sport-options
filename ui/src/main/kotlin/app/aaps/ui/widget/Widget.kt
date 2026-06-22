@@ -10,6 +10,9 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.os.Handler
 import android.os.HandlerThread
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.view.View
 import android.widget.RemoteViews
 import app.aaps.core.data.model.GlucoseUnit
@@ -81,6 +84,8 @@ class Widget : AppWidgetProvider() {
         // This object doesn't behave like singleton,
         // many threads were created. Making handler static resolve this issue
         private var handler = Handler(HandlerThread(this::class.simpleName + "Handler").also { it.start() }.looper)
+        private val ISF_DECISION_COLOR = Color.rgb(186, 104, 200)
+        private val ISF_CARBS_COLOR = Color.rgb(255, 214, 0)
 
         fun updateWidget(context: Context, from: String) {
             context.sendBroadcast(Intent().also {
@@ -316,26 +321,53 @@ class Widget : AppWidgetProvider() {
             rh.gs(app.aaps.core.ui.R.string.autosens_short, it.autosensResult.ratio * 100)
         } ?: "")
 
-        // Show variable sensitivity
+        // Show decision ISF and carbs/COB ISF separately.
         val request = loop.lastRun?.request
-        val isfMgdl = profileFunction.getProfile()?.getProfileIsfMgdl()
-        val variableSens =
-            if (config.APS) request?.variableSens ?: 0.0
-            else if (config.AAPSCLIENT) processedDeviceStatusData.getAPSResult()?.variableSens ?: 0.0
-            else 0.0
+        val profile = profileFunction.getProfile()
+        val decisionIsfMgdl = profile?.let {
+            val dynamicIsfMgdl =
+                if (config.APS) request?.variableSens
+                else if (config.AAPSCLIENT) processedDeviceStatusData.getAPSResult()?.variableSens
+                else null
+            dynamicIsfMgdl?.takeIf { value -> value.isFinite() && value > 0.0 }
+                ?: it.getIsfMgdl("Widget sensitivity")
+        }
+        val carbsIsfMgdl = profile?.getIsfMgdlForCarbs(dateUtil.now(), "Widget sensitivity", config, processedDeviceStatusData)
         val ratioUsed = request?.autosensResult?.ratio ?: 1.0
-        if (variableSens != isfMgdl && variableSens != 0.0 && isfMgdl != null) {
-            val overViewText: ArrayList<String> = ArrayList()
-            if (ratioUsed != 1.0 && ratioUsed != lastAutosensData?.autosensResult?.ratio) overViewText.add(rh.gs(app.aaps.core.ui.R.string.algorithm_short, ratioUsed * 100))
-            overViewText.add(
+        if (decisionIsfMgdl != null && carbsIsfMgdl != null) {
+            val overViewText = SpannableStringBuilder()
+            if (ratioUsed != 1.0 && ratioUsed != lastAutosensData?.autosensResult?.ratio)
+                appendPlainLine(overViewText, rh.gs(app.aaps.core.ui.R.string.algorithm_short, ratioUsed * 100))
+            appendColoredLine(
+                overViewText,
                 String.format(
-                    Locale.getDefault(), "%1$.1f→%2$.1f",
-                    profileUtil.fromMgdlToUnits(isfMgdl, profileFunction.getUnits()),
-                    profileUtil.fromMgdlToUnits(variableSens, profileFunction.getUnits())
-                )
+                    Locale.getDefault(), "ISF решения %1$.1f",
+                    profileUtil.fromMgdlToUnits(decisionIsfMgdl, profileFunction.getUnits())
+                ),
+                ISF_DECISION_COLOR
             )
-            views.setTextViewText(R.id.variable_sensitivity, overViewText.joinToString("\n"))
+            appendColoredLine(
+                overViewText,
+                String.format(
+                    Locale.getDefault(), "ISF еды/COB %1$.1f",
+                    profileUtil.fromMgdlToUnits(carbsIsfMgdl, profileFunction.getUnits())
+                ),
+                ISF_CARBS_COLOR
+            )
+            views.setTextViewText(R.id.variable_sensitivity, overViewText)
             views.setViewVisibility(R.id.variable_sensitivity, View.VISIBLE)
         } else views.setViewVisibility(R.id.variable_sensitivity, View.GONE)
+    }
+
+    private fun appendPlainLine(builder: SpannableStringBuilder, text: CharSequence) {
+        if (builder.isNotEmpty()) builder.append("\n")
+        builder.append(text)
+    }
+
+    private fun appendColoredLine(builder: SpannableStringBuilder, text: String, color: Int) {
+        if (builder.isNotEmpty()) builder.append("\n")
+        val start = builder.length
+        builder.append(text)
+        builder.setSpan(ForegroundColorSpan(color), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
 }

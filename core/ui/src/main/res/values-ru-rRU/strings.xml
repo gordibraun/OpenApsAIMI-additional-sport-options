@@ -459,10 +459,10 @@
     <string name="basalpct">Базал %</string>
     <string name="sensitivity">Чувствительность</string>
     <string name="isf_for_carbs">ISF для калькулятора и усвоения углеводов: %1$.1f</string>
-    <string name="autosens_long">Значение Autosens: %.0f%%</string>
+    <string name="autosens_long">Autosens сейчас: %.0f%%</string>
     <string name="autosens_short">AS: %.0f%%</string>
-    <string name="algorithm_long">Autosens в алгоритме: %.0f%%</string>
-    <string name="algorithm_short">Alg: %.0f%%</string>
+    <string name="algorithm_long">Autosens в последнем APS-расчёте: %.0f%%</string>
+    <string name="algorithm_short">APS: %.0f%%</string>
     <string name="a11y_file">файл</string>
     <string name="a11y_user">пользователь</string>
     <!-- Autotune -->

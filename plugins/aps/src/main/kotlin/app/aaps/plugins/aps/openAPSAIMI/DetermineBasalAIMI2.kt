@@ -876,9 +876,143 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
     }
 
+    private fun recentManualBolusUnits(minutes: Long): Double {
+        val nowMs = dateUtil.now()
+        val since = nowMs - T.mins(minutes).msecs()
+        return try {
+            persistenceLayer
+                .getBolusesFromTime(since, true)
+                .blockingGet()
+                .filter { bolus ->
+                    bolus.isValid &&
+                        bolus.type != BS.Type.SMB &&
+                        bolus.timestamp in since..nowMs &&
+                        bolus.amount > 0.0
+                }
+                .sumOf { bolus -> bolus.amount }
+        } catch (e: Exception) {
+            consoleLog.add("Recent manual bolus guard: не удалось прочитать болюсы за ${minutes}м: ${e.message}")
+            0.0
+        }
+    }
+
+    private fun noActiveMealMode(): Boolean =
+        !mealTime &&
+            !bfastTime &&
+            !lunchTime &&
+            !dinnerTime &&
+            !highCarbTime &&
+            !snackTime
+
+    private fun explicitFoodTypeActive(): Boolean =
+        aimiMealAssist.activeEpisode()?.selectedFoodType != null
+
+    private fun nightNoMealContext(mealData: MealData): Boolean {
+        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val nightWindow = sleepTime || hour >= 23 || hour <= 6
+        return nightWindow &&
+            noActiveMealMode() &&
+            mealData.mealCOB <= 6.0 &&
+            !explicitFoodTypeActive()
+    }
+
+    private fun finalCumulativeSmbCap(
+        mealData: MealData,
+        proposedSmb: Double,
+        recentSmb15: Double,
+        recentSmb30: Double,
+        targetBg: Double
+    ): Pair<Double?, String?> {
+        val decision = RecentSmbOverdeliveryGuard.evaluate(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = noActiveMealMode(),
+                visibleCobG = mealData.mealCOB,
+                explicitFoodActive = explicitFoodTypeActive(),
+                bg = bg,
+                iobU = iob.toDouble(),
+                maxSmbU = maxSMB,
+                highBgMaxSmbU = maxSMBHB,
+                recentSmb15U = recentSmb15,
+                recentSmb30U = recentSmb30,
+                proposedSmbU = proposedSmb,
+                nightNoMeal = nightNoMealContext(mealData),
+                delta = delta.toDouble(),
+                eventualBg = eventualBG,
+                predictedBg = predictedBg.toDouble(),
+                minGuardBg = minOf(predictedBg.toDouble(), eventualBG),
+                targetBg = targetBg
+            )
+        )
+        if (decision.blockSmb) return 0.0 to decision.reason
+        val maxAllowed = decision.maxAllowedSmbU
+        return if (maxAllowed != null && maxAllowed < proposedSmb) {
+            maxAllowed to "накопительный SMB без активной еды: текущий болюс ограничен до ${"%.2f".format(maxAllowed)}U"
+        } else {
+            null to null
+        }
+    }
+
+    private fun noMealStackCorrectionLimit(
+        mealData: MealData,
+        recentSmb15: Double,
+        recentSmb30: Double,
+        targetBg: Double
+    ): RecentSmbOverdeliveryGuard.CorrectionLimit =
+        RecentSmbOverdeliveryGuard.correctionLimit(
+            RecentSmbOverdeliveryGuard.Input(
+                noActiveMealMode = noActiveMealMode(),
+                visibleCobG = mealData.mealCOB,
+                explicitFoodActive = explicitFoodTypeActive(),
+                bg = bg,
+                iobU = iob.toDouble(),
+                maxSmbU = maxSMB,
+                highBgMaxSmbU = maxSMBHB,
+                recentSmb15U = recentSmb15,
+                recentSmb30U = recentSmb30,
+                nightNoMeal = nightNoMealContext(mealData),
+                delta = delta.toDouble(),
+                eventualBg = eventualBG,
+                predictedBg = predictedBg.toDouble(),
+                minGuardBg = minOf(predictedBg.toDouble(), eventualBG),
+                targetBg = targetBg
+            )
+        )
+
+    private fun nightNoMealSmbCap(mealData: MealData, recentSmb30: Double, targetBg: Double): Pair<Double?, String?> {
+        if (!nightNoMealContext(mealData)) return null to null
+        val stronglyHighAndRising = bg >= 280.0 && delta >= 3.0f && eventualBG >= targetBg + 80.0
+        val clearlyHighAndRising = bg >= 220.0 && delta >= 2.0f && eventualBG >= targetBg + 60.0
+        val cap = when {
+            stronglyHighAndRising -> 0.5
+            clearlyHighAndRising -> 0.3
+            iob >= 2.5f || recentSmb30 >= 0.5 || eventualBG < targetBg + 70.0 -> 0.0
+            else -> 0.2
+        }
+        return cap to "ночь/сон без подтвержденной еды: лимит SMB ${"%.2f".format(cap)}U"
+    }
+
+    private fun manualBolusStackingCap(mealData: MealData, recentManualBolus15: Double): Pair<Double?, String?> {
+        if (recentManualBolus15 < 0.5) return null to null
+        val noFoodContext = noActiveMealMode() && mealData.mealCOB <= 6.0 && !explicitFoodTypeActive()
+        if (noFoodContext) {
+            return 0.0 to "свежий ручной болюс ${"%.2f".format(recentManualBolus15)}U без активной еды: SMB заблокирован"
+        }
+        if (recentManualBolus15 >= 1.5 && iob >= 3.0f && mealData.mealCOB <= 12.0 && !explicitFoodTypeActive()) {
+            return 0.3 to "свежий ручной болюс ${"%.2f".format(recentManualBolus15)}U: SMB ограничен до 0.30U"
+        }
+        return null to null
+    }
+
+    private fun pressureCarbBufferMgdl(mealData: MealData, recentSmb30: Double): Double = when {
+        nightNoMealContext(mealData) && iob >= 1.5f -> 8.0
+        recentSmb30 >= 1.5 -> 10.0
+        recentSmb30 >= 0.8 || iob >= 3.0f -> 5.0
+        else -> 0.0
+    }
+
     private fun unannouncedFoodConfidence(mealData: MealData, rescueFastRebound: Boolean): Double {
         val explicitFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
-        if (mealData.mealCOB > 0.0 && explicitFoodType != null) return 1.0
+        if (mealData.mealCOB > 0.0 && explicitFoodType != null) return 0.0
         if (rescueFastRebound) return 0.15
 
         val sustainedRiseScore = listOf(
@@ -905,12 +1039,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
     }
 
     private fun earlyOverdeliverySmbCap(mealData: MealData): Double? {
-        val noActiveMealMode = !mealTime &&
-            !bfastTime &&
-            !lunchTime &&
-            !dinnerTime &&
-            !highCarbTime &&
-            !snackTime
+        val noActiveMealMode = noActiveMealMode()
         val noVisibleCarbTail = mealData.mealCOB <= 5.0
         val smallActiveCarbTail = mealData.mealCOB > 0.0 && mealData.mealCOB <= 6.0
         val freshSmb = lastsmbtime in 0..35 && lastBolusSMBUnit >= 0.3f
@@ -937,7 +1066,13 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 maxSmbU = maxSMB,
                 highBgMaxSmbU = maxSMBHB,
                 recentSmb15U = recentSmb15,
-                recentSmb30U = recentSmb30
+                recentSmb30U = recentSmb30,
+                nightNoMeal = nightNoMealContext(mealData),
+                delta = delta.toDouble(),
+                eventualBg = eventualBG,
+                predictedBg = predictedBg.toDouble(),
+                minGuardBg = minOf(predictedBg.toDouble(), eventualBG),
+                targetBg = targetBg.toDouble()
             )
         )
         if (cumulativeSmbGuard.blockSmb) {
@@ -2970,10 +3105,17 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val freshSmbPressure = freshSmbPressureUnits()
         selectedFoodType?.let { consoleLog.add("Тип углеводов, выбранный пользователем: $it. Введенные углеводы имеют приоритет.") }
         if (rescueFastActive) consoleLog.add("Распознано: быстрый спасательный отскок. Рост будет считаться коротким, без длинного хвоста обычной невведенной еды.")
-        consoleLog.add(
-            "Уверенность в невведенной еде: ${"%.0f".format(uamConfidence * 100)}% | " +
-                "свежий SMB за 60 мин: ${"%.2f".format(freshSmbPressure)} U"
-        )
+        if (explicitCarbEntryActive(mealData) && uamConfidence <= 0.0) {
+            consoleLog.add(
+                "Невведенная еда не добавляется: активны введенные углеводы/тип еды | " +
+                    "свежий SMB за 60 мин: ${"%.2f".format(freshSmbPressure)} U"
+            )
+        } else {
+            consoleLog.add(
+                "Уверенность в невведенной еде: ${"%.0f".format(uamConfidence * 100)}% | " +
+                    "свежий SMB за 60 мин: ${"%.2f".format(freshSmbPressure)} U"
+            )
+        }
         val advancedPredictions = try {
             AdvancedPredictionEngine.predict(
                 currentBG = currentBg,
@@ -3096,7 +3238,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 "(SMB=${"%.2f".format(plannedSmbU)}U, базал=${"%.2f".format(plannedRateUph ?: profileBasalUph)}U/h, " +
                 "еда=${"%.2f".format(forecastMealFactorApplied)} (SMB factor ${"%.2f".format(mealFactorApplied)} не применяется повторно), " +
                 "MPC=${"%.0f".format(mpcShare * 100)}%, PI=${"%.0f".format(piShare * 100)}%, " +
-                "уверенность в невведенной еде=${"%.0f".format(uamConfidence * 100)}%, свежий SMB=${"%.2f".format(freshSmbPressure)}U)"
+                "${if (explicitCarbEntryActive(mealData) && uamConfidence <= 0.0) "невведенная еда не добавлена" else "уверенность в невведенной еде=${"%.0f".format(uamConfidence * 100)}%"}, " +
+                "свежий SMB=${"%.2f".format(freshSmbPressure)}U)"
         )
         consoleLog.add(
             "Единый momentum после решения: +60=${intsPredictions.getOrNull(12) ?: intsPredictions.lastOrNull()} " +
@@ -4460,13 +4603,40 @@ class DetermineBasalaimiSMB2 @Inject constructor(
              this.predictedSMB = finalModelSmb
         }
 
+        val calculationRecentSmb15 = recentSmbUnits(15)
+        val calculationRecentSmb30 = recentSmbUnits(30)
+        val correctionLimit = noMealStackCorrectionLimit(mealData, calculationRecentSmb15, calculationRecentSmb30, target_bg)
+        val calculationLimitActive = correctionLimit.reason.isNotBlank()
+        val executionMaxSmb = if (calculationLimitActive) min(maxSMB, correctionLimit.maxSmbU) else maxSMB
+        val beforeCalculationLimitPredicted = this.predictedSMB
+        val beforeCalculationLimitModel = modelcal
+        val executionModelValue = if (calculationLimitActive) {
+            min(modelcal.toDouble(), executionMaxSmb).toFloat()
+        } else {
+            modelcal
+        }
+        if (calculationLimitActive) {
+            this.predictedSMB = min(this.predictedSMB.toDouble(), executionMaxSmb).toFloat()
+        }
+        if (calculationLimitActive && (executionMaxSmb < maxSMB || this.predictedSMB < beforeCalculationLimitPredicted || executionModelValue < beforeCalculationLimitModel)) {
+            val limitReason = correctionLimit.reason
+            consoleLog.add(
+                "$limitReason, proposed ${"%.2f".format(beforeCalculationLimitPredicted)}U→${"%.2f".format(this.predictedSMB)}U"
+            )
+            rT.reason.append(
+                " | $limitReason; расчет ${"%.2f".format(beforeCalculationLimitPredicted)}->${"%.2f".format(this.predictedSMB)}U"
+            )
+        }
+
         // Detailed logging as requested
         val hasPred = predictedBg > 20
         val hyperKicker = (bg > target_bg + 30 && (delta >= 0.3 || shortAvgDelta >= 0.2))
         consoleLog.add(
             "SMB Decision: BG=${"%.0f".format(bg)}, Delta=${"%.1f".format(delta)}, " +
                 "IOB_local=${"%.2f".format(iob)}, " +
-                "HasPred=$hasPred, HyperKicker=$hyperKicker, UAM=${"%.2f".format(modelcal)}, Proposed=${"%.2f".format(this.predictedSMB)}"
+                "HasPred=$hasPred, HyperKicker=$hyperKicker, " +
+                "UAM=${"%.2f".format(modelcal)}, ExecUAM=${"%.2f".format(executionModelValue)}, " +
+                "Proposed=${"%.2f".format(this.predictedSMB)}, MaxSMB=${"%.2f".format(executionMaxSmb)}"
         )
         val pkpdDiaMinutesOverride: Double? = pkpdRuntime?.params?.diaHrs?.let { it * 60.0 } // PKPD donne des heures → on passe en minutes
         val useLegacyDynamicsdia = pkpdDiaMinutesOverride == null
@@ -4511,10 +4681,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 targetBg = target_bg,
                 predictedBg = predictedBg,
                 eventualBg = eventualBG,
-                maxSmb = maxSMB,
+                maxSmb = executionMaxSmb,
                 maxIob = preferences.get(DoubleKey.ApsSmbMaxIob),
                 predictedSmb = predictedSMB,
-                modelValue = modelcal,
+                modelValue = executionModelValue,
                 mealData = mealData,
                 pkpdRuntime = pkpdRuntime,
                 sportTime = sportTime,
@@ -4618,7 +4788,34 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // 🔒 SAFETY CHECK FINAL : On applique le cap strict après le potentiel boost de Reactivité
         val currentMaxSmb = if (bg > 120 && !honeymoon && mealData.slopeFromMinDeviation >= 1.0 && !rescueFastRebound) maxSMBHB else maxSMB
         val rescueAdjustedMaxSmb = if (rescueFastRebound) min(currentMaxSmb.toFloat(), rescueFastSmbCap()).toDouble() else currentMaxSmb
-        val safetyAdjustedMaxSmb = earlyOverdeliverySmbCap ?: rescueAdjustedMaxSmb
+        val finalRecentSmb15 = recentSmbUnits(15)
+        val finalRecentSmb30 = recentSmbUnits(30)
+        val finalRecentManualBolus15 = recentManualBolusUnits(15)
+        val finalSmbCaps = mutableListOf(rescueAdjustedMaxSmb)
+        val finalSmbCapReasons = mutableListOf<String>()
+        earlyOverdeliverySmbCap?.let {
+            finalSmbCaps.add(it)
+            finalSmbCapReasons.add("ранний перелив: лимит ${"%.2f".format(it)}U")
+        }
+        finalCumulativeSmbCap(
+            mealData = mealData,
+            proposedSmb = smbToGive.toDouble(),
+            recentSmb15 = finalRecentSmb15,
+            recentSmb30 = finalRecentSmb30,
+            targetBg = target_bg
+        ).let { (cap, capReason) ->
+            cap?.let { finalSmbCaps.add(it) }
+            capReason?.let { finalSmbCapReasons.add(it) }
+        }
+        nightNoMealSmbCap(mealData, finalRecentSmb30, target_bg).let { (cap, capReason) ->
+            cap?.let { finalSmbCaps.add(it) }
+            capReason?.let { finalSmbCapReasons.add(it) }
+        }
+        manualBolusStackingCap(mealData, finalRecentManualBolus15).let { (cap, capReason) ->
+            cap?.let { finalSmbCaps.add(it) }
+            capReason?.let { finalSmbCapReasons.add(it) }
+        }
+        val safetyAdjustedMaxSmb = finalSmbCaps.minOrNull() ?: rescueAdjustedMaxSmb
         val beforeCap = smbToGive
         smbToGive = capSmbDose(
             proposedSmb = smbToGive,
@@ -4636,6 +4833,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         if (rescueFastRebound && smbToGive < beforeCap) {
             rT.reason.append(" | SMB ограничен быстрым спасательным отскоком: ${"%.2f".format(beforeCap)} -> ${"%.2f".format(smbToGive)}")
+        }
+        if (finalSmbCapReasons.isNotEmpty() && smbToGive < beforeCap) {
+            val message = "Финальный SMB cap: ${finalSmbCapReasons.joinToString("; ")}; " +
+                "${"%.2f".format(beforeCap)} -> ${"%.2f".format(smbToGive)}U"
+            rT.reason.append(" | $message")
+            consoleLog.add(message)
         }
         if (smbToGive < beforeCap) {
             rT.reason.append(" | 🛡️ Cap: ${"%.2f".format(beforeCap)} → ${"%.2f".format(smbToGive)}")
@@ -4665,8 +4868,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             consoleLog = consoleLog,
             consoleError = consoleError,
             safetyMechanism = savedSafetyMechanism,
-            //variable_sens = variableSensitivity.toDouble()
-            variable_sens = "%.0f".format(variableSensitivity.toDouble()).toDouble()
+            variable_sens = variableSensitivity.toDouble()
         )
         rT.reason.append(savedReason)
         rT.predBGs = savedPredBGs
@@ -4707,7 +4909,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             val forecastCsf = carbSensitivityForForecast ?: 0.0
 
             if (forecastCsf > 0.0) {
-                val deficitMgdl = (target_bg - minValue.toDouble()).coerceAtLeast(0.0)
+                val bufferMgdl = pressureCarbBufferMgdl(mealData, recentSmbUnits(30))
+                val deficitMgdl = (target_bg + bufferMgdl - minValue.toDouble()).coerceAtLeast(0.0)
                 val carbs = (deficitMgdl / forecastCsf).roundToInt().coerceAtLeast(0)
                 val previousCarbsReq = result.carbsReq ?: 0
                 val previousCarbsReqWithin = result.carbsReqWithin ?: 0
@@ -4716,7 +4919,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 if (previousCarbsReq != result.carbsReq || previousCarbsReqWithin != result.carbsReqWithin) {
                     consoleLog.add(
                         "Углеводы по финальному прогнозу: ${previousCarbsReq}г/${previousCarbsReqWithin}м -> " +
-                            "${result.carbsReq ?: 0}г/${result.carbsReqWithin ?: 0}м, цель=${"%.0f".format(target_bg)}, CSF=${"%.1f".format(forecastCsf)}"
+                            "${result.carbsReq ?: 0}г/${result.carbsReqWithin ?: 0}м, цель=${"%.0f".format(target_bg)}, " +
+                            "буфер=${"%.0f".format(bufferMgdl)}, CSF=${"%.1f".format(forecastCsf)}"
                     )
                 }
                 if (carbs > 0 && !result.reason.contains("Углеводы по финальному прогнозу")) {
@@ -4952,12 +5156,40 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         } else {
             0
         }
+        val pressureCarbsRequired = if (csf > 0.0) {
+            CarbsAdvisor.estimatePressureRescueCarbs(
+                bg = bg,
+                targetBG = targetBg.toDouble(),
+                eventualBG = eventualBG,
+                minPredictedBG = min(predictedBg.toDouble(), eventualBG),
+                iob = iob.toDouble(),
+                csf = csf,
+                isf = sens,
+                cob = cob.toDouble(),
+                recentSmb30 = recentSmbUnits(30),
+                nightNoMeal = nightNoMealContext(mealData)
+            )
+        } else {
+            0
+        }
+        val effectiveCarbsRequired = max(carbsRequired, pressureCarbsRequired)
         val minutesAboveThreshold = HypoTools.calculateMinutesAboveThreshold(bg, slopeFromDeviations, thresholdBG)
-        if (carbsRequired >= profile.carbsReqThreshold && minutesAboveThreshold <= 45 && !lunchTime && !dinnerTime && !bfastTime && !highCarbTime && !mealTime) {
-            rT.carbsReq = carbsRequired
-            rT.carbsReqWithin = minutesAboveThreshold
+        val effectiveCarbsReqWithin = if (pressureCarbsRequired > carbsRequired) 30 else minutesAboveThreshold
+        if (effectiveCarbsRequired >= profile.carbsReqThreshold &&
+            (minutesAboveThreshold <= 45 || pressureCarbsRequired >= profile.carbsReqThreshold) &&
+            !lunchTime &&
+            !dinnerTime &&
+            !bfastTime &&
+            !highCarbTime &&
+            !mealTime
+        ) {
+            rT.carbsReq = effectiveCarbsRequired
+            rT.carbsReqWithin = effectiveCarbsReqWithin
             //rT.reason.append("$carbsRequired add\'l carbs req w/in ${minutesAboveThreshold}m; ")
-            rT.reason.append(context.getString(R.string.reason_additional_carbs, carbsRequired, minutesAboveThreshold))
+            rT.reason.append(context.getString(R.string.reason_additional_carbs, effectiveCarbsRequired, effectiveCarbsReqWithin))
+            if (pressureCarbsRequired > carbsRequired) {
+                rT.reason.append(" | Углеводы из-за инсулинового давления: ${pressureCarbsRequired} г в течение 30 мин;")
+            }
         }
 
         val forcedBasalmealmodes = preferences.get(DoubleKey.meal_modes_MaxBasal)
@@ -5100,36 +5332,165 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                         index in startIndex..endIndex && value > 0
                     }
                 val (minIndex, minValue) = window.minByOrNull { it.second } ?: return null
-                val deficitMgdl = (target_bg - minValue.toDouble()).coerceAtLeast(0.0)
+                val bufferMgdl = pressureCarbBufferMgdl(mealData, recentSmbUnits(30))
+                val deficitMgdl = (target_bg + bufferMgdl - minValue.toDouble()).coerceAtLeast(0.0)
                 val carbs = (deficitMgdl / csf).roundToInt().coerceAtLeast(0)
                 return carbs to (minIndex * 5)
             }
 
-            val finalAimiSeries = result.predBGs?.AIMI_FINAL.orEmpty()
-            val finalActionEndIndex = min(finalAimiSeries.lastIndex, 24)
-            val finalActionWindow = if (finalAimiSeries.size > actionStartIndex && finalActionEndIndex >= actionStartIndex) {
-                finalAimiSeries.subList(actionStartIndex, finalActionEndIndex + 1)
-            } else {
-                emptyList()
+            data class FinalForecastSummary(
+                val series: List<Int>,
+                val actionEndIndex: Int,
+                val actionWindowMin: Double?,
+                val actionWindowMinMinute: Int?,
+                val belowTargetRun: Int,
+                val firstBelowMinute: Int?,
+                val carbsRequirement: Pair<Int, Int>?,
+                val workingZoneSummary: String,
+                val forecastFloor: Double
+            )
+
+            fun summarizeFinalForecast(): FinalForecastSummary {
+                val finalAimiSeries = result.predBGs?.AIMI_FINAL.orEmpty()
+                val finalActionEndIndex = min(finalAimiSeries.lastIndex, 24)
+                val finalActionWindow = if (finalAimiSeries.size > actionStartIndex && finalActionEndIndex >= actionStartIndex) {
+                    finalAimiSeries.subList(actionStartIndex, finalActionEndIndex + 1)
+                } else {
+                    emptyList()
+                }
+                val finalActionWindowMin = finalActionWindow.minOrNull()?.toDouble()
+                val finalActionWindowMinMinute = finalActionWindowMin?.let { minValue ->
+                    val offset = finalActionWindow.indexOfFirst { it.toDouble() == minValue }
+                    (actionStartIndex + offset) * 5
+                }
+                val finalBelowTargetRun = maxConsecutiveBelowTarget(finalActionWindow, target_bg)
+                val actionWindowFirstBelow = firstBelowMinute(finalAimiSeries, actionStartIndex, target_bg)
+                val workingZoneSummary = if (finalActionWindow.isNotEmpty()) {
+                    "рабочая зона +20..+120: " +
+                        "min=${finalActionWindowMin?.let { "%.0f".format(it) } ?: "n/a"}" +
+                        (finalActionWindowMinMinute?.let { " на +${it}m" } ?: "") +
+                        ", ниже цели подряд=${finalBelowTargetRun}" +
+                        (actionWindowFirstBelow?.let { ", первая ниже +${it}m" } ?: ", ниже цели нет") +
+                        ", цель=${"%.0f".format(target_bg)}"
+                } else {
+                    "рабочая зона +20..+120: нет данных"
+                }
+                val forecastFloor = listOfNotNull(finalActionWindowMin, result.minGuardBG, predictedBg.toDouble(), eventualBG)
+                    .minOrNull() ?: bg
+                return FinalForecastSummary(
+                    series = finalAimiSeries,
+                    actionEndIndex = finalActionEndIndex,
+                    actionWindowMin = finalActionWindowMin,
+                    actionWindowMinMinute = finalActionWindowMinMinute,
+                    belowTargetRun = finalBelowTargetRun,
+                    firstBelowMinute = actionWindowFirstBelow,
+                    carbsRequirement = finalForecastCarbsRequirement(finalAimiSeries, actionStartIndex, finalActionEndIndex),
+                    workingZoneSummary = workingZoneSummary,
+                    forecastFloor = forecastFloor
+                )
             }
-            val finalActionWindowMin = finalActionWindow.minOrNull()?.toDouble()
-            val finalActionWindowMinMinute = finalActionWindowMin?.let { minValue ->
-                val offset = finalActionWindow.indexOfFirst { it.toDouble() == minValue }
-                (actionStartIndex + offset) * 5
+
+            fun formatMgdl(value: Double?): String =
+                value?.takeIf { it.isFinite() }?.let { String.format(Locale.US, "%.0f", it) } ?: "н/д"
+
+            fun formatUnits(value: Double?): String =
+                value?.takeIf { it.isFinite() }?.let { String.format(Locale.US, "%.2f", it) } ?: "0.00"
+
+            fun trendText(value: Double): String = when {
+                value <= -3.0 -> "быстро падает"
+                value < -0.5  -> "снижается"
+                value < 0.5   -> "почти ровный"
+                value < 3.0   -> "растет"
+                else          -> "быстро растет"
             }
-            val finalBelowTargetRun = maxConsecutiveBelowTarget(finalActionWindow, target_bg)
-            val actionWindowFirstBelow = firstBelowMinute(finalAimiSeries, actionStartIndex, target_bg)
-            val workingZoneSummary = if (finalActionWindow.isNotEmpty()) {
-                "рабочая зона +20..+120: " +
-                    "min=${finalActionWindowMin?.let { "%.0f".format(it) } ?: "n/a"}" +
-                    (finalActionWindowMinMinute?.let { " на +${it}m" } ?: "") +
-                    ", ниже цели подряд=${finalBelowTargetRun}" +
-                    (actionWindowFirstBelow?.let { ", первая ниже +${it}m" } ?: ", ниже цели нет") +
-                    ", цель=${"%.0f".format(target_bg)}"
-            } else {
-                "рабочая зона +20..+120: нет данных"
+
+            fun forecastText(summary: FinalForecastSummary): String {
+                val minText = summary.actionWindowMin?.let { formatMgdl(it) } ?: formatMgdl(summary.forecastFloor)
+                val minTimeText = summary.actionWindowMinMinute?.let { " примерно через $it мин" } ?: ""
+                return "ожидаю сахар около ${formatMgdl(eventualBG)}, самый низкий прогноз $minText$minTimeText"
             }
-            val finalForecastCarbs = finalForecastCarbsRequirement(finalAimiSeries, actionStartIndex, finalActionEndIndex)
+
+            fun buildHumanDecisionTrace(
+                summary: FinalForecastSummary,
+                plannedSmbBeforeGuard: Double,
+                finalForecastBlockedSmb: Boolean,
+                hypoFloor: Double
+            ): String {
+                val finalSmb = result.units ?: 0.0
+                val finalRate = result.rate
+                val finalDuration = result.duration ?: 0
+                val finalCarbs = result.carbsReq ?: 0
+                val finalCarbsWithin = result.carbsReqWithin ?: 0
+                val forecastWouldBeLow = summary.forecastFloor <= hypoFloor || finalForecastBlockedSmb
+                val insulinReq = result.insulinReq ?: 0.0
+                val basalText = if (finalRate != null && finalDuration > 0) {
+                    "ставлю базал ${formatUnits(finalRate)} Е/ч на ${finalDuration} мин"
+                } else {
+                    "базал не меняю"
+                }
+                val carbsText = if (finalCarbs > 0) {
+                    "прошу ${finalCarbs} г углеводов в течение ${finalCarbsWithin} мин"
+                } else {
+                    "углеводы сейчас не прошу"
+                }
+                val activeInsulin = formatUnits(iob_data.iob)
+                val activeCarbs = String.format(Locale.US, "%.1f", forecastCobG)
+                val forecast = forecastText(summary)
+                val currentState = "сейчас сахар ${formatMgdl(bg)}, он ${trendText(delta.toDouble())}, цель ${formatMgdl(target_bg)}"
+                val accountedState = "уже учтено ${activeInsulin} Е активного инсулина и ${activeCarbs} г еды"
+                val checkFood = if (forecastCobG > 3.0) {
+                    "Если еды на самом деле нет или она указана неверно, причина может быть в учтенной еде."
+                } else {
+                    "Если это не похоже на реальность, сначала проверь активный инсулин, чувствительность и неучтенную еду."
+                }
+                val explanation = when {
+                    finalCarbs > 0 ->
+                        "Я опасаюсь снижения, поэтому $carbsText и $basalText. Главное место для проверки: почему прогноз видит риск низкого сахара."
+
+                    finalSmb > 0.0 ->
+                        "Я считаю, что активного инсулина не хватает, поэтому добавляю ${formatUnits(finalSmb)} Е автоматической микродозой и $basalText. $checkFood"
+
+                    finalForecastBlockedSmb ->
+                        "Инсулин сейчас не добавляю: расчет сначала хотел ${formatUnits(plannedSmbBeforeGuard)} Е, но после проверки итогового прогноза это выглядело опасно низко. Главное место для проверки: почему расчет хотел инсулин до финальной проверки."
+
+                    insulinReq <= 0.0 ->
+                        "Инсулин сейчас не добавляю, потому что уже активного инсулина по расчету достаточно; $basalText. Если сахар все равно ожидаемо уйдет выше цели, главное место для проверки: активный инсулин или чувствительность могли быть оценены слишком оптимистично."
+
+                    forecastWouldBeLow ->
+                        "Инсулин сейчас не добавляю, потому что итоговый прогноз может уйти слишком низко; $basalText. Главное место для проверки: почему прогноз видит риск низкого сахара."
+
+                    else ->
+                        "Инсулин сейчас не добавляю, потому что сработали ограничения безопасности; $basalText. Главное место для проверки: какое ограничение заблокировало микродозу."
+                }
+
+                return "Итог простыми словами: $currentState; $accountedState; после этого решения $forecast. $explanation"
+            }
+
+            var finalForecastSummary = summarizeFinalForecast()
+            val plannedSmbBeforeFinalForecast = result.units ?: 0.0
+            val finalForecastCarbsBeforeGuard = finalForecastSummary.carbsRequirement?.first ?: 0
+            val finalForecastHypoFloor = result.hypoThreshold ?: computeHypoThreshold(minBg, profile.lgsThreshold)
+            val finalForecastBlocksSmb = plannedSmbBeforeFinalForecast > 0.0 &&
+                (
+                    finalForecastSummary.forecastFloor <= finalForecastHypoFloor ||
+                        (finalForecastCarbsBeforeGuard > 0 && finalForecastSummary.forecastFloor <= target_bg)
+                    )
+
+            if (finalForecastBlocksSmb) {
+                result.units = 0.0
+                result.insulinReq = 0.0
+                predictedSMB = 0f
+                val guardReason = "SMB запрещён финальным прогнозом: " +
+                    "min=${"%.0f".format(finalForecastSummary.forecastFloor)}, " +
+                    "углеводы=${finalForecastCarbsBeforeGuard}г, " +
+                    "было=${"%.2f".format(plannedSmbBeforeFinalForecast)}U"
+                consoleLog.add(guardReason)
+                result.reason.append(" | $guardReason;")
+                applyDecisionAwarePredictions(recomputeForCurrentDecision())
+                finalForecastSummary = summarizeFinalForecast()
+            }
+
+            val finalForecastCarbs = finalForecastSummary.carbsRequirement
             val previousCarbsReq = result.carbsReq ?: 0
             val previousCarbsReqWithin = result.carbsReqWithin ?: 0
             if (finalForecastCarbs != null) {
@@ -5142,7 +5503,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     )
                 }
             }
-            consoleLog.add("AIMI FINAL: $workingZoneSummary")
+            consoleLog.add("AIMI FINAL: ${finalForecastSummary.workingZoneSummary}")
             val sanitizedReason = result.reason.toString()
                 .replace(Regex("""\d+\s+add'l carbs req w/in \d+min;\s*"""), "")
                 .replace(Regex("""Predicted BG:\s*[-−]?\d+(?:[.,]\d+)?"""), "Predicted BG: ${"%.0f".format(predictedBg)}")
@@ -5155,13 +5516,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             }
             result.reason.appendLine()
             result.reason.append(
-                "🔚 Итоговый прогноз после решения: " +
-                    "прогноз: ${"%.0f".format(predictedBg)} | " +
-                    "итог: ${"%.0f".format(eventualBG)} | " +
-                    "MinGuardBG: ${"%.0f".format(result.minGuardBG)} | " +
-                    "SMB: ${"%.2f".format(result.units ?: 0.0)} U | " +
-                    "базал: ${"%.2f".format(result.rate ?: 0.0)} U/h × ${result.duration}m | " +
-                    workingZoneSummary
+                buildHumanDecisionTrace(
+                    summary = finalForecastSummary,
+                    plannedSmbBeforeGuard = plannedSmbBeforeFinalForecast,
+                    finalForecastBlockedSmb = finalForecastBlocksSmb,
+                    hypoFloor = finalForecastHypoFloor
+                )
             )
             return result
         }

@@ -222,8 +222,13 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
         val threshold = raw?.hypoThreshold
         val decisive = detectDecisiveSignal(bg, predicted, eventual, minGuard)
         val smbMismatch = detectSmbRecommendationMismatch(lastAPSResult, raw)
+        val humanSummary = extractHumanSummary(lastAPSResult)
+            ?: buildHumanSummary(lastAPSResult, raw, bg, predicted, eventual, minGuard, threshold)
 
         return buildString {
+            append("<b>Итог простыми словами</b><br>")
+            append(humanSummary)
+            append("<br><br>")
             if (smbMismatch != null) {
                 append("<b>Внимание: возможная ошибка SMB</b><br>")
                 append(smbMismatch.simpleText)
@@ -248,6 +253,61 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
             append("<br>")
             append("TBR: ${formatTempBasal(lastAPSResult.rate, lastAPSResult.duration)}")
         }
+    }
+
+    private fun extractHumanSummary(lastAPSResult: APSResult): String? =
+        lastAPSResult.reason
+            .lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("Итог простыми словами:", ignoreCase = true) }
+            ?.removePrefix("Итог простыми словами:")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+    private fun buildHumanSummary(
+        lastAPSResult: APSResult,
+        raw: RT?,
+        bg: Double?,
+        predicted: Double?,
+        eventual: Double?,
+        minGuard: Double?,
+        threshold: Double?
+    ): String {
+        val forecast = minGuard ?: predicted ?: eventual
+        val carbsReq = raw?.carbsReq ?: lastAPSResult.carbsReq
+        val carbsWithin = raw?.carbsReqWithin ?: lastAPSResult.carbsReqWithin
+        val insulinReq = raw?.insulinReq ?: 0.0
+        val smb = lastAPSResult.smb
+
+        val state = buildString {
+            append("Сейчас сахар ${formatMgdl(bg)}")
+            forecast?.let { append(", решающий прогноз ${formatMgdl(it)}") }
+            threshold?.let { append(", опасная граница ${formatMgdl(it)}") }
+            append(".")
+        }
+
+        val action = when {
+            carbsReq > 0 -> "Система просит $carbsReq г углеводов за $carbsWithin мин и не должна усиливать инсулин."
+            smb > 0.01 -> "Система добавляет SMB ${formatUnits(smb)} Е и ставит TBR ${formatTempBasal(lastAPSResult.rate, lastAPSResult.duration)}."
+            insulinReq > 0.01 -> "Расчет видел потребность в инсулине ${formatUnits(insulinReq)} Е, но итоговый SMB сейчас ${formatUnits(smb)} Е."
+            lastAPSResult.rate > 0.01 && lastAPSResult.duration > 0 -> "Система не дает SMB, но ставит TBR ${formatTempBasal(lastAPSResult.rate, lastAPSResult.duration)}."
+            else -> "Система не добавляет инсулин: SMB 0.00 Е, TBR ${formatTempBasal(lastAPSResult.rate, lastAPSResult.duration)}."
+        }
+
+        val why = when {
+            forecast != null && threshold != null && forecast <= threshold + 10.0 ->
+                "Причина: прогноз близко к опасной зоне, поэтому приоритет у защиты от гипо."
+            forecast != null && bg != null && forecast < bg - 15.0 ->
+                "Причина: несмотря на текущий сахар, прогноз заметно ниже текущего значения, поэтому инсулин ограничен."
+            smb > 0.01 ->
+                "Причина: прогноз и ограничения разрешили коррекцию инсулином."
+            carbsReq > 0 ->
+                "Причина: расчет видит риск низкой глюкозы и предлагает поднять ее углеводами."
+            else ->
+                "Причина: итоговые ограничения не разрешили дополнительный SMB."
+        }
+
+        return "$state $action $why"
     }
 
     private fun buildDecisionStages(lastAPSResult: APSResult, raw: RT?): String {

@@ -141,7 +141,7 @@ class BasalDecisionEngine @Inject constructor(
             val ctx = LoopContext(
                 bg = bgSnap,
                 iobU = input.iob,
-                cobG = 0.0, // (non utilisé ici)
+                cobG = input.mealData.mealCOB,
                 profile = profile,
                 pump = pumpCaps,
                 modes = modes,

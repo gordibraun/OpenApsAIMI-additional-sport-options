@@ -60,4 +60,22 @@ class CarbsAdvisorTest {
         )
         assertEquals(7, result)
     }
+
+    @Test
+    fun `test pressure rescue carbs rounds up`() {
+        val result = CarbsAdvisor.estimatePressureRescueCarbs(
+            bg = 158.0,
+            targetBG = 117.0,
+            eventualBG = 95.0,
+            minPredictedBG = 95.0,
+            iob = 2.0,
+            csf = 10.0,
+            isf = 30.0,
+            cob = 0.0,
+            recentSmb30 = 0.8,
+            nightNoMeal = false
+        )
+
+        assertEquals(4, result)
+    }
 }

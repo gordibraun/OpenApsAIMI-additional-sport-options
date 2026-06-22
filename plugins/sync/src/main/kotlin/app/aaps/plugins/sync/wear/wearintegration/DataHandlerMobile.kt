@@ -97,7 +97,6 @@ import javax.inject.Provider
 import javax.inject.Singleton
 import kotlin.math.abs
 import kotlin.math.ceil
-import kotlin.math.max
 import kotlin.math.min
 
 @Singleton
@@ -1321,10 +1320,11 @@ class DataHandlerMobile @Inject constructor(
             ic = profile.getIc()
         )
         val apsCarbsReq = loopForecastCarbsReq(now, "Wear forecast carbs")
-        val carbsReq = max(result?.carbs ?: 0, apsCarbsReq)
+        val carbsReq = result?.carbs ?: apsCarbsReq
         aapsLogger.debug(
             LTag.WEAR,
-            "Wear forecast carbs from AIMI_FINAL: carbs=$carbsReq graph=${result?.carbs ?: 0} aps=$apsCarbsReq " +
+            "Wear forecast carbs from AIMI_FINAL: carbs=$carbsReq treatmentAware=true " +
+                "graph=${result?.carbs ?: 0} aps=$apsCarbsReq " +
                 "min=${result?.minBgMgdl?.let { "%.0f".format(it) } ?: "n/a"} " +
                 "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(targetMgdl)}"
         )

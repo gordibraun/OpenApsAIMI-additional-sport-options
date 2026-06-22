@@ -9,6 +9,7 @@ import app.aaps.plugins.aps.openAPSAIMI.OpenAPSAIMIPlugin
 import app.aaps.plugins.aps.openAPSAMA.OpenAPSAMAPlugin
 import app.aaps.plugins.aps.openAPSAutoISF.OpenAPSAutoISFPlugin
 import app.aaps.plugins.aps.openAPSSMB.OpenAPSSMBPlugin
+import app.aaps.plugins.aps.patterninsights.PatternInsightsPlugin
 import app.aaps.plugins.automation.AutomationPlugin
 import app.aaps.plugins.configuration.configBuilder.ConfigBuilderPlugin
 import app.aaps.plugins.configuration.maintenance.MaintenancePlugin
@@ -267,6 +268,12 @@ abstract class PluginsListModule {
     @AllConfigs
     @IntoMap
     @IntKey(8)
+    abstract fun bindPatternInsightsPlugin(plugin: PatternInsightsPlugin): PluginBase
+
+    @Binds
+    @AllConfigs
+    @IntoMap
+    @IntKey(11)
     abstract fun bindCarbModelPlugin(plugin: CarbModelPlugin): PluginBase
 
     @Binds

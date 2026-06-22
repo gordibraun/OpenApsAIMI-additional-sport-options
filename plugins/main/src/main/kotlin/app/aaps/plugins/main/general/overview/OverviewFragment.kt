@@ -13,6 +13,9 @@ import android.graphics.drawable.AnimationDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
@@ -28,6 +31,7 @@ import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.RM
 import app.aaps.core.data.model.SourceSensor
 import app.aaps.core.data.model.TE
+import app.aaps.core.data.model.TT
 import app.aaps.core.data.time.T
 import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.data.ue.Action
@@ -55,6 +59,7 @@ import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.overview.OverviewMenus
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PluginBase
+import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.protection.ProtectionCheck
@@ -93,6 +98,7 @@ import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.BooleanNonKey
 import app.aaps.core.keys.DoubleKey
+import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.IntNonKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
@@ -132,6 +138,9 @@ import javax.inject.Provider
 import app.aaps.core.objects.extensions.valueToUnits
 
 class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickListener {
+
+    private val isfDecisionColor = Color.rgb(186, 104, 200)
+    private val isfCarbsColor = Color.rgb(255, 214, 0)
 
     @Inject lateinit var aapsLogger: AAPSLogger
     @Inject lateinit var aapsSchedulers: AapsSchedulers
@@ -1198,27 +1207,32 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             rh.gs(app.aaps.core.ui.R.string.bolus) + ": " + rh.gs(app.aaps.core.ui.R.string.format_insulin_units, bolusIob().iob) + "\n" +
             rh.gs(app.aaps.core.ui.R.string.basal) + ": " + rh.gs(app.aaps.core.ui.R.string.format_insulin_units, basalIob().basaliob)
 
-    private fun apsDecisionLine(result: APSResult?): String? {
-        result ?: return null
-        val parts = mutableListOf<String>()
-        if (result.smb > 0.0) {
-            parts += rh.gs(app.aaps.core.ui.R.string.smb_shortname) + " " +
-                rh.gs(app.aaps.core.ui.R.string.format_insulin_units, result.smb)
-        }
-        if (result.isTempBasalRequested) {
-            val duration = rh.gs(app.aaps.core.ui.R.string.format_mins, result.duration)
-            val tempBasal = if (result.percent > 0) {
-                "${rh.gs(R.string.temp_basal_overview_short_name)} ${result.percent}% $duration"
-            } else {
-                "${rh.gs(R.string.temp_basal_overview_short_name)} ${String.format(Locale.US, "%.2f", result.rate)} U/h $duration"
-            }
-            parts += tempBasal
-        }
-        if (result.carbsReq > 0) {
-            parts += rh.gs(app.aaps.core.objects.R.string.format_carbs, result.carbsReq)
-        }
-        return parts.takeIf { it.isNotEmpty() }?.joinToString(" | ")
+    private data class OverviewDecisionLine(
+        val text: String,
+        val colorAttr: Int
+    )
+
+    private data class WizardPreviewInputs(
+        val useCob: Boolean,
+        val useTrend: Boolean,
+        val usePercentage: Boolean,
+        val percentage: Int,
+        val useTT: Boolean
+    )
+
+    private fun apsCarbsDecisionLine(result: APSResult?, finalForecastCarbsReq: Int? = null, suppressApsCarbsReq: Boolean = false): OverviewDecisionLine? {
+        val apsCarbsReq = if (suppressApsCarbsReq) 0 else result?.carbsReq ?: 0
+        val carbsReq = finalForecastCarbsReq ?: apsCarbsReq
+        return if (carbsReq > 0) {
+            OverviewDecisionLine(
+                formatRecommendedCarbs(carbsReq),
+                app.aaps.core.ui.R.attr.carbsColor
+            )
+        } else null
     }
+
+    private fun formatRecommendedCarbs(carbsReq: Int): String =
+        "+" + rh.gs(app.aaps.core.objects.R.string.format_carbs, carbsReq)
 
     private fun updateIobCob() {
         val iobText = iobText()
@@ -1240,16 +1254,14 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
         // COB (как в визарде: берём displayCob)
         val displayCob = cobInfo.displayCob ?: 0.0
-        val wizardUseCob = preferences.get(BooleanKey.WizardIncludeCob)
-        val wizardUseTrend = preferences.get(BooleanKey.WizardIncludeTrend)
-        val wizardUsePercentage = preferences.get(BooleanKey.WizardCorrectionPercent)
-        val cob = if (wizardUseCob) displayCob else 0.0
+        val wizardPreviewInputs = wizardPreviewInputs(tempTarget)
+        val cob = if (wizardPreviewInputs.useCob) displayCob else 0.0
 
-        var overviewForecastRequiredCarbs = 0
-        val wizardLine: String? =
+        var overviewForecastRequiredCarbs: Int? = null
+        val wizardLine: OverviewDecisionLine? =
             if (profile != null && profileStore != null) {
                 val profileName = profileFunction.getProfileName()
-                val forecastRequiredCarbs = forecastRequiredCarbsFromFinalLine(profile, fullPredictionTargetMgdl())
+                val forecastRequiredCarbs = forecastRequiredCarbsFromFinalLine(profile, tempTarget, wizardPreviewInputs.useTT)
                 val activityBolusContext = currentActivityBolusContext(dateUtil.now())
                 overviewForecastRequiredCarbs = forecastRequiredCarbs
                 val w = bolusWizardProvider.get().doCalc(
@@ -1260,19 +1272,19 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     cob,                           // cob
                     bg,                            // bg in current units
                     0.0,                           // correction
-                    preferences.get(app.aaps.core.keys.IntKey.OverviewBolusPercentage),
+                    wizardPreviewInputs.percentage,
                     true,                          // bgCheckbox
-                    wizardUseCob,                  // cobCheckbox
+                    wizardPreviewInputs.useCob,    // cobCheckbox
                     true,                          // iobCheckbox
                     true,                          // ??? (в визарде два раза iobCheckbox)
                     false,                         // superbolus
-                    false,                         // ttCheckbox
-                    wizardUseTrend,                // trendCheckbox
+                    wizardPreviewInputs.useTT,     // ttCheckbox
+                    wizardPreviewInputs.useTrend,  // trendCheckbox
                     false,                         // alarm
                     "",                            // notes
                     0,                             // carbTime
-                    usePercentage = wizardUsePercentage,
-                    totalPercentage = preferences.get(app.aaps.core.keys.IntKey.OverviewBolusPercentage).toDouble(),
+                    usePercentage = wizardPreviewInputs.usePercentage,
+                    totalPercentage = wizardPreviewInputs.percentage.toDouble(),
                     forecastRequiredCarbs = forecastRequiredCarbs,
                     activityNewInsulinFactor = activityBolusContext?.factor ?: 1.0,
                     activityDescription = activityBolusContext?.description
@@ -1282,7 +1294,9 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     LTag.UI,
                     "Overview wizard line: insulin=${"%.2f".format(w.calculatedTotalInsulin)} bg=$bg displayCob=$displayCob " +
                         "usedCob=${"%.1f".format(w.cobUsedForInsulin)} handledCob=${"%.1f".format(w.cobAlreadyHandledByAimi)} " +
-                        "activityHandledCob=${"%.1f".format(w.cobAlreadyHandledByActivity)} useCob=$wizardUseCob useTrend=$wizardUseTrend usePercentage=$wizardUsePercentage " +
+                        "activityHandledCob=${"%.1f".format(w.cobAlreadyHandledByActivity)} useCob=${wizardPreviewInputs.useCob} " +
+                        "useTrend=${wizardPreviewInputs.useTrend} usePercentage=${wizardPreviewInputs.usePercentage} " +
+                        "percentage=${wizardPreviewInputs.percentage} useTT=${wizardPreviewInputs.useTT} " +
                         "forecastRequiredCarbs=${w.forecastRequiredCarbs} source=${w.forecastRequiredCarbsSource} " +
                         "activityFactor=${"%.2f".format(activityBolusContext?.factor ?: 1.0)}" +
                         (activityBolusContext?.description?.let { " activity=$it" } ?: "")
@@ -1290,11 +1304,20 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
                 // “Результат / Не хватает” без текста, только значение+единица
                 if (w.forecastRequiredCarbs > 0) {
-                    rh.gs(app.aaps.core.objects.R.string.format_carbs, w.forecastRequiredCarbs)
+                    OverviewDecisionLine(
+                        formatRecommendedCarbs(w.forecastRequiredCarbs),
+                        app.aaps.core.ui.R.attr.carbsColor
+                    )
                 } else if (w.calculatedTotalInsulin > 0.0) {
-                    rh.gs(app.aaps.core.ui.R.string.format_insulin_units, w.calculatedTotalInsulin)
+                    OverviewDecisionLine(
+                        rh.gs(app.aaps.core.ui.R.string.format_insulin_units, w.calculatedTotalInsulin),
+                        app.aaps.core.ui.R.attr.bolusColor
+                    )
                 } else {
-                    rh.gs(app.aaps.core.objects.R.string.format_carbs, 0)
+                    OverviewDecisionLine(
+                        rh.gs(app.aaps.core.objects.R.string.format_carbs, 0),
+                        app.aaps.core.ui.R.attr.carbsColor
+                    )
                 }
             } else null
         // ---- /NEW ----
@@ -1304,27 +1327,51 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             binding.infoLayout.iob.text = iobText
             binding.infoLayout.iobLayout.setOnClickListener { activity?.let { OKDialog.show(it, rh.gs(app.aaps.core.ui.R.string.iob), iobDialogText) } }
             // cob
-            var cobText = displayText ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short)
+            val cobText = SpannableStringBuilder(displayText ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short))
 
             val constraintsProcessed = loop.lastRun?.constraintsProcessed
             val lastRun = loop.lastRun
 
+            var animationCarbsReq = overviewForecastRequiredCarbs ?: 0
             if (config.APS && constraintsProcessed != null && lastRun != null) {
-                val decisionLine = apsDecisionLine(constraintsProcessed) ?: wizardLine
+                val treatmentRecalcPending = finalForecastPendingTreatmentRecalculation(dateUtil.now(), "Overview decision line")
+                val decisionLine = apsCarbsDecisionLine(
+                    constraintsProcessed,
+                    overviewForecastRequiredCarbs,
+                    suppressApsCarbsReq = treatmentRecalcPending
+                ) ?: wizardLine
 
                 // Показываем то же решение, которое уже использовано для финального прогноза.
                 decisionLine?.let {
-                    cobText += "\n$it"
+                    appendColoredLine(cobText, it.text, rh.gac(context, it.colorAttr))
+                    aapsLogger.debug(
+                        LTag.UI,
+                        "Overview COB visible decision line: base='${displayText ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short)}' " +
+                        "decision='${it.text}' forecastRequiredCarbs=$overviewForecastRequiredCarbs"
+                    )
                 }
 
-                if (overviewForecastRequiredCarbs > 0 || constraintsProcessed.carbsReq > 0) {
-                    if (carbAnimation?.isRunning == false) carbAnimation?.start()
-                } else {
-                    carbAnimation?.stop()
-                    carbAnimation?.selectDrawable(0)
+                animationCarbsReq = overviewForecastRequiredCarbs ?: if (!treatmentRecalcPending) constraintsProcessed.carbsReq else 0
+            } else {
+                wizardLine?.let {
+                    appendColoredLine(cobText, it.text, rh.gac(context, it.colorAttr))
+                    aapsLogger.debug(
+                        LTag.UI,
+                        "Overview COB visible wizard fallback: base='${displayText ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short)}' " +
+                            "decision='${it.text}' forecastRequiredCarbs=$overviewForecastRequiredCarbs apsReady=${constraintsProcessed != null && lastRun != null}"
+                    )
                 }
             }
 
+            if (animationCarbsReq > 0) {
+                if (carbAnimation?.isRunning == false) carbAnimation?.start()
+            } else {
+                carbAnimation?.stop()
+                carbAnimation?.selectDrawable(0)
+            }
+
+            binding.infoLayout.cob.setSingleLine(false)
+            binding.infoLayout.cob.maxLines = 2
             binding.infoLayout.cob.text = cobText
         }
     }
@@ -1561,9 +1608,35 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         return targetUsed ?: profileFunction.getProfile()?.getTargetMgdl()?.takeIf { it.isFinite() && it > 0.0 }
     }
 
-    private fun forecastRequiredCarbsFromFinalLine(profile: app.aaps.core.interfaces.profile.Profile, targetMgdl: Double?): Int {
-        val target = targetMgdl ?: return 0
+    private fun wizardPreviewInputs(tempTarget: TT?): WizardPreviewInputs {
+        val usePercentage = preferences.get(BooleanKey.WizardCorrectionPercent)
+        var percentage = preferences.get(IntKey.OverviewBolusPercentage)
+        val resetAfterMinutes = preferences.get(IntKey.OverviewResetBolusPercentageTime).toLong()
+        val lastBg = persistenceLayer.getLastGlucoseValue()
+        if (lastBg == null || lastBg.timestamp < dateUtil.now() - T.mins(resetAfterMinutes).msecs()) percentage = 100
+
+        return WizardPreviewInputs(
+            useCob = preferences.get(BooleanKey.WizardIncludeCob),
+            useTrend = preferences.get(BooleanKey.WizardIncludeTrend),
+            usePercentage = usePercentage,
+            percentage = percentage,
+            useTT = tempTarget != null
+        )
+    }
+
+    private fun forecastCarbsTargetMgdl(profile: Profile, tempTarget: TT?, useTT: Boolean): Double? {
+        if (useTT && tempTarget != null) {
+            val low = tempTarget.lowTarget
+            val high = tempTarget.highTarget
+            if (low.isFinite() && high.isFinite() && low > 0.0 && high > 0.0) return (low + high) / 2.0
+        }
+        return fullPredictionTargetMgdl() ?: profile.getTargetMgdl().takeIf { it.isFinite() && it > 0.0 }
+    }
+
+    private fun forecastRequiredCarbsFromFinalLine(profile: Profile, tempTarget: TT?, useTT: Boolean): Int {
+        val target = forecastCarbsTargetMgdl(profile, tempTarget, useTT) ?: return 0
         val now = dateUtil.now()
+        val apsCarbsReq = loopForecastCarbsReq(now, "Overview forecast carbs")
         if (finalForecastPendingTreatmentRecalculation(now, "Overview forecast carbs")) return 0
         val isfMgdl = profile.getIsfMgdlForCarbs(now, "Overview forecast carbs", config, processedDeviceStatusData)
         val result = ForecastCarbsCalculator.fromFinalForecast(
@@ -1573,13 +1646,13 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             isfMgdl = isfMgdl,
             ic = profile.getIc()
         )
-        val apsCarbsReq = loopForecastCarbsReq(now, "Overview forecast carbs")
-        val carbsReq = max(result?.carbs ?: 0, apsCarbsReq)
+        val carbsReq = result?.carbs ?: apsCarbsReq
         aapsLogger.debug(
             LTag.UI,
-            "Overview forecast carbs from AIMI_FINAL: carbs=$carbsReq graph=${result?.carbs ?: 0} aps=$apsCarbsReq " +
+            "Overview forecast carbs from AIMI_FINAL: carbs=$carbsReq treatmentAware=true " +
+                "graph=${result?.carbs ?: 0} aps=$apsCarbsReq " +
                 "min=${result?.minBgMgdl?.let { "%.0f".format(it) } ?: "n/a"} " +
-                "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(target)}"
+                "at=${result?.minMinutes ?: 0}m target=${"%.0f".format(target)} isfCarbs=${"%.1f".format(isfMgdl)}"
         )
         return carbsReq
     }
@@ -1590,12 +1663,13 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         var source = ""
         loop.lastRun?.let { lastRun ->
             if (now - lastRun.lastAPSRun <= T.mins(15).msecs()) {
-                val result = lastRun.constraintsProcessed ?: lastRun.request
-                val candidate = result?.carbsReq ?: 0
-                if (candidate > carbs) {
-                    carbs = candidate
-                    within = result?.carbsReqWithin ?: 0
-                    source = "loop"
+                listOf(lastRun.constraintsProcessed to "loop", lastRun.request to "loopRequest").forEach { (result, candidateSource) ->
+                    val candidate = result?.carbsReq ?: 0
+                    if (candidate > carbs) {
+                        carbs = candidate
+                        within = result?.carbsReqWithin ?: 0
+                        source = candidateSource
+                    }
                 }
             }
         }
@@ -1615,6 +1689,16 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             "$caller uses APS carbsReq candidate: carbs=$carbs within=${within}m source=$source"
         )
         return carbs
+    }
+
+    private fun currentDecisionIsfMgdl(profile: Profile, caller: String): Double {
+        val decisionIsf = when {
+            config.APS        -> loop.lastRun?.request?.variableSens
+            config.AAPSCLIENT -> processedDeviceStatusData.getAPSResult()?.variableSens
+            else              -> null
+        }?.takeIf { it.isFinite() && it > 0.0 }
+
+        return decisionIsf ?: profile.getIsfMgdl(caller)
     }
 
     private fun finalForecastPendingTreatmentRecalculation(now: Long, caller: String): Boolean {
@@ -1672,45 +1756,41 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         // Show variable sensitivity
         val profile = profileFunction.getProfile()
         val request = loop.lastRun?.request
-        val isfMgdl = profile?.getProfileIsfMgdl()
-        val isfForCarbs = profile?.getIsfMgdlForCarbs(dateUtil.now(), "Overview", config, processedDeviceStatusData)
-        val variableSens =
-            if (config.APS) request?.variableSens ?: 0.0
-            else if (config.AAPSCLIENT) processedDeviceStatusData.getAPSResult()?.variableSens ?: 0.0
-            else 0.0
+        val profileIsfMgdl = profile?.getProfileIsfMgdl()
+        val decisionIsfMgdl = profile?.let { currentDecisionIsfMgdl(it, "Overview sensitivity") }
+        val carbsIsfMgdl = profile?.getIsfMgdlForCarbs(dateUtil.now(), "Overview sensitivity", config, processedDeviceStatusData)
         val ratioUsed = request?.autosensResult?.ratio ?: 1.0
 
-        if (variableSens != isfMgdl && variableSens != 0.0 && isfMgdl != null) {
-            val okDialogText: ArrayList<String> = ArrayList()
+        if (decisionIsfMgdl != null && carbsIsfMgdl != null && profileIsfMgdl != null) {
+            val okDialogText = SpannableStringBuilder()
             val overViewText: ArrayList<String> = ArrayList()
             val autoSensHiddenRange = 0.0             //Hide Autosens value if equals 100%
             val autoSensMax = 100.0 + (preferences.get(DoubleKey.AutosensMax) - 1.0) * autoSensHiddenRange * 100.0
             val autoSensMin = 100.0 + (preferences.get(DoubleKey.AutosensMin) - 1.0) * autoSensHiddenRange * 100.0
+            val decisionIsf = profileUtil.fromMgdlToUnits(decisionIsfMgdl, profileFunction.getUnits())
+            val carbsIsf = profileUtil.fromMgdlToUnits(carbsIsfMgdl, profileFunction.getUnits())
+            val profileIsf = profileUtil.fromMgdlToUnits(profileIsfMgdl, profileFunction.getUnits())
             lastAutosensRatio?.let {
                 if (it < autoSensMin || it > autoSensMax)
                     overViewText.add(rh.gs(app.aaps.core.ui.R.string.autosens_short, it))
-                okDialogText.add(rh.gs(app.aaps.core.ui.R.string.autosens_long, it))
+                appendPlainLine(okDialogText, rh.gs(app.aaps.core.ui.R.string.autosens_long, it))
             }
-            overViewText.add(
-                String.format(
-                    Locale.getDefault(), "%1$.1f→%2$.1f",
-                    profileUtil.fromMgdlToUnits(isfMgdl, profileFunction.getUnits()),
-                    profileUtil.fromMgdlToUnits(variableSens, profileFunction.getUnits())
-                )
-            )
             binding.infoLayout.sensitivity.text = overViewText.joinToString("\n")
             binding.infoLayout.sensitivity.visibility = View.VISIBLE
-            binding.infoLayout.variableSensitivity.visibility = View.GONE
+            binding.infoLayout.variableSensitivity.text = isfOverviewText(decisionIsf, carbsIsf)
+            binding.infoLayout.variableSensitivity.visibility = View.VISIBLE
             if (ratioUsed != 1.0 && ratioUsed != lastAutosensData?.autosensResult?.ratio)
-                okDialogText.add(rh.gs(app.aaps.core.ui.R.string.algorithm_long, ratioUsed * 100))
-            okDialogText.add(rh.gs(app.aaps.core.ui.R.string.isf_for_carbs, profileUtil.fromMgdlToUnits(isfForCarbs ?: 0.0, profileFunction.getUnits())))
+                appendPlainLine(okDialogText, rh.gs(app.aaps.core.ui.R.string.algorithm_long, ratioUsed * 100))
+            appendColoredLine(okDialogText, String.format(Locale.getDefault(), "ISF решения: %1$.1f", decisionIsf), isfDecisionColor)
+            appendColoredLine(okDialogText, String.format(Locale.getDefault(), "ISF еды/COB: %1$.1f", carbsIsf), isfCarbsColor)
+            appendPlainLine(okDialogText, String.format(Locale.getDefault(), "Профильный ISF: %1$.1f", profileIsf))
             if (config.APS) {
                 val aps = activePlugin.activeAPS
                 aps.getSensitivityOverviewString()?.let {
-                    okDialogText.add(it)
+                    appendPlainLine(okDialogText, it)
                 }
             }
-            binding.infoLayout.asLayout.setOnClickListener { activity?.let { OKDialog.show(it, rh.gs(app.aaps.core.ui.R.string.sensitivity), okDialogText.joinToString("\n")) } }
+            binding.infoLayout.asLayout.setOnClickListener { activity?.let { OKDialog.show(it, rh.gs(app.aaps.core.ui.R.string.sensitivity), okDialogText) } }
 
         } else {
             binding.infoLayout.sensitivity.text =
@@ -1720,6 +1800,29 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             binding.infoLayout.variableSensitivity.visibility = View.GONE
             binding.infoLayout.sensitivity.visibility = View.VISIBLE
         }
+    }
+
+    private fun isfOverviewText(decisionIsf: Double, carbsIsf: Double): SpannableStringBuilder =
+        SpannableStringBuilder().apply {
+            appendColoredSegment(this, String.format(Locale.getDefault(), "Р %1$.1f", decisionIsf), isfDecisionColor)
+            append("\n")
+            appendColoredSegment(this, String.format(Locale.getDefault(), "Е %1$.1f", carbsIsf), isfCarbsColor)
+        }
+
+    private fun appendPlainLine(builder: SpannableStringBuilder, text: CharSequence) {
+        if (builder.isNotEmpty()) builder.append("\n")
+        builder.append(text)
+    }
+
+    private fun appendColoredLine(builder: SpannableStringBuilder, text: String, color: Int) {
+        if (builder.isNotEmpty()) builder.append("\n")
+        appendColoredSegment(builder, text, color)
+    }
+
+    private fun appendColoredSegment(builder: SpannableStringBuilder, text: String, color: Int) {
+        val start = builder.length
+        builder.append(text)
+        builder.setSpan(ForegroundColorSpan(color), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
 
     private fun updatePumpStatus() {

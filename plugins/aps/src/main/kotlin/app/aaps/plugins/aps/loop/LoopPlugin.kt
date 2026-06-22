@@ -1108,8 +1108,12 @@ class LoopPlugin @Inject constructor(
             if (lastRun.lastAPSRun > dateUtil.now() - 300 * 1000L) {
                 // do not send if result is older than 1 min
                 apsResult = lastRun.request?.json()?.also {
+                    val carbsIsfMgdl = profile.getIsfMgdlForCarbs(dateUtil.now(), "LoopPlugin", config, processedDeviceStatusData)
                     it.put("timestamp", dateUtil.toISOString(lastRun.lastAPSRun))
-                    it.put("isfMgdlForCarbs", profile.getIsfMgdlForCarbs(dateUtil.now(), "LoopPlugin", config, processedDeviceStatusData))
+                    it.put("isfMgdlForCarbs", carbsIsfMgdl)
+                    lastRun.request?.variableSens
+                        ?.takeIf { decisionIsfMgdl -> decisionIsfMgdl.isFinite() && decisionIsfMgdl > 0.0 }
+                        ?.let { decisionIsfMgdl -> it.put("decisionIsfMgdl", decisionIsfMgdl) }
                 }
                 iob = lastRun.request?.iob?.json(dateUtil)?.also {
                     it.put("time", dateUtil.toISOString(lastRun.lastAPSRun))

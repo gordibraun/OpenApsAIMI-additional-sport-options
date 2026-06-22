@@ -260,6 +260,16 @@
     <string name="decision_trace_title">Decision Trace</string>
     <string name="decision_trace_shortname">TRACE</string>
     <string name="decision_trace_description">Shows which prediction signals AIMI compared, which one became decisive, and how safety changed the final insulin request.</string>
+    <string name="pattern_insights_title">Patterns</string>
+    <string name="pattern_insights_tab_title">PAT</string>
+    <string name="pattern_insights_shortname">PATTERN</string>
+    <string name="pattern_insights_description">Finds repeated evening and night patterns where glucose rises, SMB accumulates, and glucose or forecast later becomes dangerous.</string>
+    <string name="pattern_insights_generated">Updated</string>
+    <string name="pattern_insights_patterns">Repeated negative patterns</string>
+    <string name="pattern_insights_findings">Findings</string>
+    <string name="pattern_insights_episodes">Episodes</string>
+    <string name="pattern_insights_suggestions">What to check</string>
+    <string name="pattern_insights_error">Could not build pattern report</string>
     <string name="carb_model_title">COB-модели</string>
     <string name="carb_model_shortname">COB</string>
     <string name="carb_model_description">Visualization of three carb absorption models and reference on how they influence AIMI forecast.</string>

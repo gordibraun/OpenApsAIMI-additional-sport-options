@@ -39,7 +39,8 @@
     <string name="bg_sensor">Sensor</string>
 
     <!-- WizardDialog -->
-    <string name="format_bg_isf">%1$s ISF: %2$.1f</string>
+    <string name="format_bg_isf">%1$s Decision ISF: %2$.1f</string>
+    <string name="format_bg_carbs_isf">%1$s Carbs/COB ISF: %2$.1f</string>
     <string name="format_cob_ic">%1$.1fg IC: %2$.1f</string>
     <string name="format_carbs_ic">%1$.0fg IC: %2$.1f</string>
     <string name="treatments_wizard_total_label">Total</string>

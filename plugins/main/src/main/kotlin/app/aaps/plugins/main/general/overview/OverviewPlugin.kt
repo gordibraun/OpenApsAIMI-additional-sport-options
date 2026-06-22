@@ -100,6 +100,8 @@ class OverviewPlugin @Inject constructor(
 
     override val overviewBus = RxBusImpl(aapsSchedulers, aapsLogger)
 
+    private val aimiBuildLabel = "1.0 - Борьба с ночным заливанием"
+
     override fun onStart() {
         super.onStart()
         registerLocalBroadcastReceiver()
@@ -212,7 +214,7 @@ class OverviewPlugin @Inject constructor(
     @SuppressLint("SetTextI18n")
     override fun setVersionView(view: TextView) {
         if (config.APS || config.PUMPCONTROL) {
-            view.text = "${config.VERSION_NAME} (${config.HEAD.substring(0, 4)})"
+            view.text = aimiBuildLabel
             if (config.COMMITTED) {
                 view.setTextColor(rh.gac(context, app.aaps.core.ui.R.attr.omniGrayColor))
                 view.alpha = 1.0f
