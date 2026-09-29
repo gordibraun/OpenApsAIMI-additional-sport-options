@@ -1,0 +1,5 @@
+<resources>
+    <item name="manual_pump_serial" type="id" />
+    <item name="manual_pump_address" type="id" />
+    <item name="manual_probe_start" type="id" />
+</resources>

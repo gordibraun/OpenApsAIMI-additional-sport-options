@@ -98,17 +98,19 @@ object CarbAbsorptionModel {
         val sigma = (absorptionMinutes / 3.2).coerceAtLeast(20.0)
         val weights = DoubleArray(steps)
         var sum = 0.0
-        for (index in 0 until steps) {
+        // Normalize over the absorption period, not the selected display horizon.
+        // A 30-minute forecast must not consume the entire meal (or planned-dose kernel).
+        val fullSteps = ceil(absorptionMinutes / 5.0).toInt().coerceAtLeast(1)
+        for (index in 0 until fullSteps) {
             val minutes = (index + 1) * 5.0
             if (minutes > absorptionMinutes) {
-                weights[index] = 0.0
                 continue
             }
             val value = exp(-0.5 * ((minutes - peak) / sigma).pow(2.0))
-            weights[index] = value
+            if (index < steps) weights[index] = value
             sum += value
         }
-        if (sum <= 0.0) return DoubleArray(steps) { 1.0 / steps }
+        if (sum <= 0.0) return DoubleArray(steps)
         return DoubleArray(steps) { idx -> weights[idx] / sum }
     }
 

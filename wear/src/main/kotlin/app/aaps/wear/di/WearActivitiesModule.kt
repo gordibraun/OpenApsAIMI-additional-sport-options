@@ -27,6 +27,8 @@ import dagger.android.ContributesAndroidInjector
 @Suppress("unused")
 abstract class WearActivitiesModule {
 
+    @ContributesAndroidInjector abstract fun contributesWatchControlActivity(): app.aaps.wear.interaction.actions.WatchControlActivity
+
     @ContributesAndroidInjector abstract fun contributesTileConfigurationActivity(): TileConfigurationActivity
     @ContributesAndroidInjector abstract fun contributesConfigurationActivity(): ConfigurationActivity
 

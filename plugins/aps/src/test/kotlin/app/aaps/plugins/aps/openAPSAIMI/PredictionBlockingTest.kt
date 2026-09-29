@@ -2,7 +2,7 @@ package app.aaps.plugins.aps.openAPSAIMI
 
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 /**
  * Tests for prediction blocking behavior during rising BG scenarios.

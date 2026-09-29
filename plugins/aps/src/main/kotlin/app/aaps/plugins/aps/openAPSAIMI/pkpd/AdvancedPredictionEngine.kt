@@ -18,6 +18,7 @@ object AdvancedPredictionEngine {
      * @param profile User profile used for insulin timing and carb ratio.
      * @param horizonMinutes Prediction horizon (defaults to 4h).
      */
+    @Suppress("UNUSED_PARAMETER") // Legacy callers still supply decision metadata, not physical model inputs.
     fun predict(
         currentBG: Double,
         iobArray: Array<IobTotal>,
@@ -56,9 +57,11 @@ object AdvancedPredictionEngine {
             ?.takeIf { it.isFinite() && it > 0.0 }
             ?: (finalSensitivity / carbRatio)
         val totalCarbEffectMgDl = (cobG * csf).coerceAtLeast(0.0)
+        // A retained meal label is history, not remaining carbohydrate mass.
+        val declaredCarbsActive = cobG.isFinite() && cobG > 0.0
         val belowTargetUnannouncedRise = targetBG
             ?.takeIf { it.isFinite() && it > 0.0 }
-            ?.let { target -> currentBG < target && delta > 0.0 && cobG <= 0.0 && !explicitCarbEntry }
+            ?.let { target -> currentBG < target && delta > 0.0 && !declaredCarbsActive }
             ?: false
         val rescueFastModel = rescueFastActive && cobG <= 15.0
         val shortReboundModel = rescueFastModel || belowTargetUnannouncedRise
@@ -77,7 +80,7 @@ object AdvancedPredictionEngine {
                 cobG > 0 -> 0.92 // Even without visible rise, active COB should soften early insulin dominance a bit
                 else -> 1.0
             }
-            if (cobG <= 0.0 && !explicitCarbEntry) {
+            if (!declaredCarbsActive) {
                 1.0 - ((1.0 - normalDamping) * normalizedUamConfidence)
             } else {
                 normalDamping
@@ -86,9 +89,10 @@ object AdvancedPredictionEngine {
             1.0
         }
 
-        val effectiveFoodType = if (rescueFastModel && selectedFoodType == null) "fast" else selectedFoodType
+        val activeFoodType = selectedFoodType.takeIf { declaredCarbsActive }
+        val effectiveFoodType = if (rescueFastModel && activeFoodType == null) "fast" else activeFoodType
         val effectiveFoodTypeName = effectiveFoodType?.lowercase()
-        val explicitTypedCarbs = explicitCarbEntry || cobG > 0.0
+        val explicitTypedCarbs = declaredCarbsActive
         val carbParameters = CarbAbsorptionModel.resolveParameters(cobG = cobG, delta = delta, selectedFoodType = effectiveFoodType)
         val carbWeights = CarbAbsorptionModel.buildWeights(
             steps = steps,
@@ -105,7 +109,7 @@ object AdvancedPredictionEngine {
         val mealCurveBoost = 1.0 + (normalizedMealFactor - 1.0) * 0.8
         val effectiveCarbEffectMgDl = totalCarbEffectMgDl * mealCurveBoost
         val explicitCarbTimeline = carbImpactTimelineMgdlPer5m
-            ?.takeIf { it.isNotEmpty() }
+            ?.takeIf { declaredCarbsActive && it.isNotEmpty() }
             ?.map { it.coerceAtLeast(0.0) }
         val explicitFastCarbs = explicitTypedCarbs && effectiveFoodTypeName == "fast"
         val typedCarbImpactCapMgdlPer5m = when {
@@ -126,7 +130,7 @@ object AdvancedPredictionEngine {
             remainingCiPeakMgdlPer5m.coerceIn(0.0, observedCarbImpact * 0.6)
         } else if (belowTargetUnannouncedRise) {
             remainingCiPeakMgdlPer5m.coerceAtLeast(0.0) * normalizedUamConfidence * 0.35
-        } else if (cobG <= 0.0 && !explicitCarbEntry) {
+        } else if (!declaredCarbsActive) {
             remainingCiPeakMgdlPer5m.coerceAtLeast(0.0) * normalizedUamConfidence
         } else if (explicitTypedCarbs) {
             remainingCiPeakMgdlPer5m.coerceAtLeast(0.0) * typedObservedTailFactor
@@ -141,37 +145,12 @@ object AdvancedPredictionEngine {
         val plannedBasalUnits = rateDeltaUph * effectiveDurationHours
         val additionalInsulinUnits = plannedSmbU.coerceAtLeast(0.0) + plannedBasalUnits.coerceAtLeast(0.0)
         val reducedInsulinUnits = (-plannedBasalUnits).coerceAtLeast(0.0)
-        val decisionTrust = (
-            0.35 +
-                0.30 * mpcShare.coerceIn(0.0, 1.0) +
-                0.15 * piShare.coerceIn(0.0, 1.0) +
-                0.15 * (normalizedMealFactor - 1.0).coerceAtLeast(0.0) +
-                if (highBgOverrideUsed) 0.15 else 0.0
-            ).coerceIn(0.0, 1.2)
-        val protectiveSafety = isProtectiveSafety(safetyMechanism)
-        val hypoSafety = isHypoSafety(safetyMechanism)
-        val hasFinalDeliveryDecision = plannedSmbU > 0.0 || plannedRateUph != null
-        val additionalInsulinSuppression = when {
-            hypoSafety -> 0.0
-            protectiveSafety -> 0.15
-            else -> 1.0
-        }
-        val finalDeliveryVisibility = when {
-            !hasFinalDeliveryDecision -> decisionTrust
-            hypoSafety -> 0.0
-            protectiveSafety -> 0.50
-            else -> 1.0
-        }
-        val finalBasalVisibility = if (hasFinalDeliveryDecision) 1.0 else decisionTrust.coerceAtLeast(0.6)
-        val reducedInsulinSupport = when {
-            hypoSafety -> 1.0
-            protectiveSafety || hasFinalDeliveryDecision -> 1.0
-            else -> 0.75
-        }
-        val decisionDropTotalMgDl = additionalInsulinUnits * finalSensitivity * finalDeliveryVisibility * additionalInsulinSuppression
-        val freshSmbPressureDropMgDl = freshSmbPressureU.coerceAtLeast(0.0) * finalSensitivity * 0.35
-        val decisionLiftTotalMgDl = reducedInsulinUnits * finalSensitivity * finalBasalVisibility * reducedInsulinSupport
+        // Delivered SMBs are already in iobArray. Only the proposed, not-yet-delivered
+        // dose is added here; a safety label must not change the action of that dose.
+        val decisionDropTotalMgDl = additionalInsulinUnits * finalSensitivity
+        val decisionLiftTotalMgDl = reducedInsulinUnits * finalSensitivity
 
+        var remainingDeclaredCarbEffect = effectiveCarbEffectMgDl
         var lastBg = currentBG
         val sortedIob = iobArray.sortedBy { it.time }
         val baselineTime = sortedIob.firstOrNull()?.time ?: now
@@ -183,7 +162,7 @@ object AdvancedPredictionEngine {
             delta = delta,
             rescueFastActive = rescueFastModel,
             belowTargetUnannouncedRise = belowTargetUnannouncedRise,
-            explicitCarbEntry = explicitCarbEntry || cobG > 0.0,
+            explicitCarbEntry = declaredCarbsActive,
             selectedFoodType = effectiveFoodType,
             normalizedUamConfidence = normalizedUamConfidence
         )
@@ -192,7 +171,9 @@ object AdvancedPredictionEngine {
             val minutesInFuture = (stepIndex + 1) * 5
             val targetTime = baselineTime + minutesInFuture * 60_000L
             val futureIobEntry = sortedIob.minByOrNull { kotlin.math.abs(it.time - targetTime) } ?: sortedIob.lastOrNull()
-            var insulinImpactPer5min = ((futureIobEntry?.activity ?: 0.0).coerceAtLeast(0.0) * finalSensitivity * 5.0)
+            // Activity is net of scheduled basal. Negative activity represents an
+            // earlier basal deficit and must raise, not leave unchanged, the forecast.
+            var insulinImpactPer5min = (futureIobEntry?.activity ?: 0.0) * finalSensitivity * 5.0
 
             val dampingProgress = (minutesInFuture / 90.0).coerceIn(0.0, 1.0)
             val stepIobDampingFactor = baseIobDampingFactor + (1.0 - baseIobDampingFactor) * dampingProgress
@@ -220,24 +201,26 @@ object AdvancedPredictionEngine {
             }
             val liveCarbImpactPer5Min = observedCarbImpact * liveDecay
             val residualCarbImpactPer5Min = remainingObservedPeak * residualRamp
-            val carbImpactPer5Min = maxOf(
-                baseCarbImpactPer5Min,
-                liveCarbImpactPer5Min,
-                residualCarbImpactPer5Min
-            ).coerceAtMost(typedCarbImpactCapMgdlPer5m)
+            val carbImpactPer5Min = if (explicitTypedCarbs) {
+                // Declared food already has an absorption curve. Extrapolating its observed
+                // rise again creates additional grams and discards the selected food type.
+                baseCarbImpactPer5Min.coerceAtMost(typedCarbImpactCapMgdlPer5m)
+                    .coerceAtMost(remainingDeclaredCarbEffect).also { remainingDeclaredCarbEffect -= it }
+            } else {
+                maxOf(baseCarbImpactPer5Min, liveCarbImpactPer5Min, residualCarbImpactPer5Min)
+            }
             val decisionLiftPer5Min = decisionLiftTotalMgDl * decisionWeights[stepIndex]
             val decisionDropPer5Min = decisionDropTotalMgDl * decisionWeights[stepIndex]
-            val freshSmbDropPer5Min = freshSmbPressureDropMgDl * decisionWeights[stepIndex]
 
             // Apply Momentum
             // We add the current 'inertia' to the BG change, then decay it.
-            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + decisionLiftPer5Min - decisionDropPer5Min - freshSmbDropPer5Min + momentum).coerceIn(39.0, 401.0)
+            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + decisionLiftPer5Min - decisionDropPer5Min + momentum).coerceIn(39.0, 401.0)
 
             // Linear/Exp decay of momentum
             momentum *= momentumDecay(
                 rescueFastActive = rescueFastModel,
                 belowTargetUnannouncedRise = belowTargetUnannouncedRise,
-                explicitCarbEntry = explicitCarbEntry || cobG > 0.0,
+                explicitCarbEntry = declaredCarbsActive,
                 selectedFoodType = effectiveFoodType,
                 normalizedUamConfidence = normalizedUamConfidence
             )

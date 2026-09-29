@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="watch_control_scroll" type="id" />
+    <item name="watch_control_amount" type="id" />
+    <item name="watch_control_minus" type="id" />
+    <item name="watch_control_plus" type="id" />
+    <item name="watch_control_food_type" type="id" />
+    <item name="watch_food_balanced" type="id" />
+    <item name="watch_food_fast" type="id" />
+    <item name="watch_control_calculate" type="id" />
+    <item name="watch_control_carbs_only" type="id" />
+</resources>

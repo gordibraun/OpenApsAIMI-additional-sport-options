@@ -63,8 +63,8 @@ class CircleWatchface : WatchFace() {
     private var latestStatus: EventData.Status? = null
     private var latestGraph: EventData.GraphData? = null
 
-    private fun curSingleBg(): EventData.SingleBg = latestSingleBg ?: rawData.singleBg
-    private fun curStatus(): EventData.Status = latestStatus ?: rawData.status
+    private fun curSingleBg(): EventData.SingleBg = latestSingleBg ?: rawData.singleBg[0]
+    private fun curStatus(): EventData.Status = latestStatus ?: rawData.status[0]
     private fun curGraph(): EventData.GraphData = latestGraph ?: rawData.graphData
 
     // Геометрия

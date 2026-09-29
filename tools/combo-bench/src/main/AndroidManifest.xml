@@ -1,0 +1,30 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <application android:name=".BenchApplication" android:label="Combo: стенд" android:allowBackup="false"
+        android:dataExtractionRules="@xml/no_backup" android:icon="@android:drawable/ic_menu_info_details"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        <activity android:name=".BenchActivity" android:exported="true" android:taskAffinity="${applicationId}">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".ManualPairingActivity" android:exported="false"
+            android:taskAffinity="${applicationId}" android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".ManualPumpSetupActivity" android:exported="false" />
+        <service android:name="app.aaps.combobench.PairingForegroundService" android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <service android:name=".BenchListener" android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data android:scheme="wear" android:host="*" android:path="/combo-bench/v1" />
+            </intent-filter>
+        </service>
+        <receiver android:name=".BenchCommandReceiver" android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
+</manifest>

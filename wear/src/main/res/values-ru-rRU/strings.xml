@@ -91,6 +91,8 @@
     <string name="menu_menu">Меню</string>
     <string name="quick_wizard_short">XL</string>
     <string name="action_duration_minutes">Продолжительность\n[минут]</string>
+    <string name="action_timeshift_minutes">Временной сдвиг\n[минут]</string>
+    <string name="action_exercise_mode_confirmation">Режим нагрузки запрошен</string>
     <string name="action_tempt_confirmation">Требуется Временная Цель</string>
     <string name="action_quick_wizard_confirmation">Запрошен мастер настройки</string>
     <string name="action_user_action_confirmation">Запрошено действие пользователя</string>

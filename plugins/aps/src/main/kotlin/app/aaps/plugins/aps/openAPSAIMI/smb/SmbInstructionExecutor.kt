@@ -98,7 +98,8 @@ object SmbInstructionExecutor {
         val logDataMl: (Float, Float) -> Unit,
         val logData: (Float, Float) -> Unit,
         val roundBasal: (Double) -> Double,
-        val roundDouble: (Double, Int) -> Double
+        val roundDouble: (Double, Int) -> Double,
+        val traceChange: (String, Double, Double, String) -> Unit = { _, _, _, _ -> }
     )
 
     data class Result(
@@ -115,6 +116,7 @@ object SmbInstructionExecutor {
     fun execute(input: Input, hooks: Hooks): Result {
         var predictedSmb = input.predictedSmb
         var basal = input.initialBasal
+        input.consoleLog.add("Начальный запрос: микродоза=$predictedSmb Е; базал=$basal Е/ч; ISF решения=${input.sens}")
 
         val trainingEnabled = input.preferences.get(BooleanKey.OApsAIMIMLtraining)
         if (trainingEnabled && input.csvFile.exists()) {
@@ -168,6 +170,9 @@ object SmbInstructionExecutor {
             input.rT.reason.appendLine(input.context.getString(R.string.reason_ml_training))
         }
 
+        input.consoleLog.add("После обучаемой модели: $predictedSmb Е; обучение включено=$trainingEnabled; файл доступен=${input.csvFile.exists()}")
+        hooks.traceChange("Обучаемая модель микродозы", input.predictedSmb.toDouble(), predictedSmb.toDouble(),
+            "Обучение включено: $trainingEnabled. Значение после проверки модели.")
         var smbToGive = if (input.bg > 130 && input.delta > 2 && predictedSmb == 0.0f) {
             input.modelValue
         } else {
@@ -176,6 +181,9 @@ object SmbInstructionExecutor {
         if (input.honeymoon && input.bg < 170) {
             smbToGive *= 0.8f
         }
+        input.consoleLog.add("После подстановки модели при росте и режима ремиссии: $smbToGive Е")
+        hooks.traceChange("Рост глюкозы и режим ремиссии", predictedSmb.toDouble(), smbToGive.toDouble(),
+            "Результат подстановки модели при росте и поправки для режима ремиссии.")
 
         // ❌ TIME-BASED REACTIVITY REMOVED (replaced by UnifiedReactivityLearner in DetermineBasalAIMI2)
         // Previously: morningFactor, afternoonFactor, eveningFactor, hyperFactor
@@ -228,6 +236,9 @@ object SmbInstructionExecutor {
         }
 
         val currentHour = Calendar.getInstance()[Calendar.HOUR_OF_DAY]
+        input.consoleLog.add("Коэффициент режима еды/сна=$factors: $base -> $smbToGive Е")
+        hooks.traceChange("Режим еды, сна и начальный запрос", base.toDouble(), smbToGive.toDouble(),
+            "Коэффициент режима: $factors. В этом шаге также проверяются условия начального запроса при росте.")
         val adjustedDIAInMinutes = hooks.calculateAdjustedDia(
             input.profile.dia.toFloat(),
             currentHour,
@@ -275,6 +286,7 @@ object SmbInstructionExecutor {
         // 🔒 SAFETY: Cap strict ici aussi pour éviter qu'une heuristique interne ne dépasse le maxSMB
         aimiInsReq = kotlin.math.min(aimiInsReq, input.maxSmb)
         val finalInsulinDose = hooks.roundDouble(aimiInsReq, 2)
+        input.consoleLog.add("Расчёт по активности: текущая=$actCurr; будущая=$actFuture; недостающая=$actMissing; запрос=$finalInsulinDose Е")
 
         val doseMin = 0.0
         val doseMax = input.maxSmb
@@ -295,6 +307,7 @@ object SmbInstructionExecutor {
                 insulinSensitivity,
                 candidate
             )
+            input.consoleLog.add("Проверка варианта оптимизатора, не подача: $candidate Е; оценка=$cost")
             if (cost < bestCost) {
                 bestCost = cost
                 optimalDose = candidate
@@ -307,6 +320,7 @@ object SmbInstructionExecutor {
         val correction = kp * error
 
         val optimalBasalMpc = (optimalDose + correction).coerceIn(doseMin, doseMax)
+        input.consoleLog.add("Оптимизатор: выбран=$optimalDose; добавка по отклонению=$correction; после лимита=$optimalBasalMpc Е; ISF=$insulinSensitivity")
         // --- Mix MPC / PI : MPC plus dominant pour BG > cible ---
         val alphaRaw = 0.5 + 0.5 * deltaScore  // 0.3 → 0.5 de base
         val alpha = alphaRaw.coerceIn(0.3, 0.9)
@@ -336,6 +350,11 @@ object SmbInstructionExecutor {
 
         val suspectedLateFatMeal = input.highCarbTime && hooks.runtimeToMinutes(input.highCarbRunTime) > 90
         val exerciseContext = input.sportTime || input.plannedActivityForNewInsulin
+        input.consoleLog.add("Смешивание запросов: оптимизатор=$mpcUsed Е; по активности=$piUsed Е; итог=$smbDecision Е")
+        hooks.traceChange("Объединение двух расчётов микродозы", smbToGive.toDouble(), smbDecision.toDouble(),
+            "Вклад оптимизатора: $mpcUsed Е; расчёта по активности инсулина: $piUsed Е. Лимит: ${input.maxSmb} Е.")
+        val smbBeforeSafety = smbDecision
+        val reasonBeforeSafetyLength = input.rT.reason.length
         smbDecision = hooks.applySafety(
             input.mealData,
             smbDecision,
@@ -348,6 +367,12 @@ object SmbInstructionExecutor {
         input.rT.reason.appendLine(
             input.context.getString(R.string.smb_final, "%.2f".format(smbDecision))
         )
+        input.consoleLog.add("После проверки безопасности микродозы: $smbDecision Е; ${input.rT.reason}")
+        hooks.traceChange("Проверка безопасности микродозы", smbBeforeSafety.toDouble(), smbDecision.toDouble(),
+            input.rT.reason.toString().drop(reasonBeforeSafetyLength).trim().ifEmpty {
+                if (smbBeforeSafety == smbDecision) "Проверки не изменили запрос микродозы."
+                else "Проверки изменили запрос. Отдельная причина этим шагом не записана."
+            })
         val hypoGuard = input.threshold ?: hooks.computeHypoThreshold(
             input.profile.min_bg,
             input.profile.lgsThreshold
@@ -377,6 +402,8 @@ object SmbInstructionExecutor {
         var smbAfterDamping = dampingOut.smbAfterDamping
         val audit = dampingOut.audit
         val dampedRaw = smbAfterDamping
+        input.consoleLog.add("Ослабление по хвосту инсулина/нагрузке/еде: $smbDecision -> $smbAfterDamping Е; $audit")
+        hooks.traceChange("Ослабление с учётом остаточного действия", smbDecision.toDouble(), smbAfterDamping, audit.toString())
         input.pkpdRuntime?.let { runtime ->
                         if (input.bg >= 120.0 &&
                                 input.delta >= 0.0 &&
@@ -398,6 +425,10 @@ object SmbInstructionExecutor {
                             }
                     }
         var highBgOverrideFlag = false
+        input.consoleLog.add("После усиления при высокой глюкозе: $dampedRaw -> $smbAfterDamping Е")
+        hooks.traceChange("Усиление по модели действия инсулина", dampedRaw, smbAfterDamping,
+            "Проверены высокая глюкоза, остаточное действие и оценка чувствительности. Неизменное число означает отсутствие усиления.")
+        val smbBeforeHighBgOverride = smbAfterDamping
         var highBgOverrideUsed = input.highBgOverrideUsed
         var newInterval = input.currentInterval
 
@@ -424,12 +455,17 @@ object SmbInstructionExecutor {
             input.rT.reason.append("\nHighBG override skipped: planned activity already in forecast")
         }
 
+        hooks.traceChange("Поправка при росте глюкозы", smbBeforeHighBgOverride, smbAfterDamping,
+            "Поправка применена: $highBgOverrideFlag. Планируемая нагрузка: ${input.plannedActivityForNewInsulin}.")
         val finalSmb = SmbQuantizer.quantizeToPumpStep(
             smbAfterDamping.toFloat(),
             input.insulinStep
         )
 
         val quantized = finalSmb.toDouble()
+        hooks.traceChange("Округление до шага помпы", smbAfterDamping, quantized,
+            "Шаг помпы: ${input.insulinStep} Е. Это пока предложение, не команда на подачу.")
+        input.consoleLog.add("Усиление при росте=$highBgOverrideFlag; перед округлением=$smbAfterDamping Е; шаг помпы=${input.insulinStep} Е; округлено=$quantized Е")
 
         val activity = input.pkpdRuntime?.activity
         val activityPct = (activity?.relativeActivity ?: 0.0) * 100.0

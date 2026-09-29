@@ -14,8 +14,8 @@ import io.mockk.mockk
 import io.mockk.verify
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Before
-import org.junit.Test
+import org.junit.jupiter.api.BeforeEach as Before
+import org.junit.jupiter.api.Test
 
 class GlucoseStatusCalculatorAimiTest {
 

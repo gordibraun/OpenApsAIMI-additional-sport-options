@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <service android:name=".BackgroundProbeService" android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+        <receiver android:name=".BackgroundProbeReceiver" android:exported="false" />
+        <service android:name="app.aaps.combobench.PairingForegroundService"
+            android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <service android:name=".BenchListener" tools:node="remove" />
+        <receiver android:name=".BenchCommandReceiver" tools:node="remove" />
+    </application>
+</manifest>

@@ -62,8 +62,8 @@ class ActionProfileSwitchTest : ActionsTestBase() {
 
         //profile already set
         whenever(profileFunction.getProfile()).thenReturn(validProfile)
-        whenever(profileFunction.getProfileName()).thenReturn("Test")
-        sut.inputProfileName = InputProfileName(rh, activePlugin, "Test")
+        whenever(profileFunction.getProfileName()).thenReturn(TESTPROFILENAME)
+        sut.inputProfileName = InputProfileName(rh, activePlugin, TESTPROFILENAME)
         sut.doAction(object : Callback() {
             override fun run() {
                 assertThat(result.success).isTrue()

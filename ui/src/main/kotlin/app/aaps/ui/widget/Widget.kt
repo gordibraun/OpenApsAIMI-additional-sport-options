@@ -19,7 +19,8 @@ import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.interfaces.aps.APSResult
 import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.aps.Loop
-import app.aaps.core.interfaces.aps.RT
+import app.aaps.core.interfaces.aps.AimiMealAssist
+import app.aaps.core.objects.aps.ApsDecisionSnapshot
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
 import app.aaps.core.interfaces.db.PersistenceLayer
@@ -74,6 +75,7 @@ class Widget : AppWidgetProvider() {
     @Inject lateinit var iobCobCalculator: IobCobCalculator
     @Inject lateinit var processedTbrEbData: ProcessedTbrEbData
     @Inject lateinit var loop: Loop
+    @Inject lateinit var aimiMealAssist: AimiMealAssist
     @Inject lateinit var config: Config
     @Inject lateinit var preferences: Preferences
     @Inject lateinit var constraintChecker: ConstraintsChecker
@@ -225,29 +227,26 @@ class Widget : AppWidgetProvider() {
         return if (java.lang.Double.isFinite(value)) value else 0.0
     }
 
-    private fun finalForecastInsulinDeficitFromResult(result: APSResult?): Double {
-        val rawValue = (result?.rawData() as? RT)?.finalForecastInsulinDeficit
-        val jsonValue = result?.json()?.optDouble("finalForecastInsulinDeficit", 0.0) ?: 0.0
-        val value = rawValue ?: jsonValue
-        return if (java.lang.Double.isFinite(value)) value else 0.0
-    }
 
     private fun apsInsulinDeliveryOverview(result: APSResult?): WidgetApsInsulinOverview? {
+        if (config.APS) {
+            val snapshot = ApsDecisionSnapshot.fromLoop(loop, aimiMealAssist, persistenceLayer, dateUtil.now())
+            if (snapshot.state != ApsDecisionSnapshot.State.CURRENT) return WidgetApsInsulinOverview(
+                snapshot.statusLabel, rh.gc(app.aaps.core.ui.R.color.widget_ribbonWarning), app.aaps.core.ui.R.drawable.ic_shield
+            )
+        }
         result ?: return null
 
         val insulinReq = insulinReqFromResult(result)
-        val finalForecastInsulinDeficit = finalForecastInsulinDeficitFromResult(result)
         val waitingForSmbInterval = isWaitingForSmbInterval(result.reason)
-        val hasLimitedInsulin = finalForecastInsulinDeficit > insulinReq + 0.1
         return WidgetApsInsulinOverview(
             label = when {
                 waitingForSmbInterval -> "ПАУЗА"
-                hasLimitedInsulin -> "ЛИМИТ"
                 insulinReq > 0.01   -> "APS"
                 else                -> "СТОП"
             },
             color = when {
-                hasLimitedInsulin -> rh.gc(app.aaps.core.ui.R.color.widget_ribbonWarning)
+                waitingForSmbInterval -> rh.gc(app.aaps.core.ui.R.color.widget_ribbonWarning)
                 insulinReq > 0.01   -> rh.gc(app.aaps.core.ui.R.color.widget_basal)
                 else                -> rh.gc(app.aaps.core.ui.R.color.white)
             },
@@ -275,24 +274,31 @@ class Widget : AppWidgetProvider() {
     private fun updateIobCob(views: RemoteViews) {
         views.setTextViewText(R.id.iob, iobText())
         // cob
-        val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
-        var cobText = iobCobCalculator.getCobInfo("Overview COB")
+        val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { ApsDecisionSnapshot.treatmentChangedAt(it.timestamp, it.dateCreated, dateUtil.now()) } ?: 0L
+        val cobText = iobCobCalculator.getCobInfo("Overview COB")
             .withAimiResultCob(loop, dateUtil.now(), lastCarbsChangeTime)
             .displayText(rh, decimalFormatter)
             ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short)
 
-        val constraintsProcessed = loop.lastRun?.constraintsProcessed
-        val lastRun = loop.lastRun
-        if (config.APS && constraintsProcessed != null && lastRun != null) {
-            if (constraintsProcessed.carbsReq > 0) {
-                //only display carbsreq when carbs have not been entered recently
-                val lastCarbsTime = persistenceLayer.getNewestCarbs()?.timestamp ?: 0L
-                if (lastCarbsTime < lastRun.lastAPSRun) {
-                    cobText += " | " + constraintsProcessed.carbsReq + " " + rh.gs(app.aaps.core.ui.R.string.required)
-                }
+        val text = SpannableStringBuilder(cobText)
+        if (config.APS) {
+            val snapshot = ApsDecisionSnapshot.fromLoop(loop, aimiMealAssist, persistenceLayer, dateUtil.now())
+            text.append(" | ")
+            val start = text.length
+            text.append(when {
+                (snapshot.carbs ?: 0) > 0 -> "${snapshot.carbs} г"
+                snapshot.state != ApsDecisionSnapshot.State.CURRENT -> snapshot.statusLabel
+                else -> snapshot.insulin?.let { rh.gs(app.aaps.core.ui.R.string.format_insulin_units, it) }
+                        ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short)
+            })
+            val color = when {
+                (snapshot.carbs ?: 0) > 0 -> app.aaps.core.ui.R.color.carbs
+                snapshot.state != ApsDecisionSnapshot.State.CURRENT -> app.aaps.core.ui.R.color.widget_ribbonWarning
+                else -> app.aaps.core.ui.R.color.widget_basal
             }
+            text.setSpan(ForegroundColorSpan(rh.gc(color)), start, text.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
-        views.setTextViewText(R.id.cob, cobText)
+        views.setTextViewText(R.id.cob, text)
     }
 
     private fun updateTemporaryTarget(views: RemoteViews) {

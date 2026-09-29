@@ -407,6 +407,9 @@ class IobCobCalculatorPlugin @Inject constructor(
         if (autosensData != null) {
             val expandedCarbs = persistenceLayer.getCarbsFromTimeExpanded(autosensData.time - T.hours(6).msecs(), true)
             val pendingCarbs = pendingCarbsNotYetInAutosens(autosensData, expandedCarbs, now, "getMealData()", "APS mealCOB")
+            result.carbInputs = expandedCarbs.filter { it.isValid }.map {
+                app.aaps.core.interfaces.aps.TreatmentInputStamp(it.timestamp, it.amount, it.dateCreated)
+            }
             result.mealCOB = max(autosensData.cob + pendingCarbs, 0.0)
             result.slopeFromMinDeviation = autosensData.slopeFromMinDeviation
             result.slopeFromMaxDeviation = autosensData.slopeFromMaxDeviation
@@ -568,7 +571,12 @@ class IobCobCalculatorPlugin @Inject constructor(
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
         assert(divisor > 0)
 
-        val boluses = persistenceLayer.getBolusesFromTime(toTime - range(), true).blockingGet()
+        val bolusesSince = toTime - range()
+        val boluses = persistenceLayer.getBolusesFromTime(bolusesSince, true).blockingGet()
+        total.bolusInputsSince = bolusesSince
+        total.bolusInputs = boluses.filter { it.isValid && it.timestamp < toTime }.map {
+            app.aaps.core.interfaces.aps.TreatmentInputStamp(it.timestamp, it.amount, it.dateCreated)
+        }
 
         boluses.forEach { t ->
             if (t.isValid && t.timestamp < toTime) {

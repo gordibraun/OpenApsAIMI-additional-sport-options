@@ -24,33 +24,36 @@ class AdaptivePkPdEstimator(
     initial: PkPdParams = PkPdParams(diaHrs = 4.0, peakMin = 75.0)
 ) {
     private val state = AtomicReference(initial)
-    private var lastUpdateEpochMin: Long = 0
+    private var lastUpdateEpochMin: Long? = null
 
     fun params(): PkPdParams = state.get()
 
+    /** Offline single-dose experiment only; total remaining IOB is not an original dose. */
+    @Synchronized
     fun update(
         epochMin: Long,
         bg: Double,
         deltaMgDlPer5: Double,
-        iobU: Double,
+        doseUnits: Double,
         carbsActiveG: Double,
         windowMin: Int,
-        exerciseFlag: Boolean
+        exerciseFlag: Boolean,
+        isfMgDlPerU: Double = 45.0
     ) {
+        if (epochMin <= 0 || lastUpdateEpochMin?.let { epochMin <= it } == true) return
+        if (!listOf(bg, deltaMgDlPer5, doseUnits, carbsActiveG, isfMgDlPerU).all { it.isFinite() }) return
+        if (bg <= 39.0 || doseUnits < 0.0 || carbsActiveG < 0.0 || isfMgDlPerU <= 0.0) return
         if (windowMin < cfg.minWindowMin || windowMin > cfg.maxWindowMin) return
-        if (iobU < cfg.minIOBForLearningU) return
-        // RELAXED: Allow learning with moderate carbs (was 5g, now 15g)
-        if (carbsActiveG > 15.0) return
+        if (doseUnits < cfg.minIOBForLearningU) return
+        if (carbsActiveG > 0.0) return
         if (exerciseFlag) return
         // RELAXED: Allow learning during slower rises (was 3.0, now 5.0)
         if (deltaMgDlPer5 > 5.0) return
 
         val p0 = state.get()
-        val isfTddMgDlPerU = IsfTddProvider.isfTdd()
-        //val dIoBdt = approximateAction(iobU, p0)
-        //val expectedDropPer5 = dIoBdt * isfTddMgDlPerU * (5.0 / 60.0)
-        val action = kernel.actionAt(windowMin.toDouble(), p0).coerceAtLeast(1e-6)
-        val expectedDropPer5 = action * iobU * isfTddMgDlPerU * (5.0 / 60.0)
+        val action = kernel.actionAt(windowMin.toDouble(), p0)
+        if (!action.isFinite() || action < 0.0) return
+        val expectedDropPer5 = action * doseUnits * isfMgDlPerU * 5.0
         val err = (-deltaMgDlPer5) - expectedDropPer5
         val tailFactor = 1.0 + cfg.tailWeight * max(0.0, (windowMin - p0.peakMin) / max(1.0, p0.peakMin))
         val diaAdj = cfg.lr * tailFactor * sign(err) * min(1.0, abs(err) / 10.0)
@@ -63,7 +66,9 @@ class AdaptivePkPdEstimator(
         val tpAdjReg  = tpAdj  - reg * (p0.peakMin - anchorTp)
 
         val now = epochMin
-        val dtDays = if (lastUpdateEpochMin == 0L) 1.0 else max(1.0, (now - lastUpdateEpochMin) / (60.0 * 24.0))
+        // One observation covers five minutes; gaps do not accrue a learning budget.
+        val elapsedMin = lastUpdateEpochMin?.let { (now - it).coerceAtMost(5) } ?: 5L
+        val dtDays = elapsedMin / (60.0 * 24.0)
         lastUpdateEpochMin = now
         val bounds = cfg.bounds
         val maxDiaStep = bounds.maxDiaChangePerDayH * cfg.maxRateChangeScale * dtDays
@@ -75,11 +80,6 @@ class AdaptivePkPdEstimator(
             .coerceIn(p0.peakMin - maxTpStep, p0.peakMin + maxTpStep)
             .coerceIn(bounds.peakMinMin, bounds.peakMinMax)
         state.set(PkPdParams(newDia, newTp))
-    }
-
-    private fun approximateAction(iobU: Double, p: PkPdParams): Double {
-        val diaMin = p.diaHrs * 60.0
-        return iobU / max(60.0, diaMin)
     }
 
     fun iobResidualAt(minFromDose: Double): Double {

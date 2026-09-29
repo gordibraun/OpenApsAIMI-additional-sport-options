@@ -3,7 +3,9 @@ package app.aaps.plugins.aps.openAPSAIMI.pkpd
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
-import java.util.concurrent.TimeUnit
+import app.aaps.plugins.aps.openAPSAIMI.ISF.FusionIsfState
+import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfStateStore
+import app.aaps.plugins.aps.openAPSAIMI.ISF.RateLimitedIsfState
 import kotlin.math.abs
 
 data class MealAggressionContext(
@@ -12,7 +14,11 @@ data class MealAggressionContext(
     val targetBgMgdl: Double? = null
 )
 
-class PkPdIntegration(private val preferences: Preferences) {
+class PkPdIntegration(
+    private val preferences: Preferences,
+    private val isfStateStore: IsfStateStore? = null,
+    private val stateOwner: String = "default"
+) {
 
     private data class Config(
         val enabled: Boolean,
@@ -27,6 +33,7 @@ class PkPdIntegration(private val preferences: Preferences) {
     private var lastBounds: PkPdBounds? = null
     private var fusion: IsfFusion? = null
     private var lastFusionBounds: IsfFusionBounds? = null
+    private var fusionContext: String? = null
     private var damping: SmbDamping? = null
     private var lastTailPolicy: TailAwareSmbPolicy? = null
     private var lastPersisted: PkPdParams? = null
@@ -45,16 +52,12 @@ class PkPdIntegration(private val preferences: Preferences) {
         consoleLog: MutableList<String>? = null
     ): PkPdRuntime? {
         val config = readConfig()
-        // If the configuration changed, clear cached objects so they are rebuilt
-        if (cachedConfig == null || cachedConfig != config) {
-            cachedConfig = config
+        // A saved estimate is state, not a settings change that resets all limiters.
+        if (cachedConfig != null && cachedConfig?.initial != config.initial && config.initial != lastPersisted) {
             estimator = null
-            fusion = null
-            damping = null
-            lastBounds = null
-            lastFusionBounds = null
-            lastTailPolicy = null
+            lastPersisted = null
         }
+        cachedConfig = config
         if (!config.enabled) {
             consoleLog?.add("PKPD Debug: Config ENABLED is FALSE. Check OApsAIMIPkpdEnabled preference.")
             // When disabled we also clear caches
@@ -65,6 +68,7 @@ class PkPdIntegration(private val preferences: Preferences) {
             lastBounds = null
             lastFusionBounds = null
             lastTailPolicy = null
+            lastPersisted = null
             cachedConfig = null
             return null
         }
@@ -75,20 +79,13 @@ class PkPdIntegration(private val preferences: Preferences) {
 
         // Objects are created lazily; ensure* will reuse existing instances when possible
         val estimator = ensureEstimator(config)
-        val fusion = ensureFusion(config.isfBounds)
+        val context = listOf(profileIsf, config.isfBounds, config.bounds).joinToString("|")
+        val fusion = ensureFusion(config.isfBounds, context, epochMillis)
         val damping = ensureDamping(config.tailPolicy)
         val tddIsf = computeTddIsf(tdd24h, profileIsf)
-        IsfTddProvider.set(tddIsf)
-        val epochMin = TimeUnit.MILLISECONDS.toMinutes(epochMillis)
-        estimator.update(
-            epochMin = epochMin,
-            bg = bg,
-            deltaMgDlPer5 = deltaMgDlPer5,
-            iobU = iobU,
-            carbsActiveG = carbsActiveG,
-            windowMin = windowMin,
-            exerciseFlag = exerciseFlag
-        )
+        // A mixed IOB snapshot and latest-bolus age cannot identify DIA/peak.
+        // Keep the saved parameters until a validated, dose-resolved training window exists.
+        consoleLog?.add("Обучение длительности и пика действия инсулина пропущено: суммарный активный инсулин не является одной дозой. Используются сохраненные параметры модели.")
         val params = estimator.params()
         persistStateIfNeeded(params, config.bounds)
         val tailFraction = estimator.iobResidualAt(windowMin.toDouble()).coerceIn(0.0, 1.0)
@@ -110,6 +107,9 @@ class PkPdIntegration(private val preferences: Preferences) {
         val pkpdScale = (1.0 + 0.12 * tailFraction + 0.22 * activityBlend + anticipatoryBoost + mealBoost)
             .coerceIn(minScale, maxScale)
         val fusedIsf = fusion.fused(profileIsf, tddIsf, pkpdScale)
+        if (fusedIsf.isFinite() && fusedIsf > 0) {
+            isfStateStore?.saveFusion(stateOwner, FusionIsfState(context = context, value = RateLimitedIsfState(fusedIsf, epochMillis)))
+        }
         return PkPdRuntime(
             params = params,
             tailFraction = tailFraction,
@@ -162,10 +162,13 @@ class PkPdIntegration(private val preferences: Preferences) {
         return estimator!!
     }
 
-    private fun ensureFusion(bounds: IsfFusionBounds): IsfFusion {
-        if (fusion == null || lastFusionBounds != bounds) {
-            fusion = IsfFusion(bounds)
+    private fun ensureFusion(bounds: IsfFusionBounds, context: String, now: Long): IsfFusion {
+        if (fusion == null || lastFusionBounds != bounds || fusionContext != context) {
+            fusion = IsfFusion(bounds).also {
+                it.restore(isfStateStore?.fusion(stateOwner, context, now)?.value?.isf)
+            }
             lastFusionBounds = bounds
+            fusionContext = context
         }
         return fusion!!
     }

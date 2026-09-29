@@ -8,6 +8,7 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.testing.TestListenableWorkerBuilder
 import app.aaps.core.data.model.BS
+import app.aaps.core.data.model.CA
 import app.aaps.core.interfaces.androidPermissions.AndroidPermission
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
@@ -17,6 +18,7 @@ import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.pump.DetailedBolusInfo
 import app.aaps.core.interfaces.pump.PumpEnactResult
+import app.aaps.core.interfaces.pump.Pump
 import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.queue.Callback
 import app.aaps.core.interfaces.queue.Command
@@ -46,6 +48,7 @@ import app.aaps.shared.tests.TestBaseWithProfile
 import com.google.common.truth.Truth.assertThat
 import com.google.common.util.concurrent.ListenableFuture
 import dagger.android.HasAndroidInjector
+import io.reactivex.rxjava3.subjects.SingleSubject
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -122,6 +125,7 @@ class CommandQueueImplementationTest : TestBaseWithProfile() {
                 it.rh = rh
                 it.activePlugin = activePlugin
                 it.rxBus = rxBus
+                it.pumpEnactResultProvider = pumpEnactResultProvider
             }
             if (it is CommandSMBBolus) {
                 it.aapsLogger = aapsLogger
@@ -183,6 +187,114 @@ class CommandQueueImplementationTest : TestBaseWithProfile() {
     }
 
     private lateinit var commandQueue: CommandQueueImplementation
+
+    private class TreatmentEvents : Callback() {
+        val boluses = mutableListOf<Pair<Boolean, Double>>()
+        val carbs = mutableListOf<Boolean>()
+        override fun run() { boluses += result.success to result.bolusDelivered }
+        override fun onCarbsStored(result: PumpEnactResult) { carbs += result.success }
+    }
+
+    private fun prepareDelivery(delivered: Double, success: Boolean): SingleSubject<PersistenceLayer.TransactionResult<CA>> {
+        whenever(constraintChecker.applyBolusConstraints(any())).thenAnswer { it.arguments[0] }
+        val pump = mock<Pump>()
+        whenever(activePlugin.activePump).thenReturn(pump)
+        whenever(pump.deliverTreatment(any())).thenAnswer {
+            it.getArgument<DetailedBolusInfo>(0).bolusTimestamp = 1_234L
+            pumpEnactResultProvider.get().success(success).enacted(delivered > 0).bolusDelivered(delivered)
+        }
+        val stored = SingleSubject.create<PersistenceLayer.TransactionResult<CA>>()
+        whenever(persistenceLayer.insertOrUpdateCarbs(any(), any(), any(), anyOrNull())).thenReturn(stored)
+        return stored
+    }
+
+    @Test
+    fun delayedCarbPersistenceDoesNotReplaceDeliveryReceipt() {
+        val stored = prepareDelivery(0.7, true)
+        val events = TreatmentEvents()
+        val treatment = DetailedBolusInfo().apply { insulin = 0.7; carbs = 13.0 }
+        assertThat(commandQueue.bolus(treatment, events)).isTrue()
+        commandQueue.pickup()
+        commandQueue.performing!!.execute()
+        assertThat(events.boluses).containsExactly(true to 0.7)
+        assertThat(events.carbs).isEmpty()
+        assertThat(treatment.bolusTimestamp).isEqualTo(1_234L)
+        stored.onSuccess(PersistenceLayer.TransactionResult())
+        assertThat(events.carbs).containsExactly(true)
+        assertThat(events.boluses).containsExactly(true to 0.7)
+        assertThat(events.result.bolusDelivered).isEqualTo(0.7)
+    }
+
+    @Test
+    fun carbFailureDoesNotTurnSuccessfulInsulinIntoFailedOrZeroDelivery() {
+        val stored = prepareDelivery(0.7, true)
+        val events = TreatmentEvents()
+        commandQueue.bolus(DetailedBolusInfo().apply { insulin = 0.7; carbs = 13.0 }, events)
+        commandQueue.pickup()
+        commandQueue.performing!!.execute()
+        stored.onError(IllegalStateException("storage failure"))
+        assertThat(events.carbs).containsExactly(false)
+        assertThat(events.boluses).containsExactly(true to 0.7)
+    }
+
+    @Test
+    fun partialFailedDeliveryKeepsActualAmountAndStillStoresEnteredCarbs() {
+        val stored = prepareDelivery(0.3, false)
+        val events = TreatmentEvents()
+        commandQueue.bolus(DetailedBolusInfo().apply { insulin = 0.7; carbs = 13.0 }, events)
+        commandQueue.pickup()
+        commandQueue.performing!!.execute()
+        assertThat(events.boluses).containsExactly(false to 0.3)
+        assertThat(stored.hasObservers()).isTrue()
+        assertThat(events.carbs).isEmpty()
+        stored.onSuccess(PersistenceLayer.TransactionResult())
+        assertThat(events.carbs).containsExactly(true)
+        assertThat(events.boluses).containsExactly(false to 0.3)
+    }
+
+    @Test
+    fun failedPumpConnectionDuringDeliveryDoesNotLoseEnteredMeal() {
+        val stored = prepareDelivery(0.0, false)
+        val events = TreatmentEvents()
+        commandQueue.bolus(DetailedBolusInfo().apply { insulin = 1.4; carbs = 18.0 }, events)
+        commandQueue.pickup()
+        commandQueue.performing!!.execute()
+        assertThat(stored.hasObservers()).isTrue()
+        stored.onSuccess(PersistenceLayer.TransactionResult())
+        assertThat(events.carbs).containsExactly(true)
+        assertThat(events.boluses).containsExactly(false to 0.0)
+    }
+
+    @Test
+    fun synchronousCarbStorageCanReadTheActualPumpReceipt() {
+        val stored = prepareDelivery(0.3, false)
+        stored.onSuccess(PersistenceLayer.TransactionResult())
+        var receiptAtCarbStorage: Pair<Boolean, Double>? = null
+        var finalReceipt: Pair<Boolean, Double>? = null
+        val events = object : Callback() {
+            override fun onCarbsStored(result: PumpEnactResult) {
+                assertThat(result.success).isTrue()
+                receiptAtCarbStorage = this.result.success to this.result.bolusDelivered
+            }
+            override fun run() { finalReceipt = result.success to result.bolusDelivered }
+        }
+        commandQueue.bolus(DetailedBolusInfo().apply { insulin = 1.4; carbs = 18.0 }, events)
+        commandQueue.pickup()
+        commandQueue.performing!!.execute()
+        assertThat(receiptAtCarbStorage).isEqualTo(false to 0.3)
+        assertThat(finalReceipt).isEqualTo(false to 0.3)
+    }
+
+    @Test
+    fun carbsOnlyNotifyStorageWithoutFabricatingInsulinCallback() {
+        val stored = prepareDelivery(0.0, true)
+        val events = TreatmentEvents()
+        assertThat(commandQueue.bolus(DetailedBolusInfo().apply { carbs = 13.0 }, events)).isTrue()
+        assertThat(commandQueue.size()).isEqualTo(0)
+        stored.onSuccess(PersistenceLayer.TransactionResult())
+        assertThat(events.carbs).containsExactly(true)
+        assertThat(events.boluses).isEmpty()
+    }
 
     @BeforeEach
     fun prepare() {

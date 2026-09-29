@@ -17,6 +17,7 @@ import app.aaps.core.interfaces.aps.AimiMealDecision
 import app.aaps.core.interfaces.aps.AimiMealInput
 import app.aaps.core.interfaces.aps.GlucoseStatus
 import app.aaps.core.interfaces.aps.Loop
+import app.aaps.core.interfaces.aps.PendingWizardTreatment
 import app.aaps.core.interfaces.automation.Automation
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
@@ -33,6 +34,7 @@ import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.pump.DetailedBolusInfo
 import app.aaps.core.interfaces.pump.PumpSync
+import app.aaps.core.interfaces.pump.PumpEnactResult
 import app.aaps.core.interfaces.pump.defs.determineCorrectBolusStepSize
 import app.aaps.core.interfaces.queue.Callback
 import app.aaps.core.interfaces.queue.CommandQueue
@@ -53,8 +55,11 @@ import app.aaps.core.objects.extensions.round
 import app.aaps.core.ui.dialogs.OKDialog
 import app.aaps.core.utils.HtmlHelper
 import app.aaps.core.utils.JsonHelper
+import io.reactivex.rxjava3.core.Maybe
+import io.reactivex.rxjava3.schedulers.Schedulers
 import java.util.Calendar
 import java.util.LinkedList
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.max
@@ -122,6 +127,11 @@ class BolusWizard @Inject constructor(
         private set
 
     private var accepted = false
+    private val confirmationState = WizardConfirmationState()
+    private var calculationInputs: WizardCalculationInputs? = null
+    private var calculatedAt = 0L
+    private var onConfirmationFinished: ((Boolean) -> Unit)? = null
+    val hasConfirmationInputs: Boolean get() = calculationInputs != null
 
     // Result
     var calculatedTotalInsulin: Double = 0.0
@@ -199,9 +209,11 @@ class BolusWizard @Inject constructor(
         forecastRequiredCarbs: Int? = null,
         activityNewInsulinFactor: Double = 1.0,
         activityDescription: String? = null,
-        skipAimiMealAssist: Boolean = false
+        forecastRequiredCarbsSource: String = "AIMI_FINAL"
     ): BolusWizard {
 
+        calculatedAt = dateUtil.now()
+        calculationInputs = currentConfirmationInputs()
         this.profile = profile
         this.profileName = profileName
         this.tempTarget = tempTarget
@@ -227,7 +239,7 @@ class BolusWizard @Inject constructor(
         this.positiveIOBOnly = positiveIOBOnly
         this.forecastRequiredCarbsOverride = forecastRequiredCarbs
         this.forecastRequiredCarbs = 0
-        this.forecastRequiredCarbsSource = "wizard"
+        this.forecastRequiredCarbsSource = if (forecastRequiredCarbs != null) forecastRequiredCarbsSource else "wizard"
         this.activityNewInsulinFactor = activityNewInsulinFactor.coerceIn(0.55, 1.0)
         this.activityDescription = activityDescription
 
@@ -336,15 +348,6 @@ class BolusWizard @Inject constructor(
         calculatedTotalInsulin = Round.roundTo(calculatedTotalInsulin, bolusStep)
         insulinAfterConstraints = constraintChecker.applyBolusConstraints(ConstraintObject(calculatedTotalInsulin, aapsLogger)).value()
 
-        if (skipAimiMealAssist) {
-            aapsLogger.debug(
-                LTag.APS,
-                "BolusWizard correction-only forecast deficit: skip AIMI meal assist, " +
-                    "calculated=${"%.2f".format(calculatedTotalInsulin)} constrained=${"%.2f".format(insulinAfterConstraints)}"
-            )
-            return this
-        }
-
         val wizardInput = buildAimiMealInput()
         val aimiDecision = aimiMealAssist.evaluate(wizardInput)
         val aimiRawBolus = Round.roundTo(aimiDecision.recommendedBolus, bolusStep)
@@ -425,7 +428,6 @@ class BolusWizard @Inject constructor(
         val wizardProtectiveCarbs = ((-(totalBeforePercentageAdjustment - insulinFromCarbs)).coerceAtLeast(0.0) * ic).toInt()
         val requiredCarbs = forecastRequiredCarbsOverride?.coerceAtLeast(0) ?: wizardProtectiveCarbs
         forecastRequiredCarbs = requiredCarbs
-        forecastRequiredCarbsSource = if (forecastRequiredCarbsOverride != null) "AIMI_FINAL" else "wizard"
         carbsEquivalent = requiredCarbs.toDouble()
         aapsLogger.debug(
             LTag.APS,
@@ -640,34 +642,119 @@ class BolusWizard @Inject constructor(
         return HtmlHelper.fromHtml(actions.joinToString("<br/>"))
     }
 
-    fun confirmAndExecute(ctx: Context, quickWizardEntry: QuickWizardEntry? = null) {
+    fun confirmAndExecute(ctx: Context, quickWizardEntry: QuickWizardEntry? = null, onFinished: ((Boolean) -> Unit)? = null) {
+        if (accepted) {
+            aapsLogger.debug(LTag.UI, "guarding: already accepted")
+            return
+        }
+        onConfirmationFinished = onFinished
         if (calculatedTotalInsulin > 0.0 || carbs > 0.0) {
-            if (accepted) {
-                aapsLogger.debug(LTag.UI, "guarding: already accepted")
-                return
-            }
             accepted = true
-            if (calculatedTotalInsulin > 0.0)
-                automation.removeAutomationEventBolusReminder()
-            if (carbs > 0.0)
-                automation.removeAutomationEventEatReminder()
-            if (preferences.get(BooleanKey.OverviewUseBolusAdvisor) && wizardBgToMgdl() > 180 && carbs > 0 && carbTime >= 0)
+            if (insulinAfterConstraints > 0 && preferences.get(BooleanKey.OverviewUseBolusAdvisor) && wizardBgToMgdl() > 180 && carbs > 0 && carbTime >= 0)
                 OKDialog.showYesNoCancel(
                     ctx, rh.gs(app.aaps.core.ui.R.string.bolus_advisor), rh.gs(app.aaps.core.ui.R.string.bolus_advisor_message),
                     { bolusAdvisorProcessing(ctx) },
-                    { commonProcessing(ctx, quickWizardEntry) }
+                    { commonProcessing(ctx, quickWizardEntry) },
+                    { finishConfirmation(false) }
                 )
             else
                 commonProcessing(ctx, quickWizardEntry)
         } else {
             OKDialog.show(ctx, rh.gs(app.aaps.core.ui.R.string.boluswizard), rh.gs(app.aaps.core.ui.R.string.no_action_selected))
+            finishConfirmation(false)
         }
+    }
+
+    private fun finishConfirmation(accepted: Boolean) {
+        if (!accepted) this.accepted = false
+        onConfirmationFinished?.also { onConfirmationFinished = null }?.invoke(accepted)
+    }
+
+    private fun currentConfirmationInputs(): WizardCalculationInputs? = try {
+        // These synchronous DAO reads must run on IO even for the synchronous wizard/quick-wizard callers.
+        // Await the complete snapshot: an asynchronously filled snapshot could describe a later treatment.
+        Maybe.defer<WizardCalculationInputs> {
+            profileFunction.getProfile()?.let { current ->
+                val now = dateUtil.now()
+                Maybe.just(WizardCalculationInputs(
+                    historyIds = listOf(
+                        persistenceLayer.getLastBolusId(), persistenceLayer.getLastCarbsId(),
+                        persistenceLayer.getLastGlucoseValueId(), persistenceLayer.getLastTemporaryTargetId(),
+                        persistenceLayer.getLastTherapyEventId(), persistenceLayer.getLastEffectiveProfileSwitchId(),
+                        persistenceLayer.getLastProfileSwitchId(), persistenceLayer.getLastTemporaryBasalId(),
+                        persistenceLayer.getLastExtendedBolusId(), persistenceLayer.getLastRunningModeId()
+                    ),
+                    profile = current.toPureNsJson(dateUtil).toString(),
+                    profileValues = listOf(
+                        current.getIc(), current.getBasal(), current.getTargetLowMgdl(), current.getTargetHighMgdl(),
+                        current.getIsfMgdlForCarbs(now, "WizardConfirmation", config, processedDeviceStatusData)
+                    ),
+                    apsRun = loop.lastRun?.lastAPSRun ?: 0L,
+                    target = persistenceLayer.getTemporaryTargetActiveAt(now)?.toString(),
+                    lastAcceptedTreatment = aimiMealAssist.lastTreatmentAcceptedAt()
+                ))
+            } ?: Maybe.empty()
+        }.subscribeOn(Schedulers.io()).blockingGet().also {
+            aapsLogger.debug(LTag.UI, "Wizard confirmation snapshot: available=${it != null}, apsRun=${it?.apsRun}")
+        }
+    } catch (e: Exception) {
+        aapsLogger.error("Cannot validate wizard calculation inputs", e)
+        null
+    }
+
+    private fun claimConfirmation(ctx: Context?, recordCarbs: Boolean = true, onRejected: ((String) -> Unit)? = null): Long? {
+        val now = dateUtil.now()
+        val givingInsulin = insulinAfterConstraints > 0.0
+        if (recordCarbs && carbs > 0 && calculatedTotalInsulin == 0.0 && insulinAfterConstraints == 0.0) {
+            // Recording food is not authorization to send an old insulin calculation.
+            if (!confirmationState.claimCarbsOnly(carbs, calculatedTotalInsulin, insulinAfterConstraints)) {
+                onRejected?.invoke("Этот ввод уже подтверждён. Повторная отправка запрещена.")
+                return null
+            }
+        } else {
+            val pending = givingInsulin && (commandQueue.bolusInQueue() || aimiMealAssist.pendingTreatment() != null)
+            val constrained = constraintChecker.applyBolusConstraints(ConstraintObject(calculatedTotalInsulin, aapsLogger)).value()
+            val currentInputs = currentConfirmationInputs()
+            val rejection = confirmationState.rejection(calculationInputs, currentInputs, pending, calculatedAt, now)
+            val constraintsChanged = !constrained.isFinite() || abs(constrained - insulinAfterConstraints) > 0.0001
+            if (constraintsChanged || !confirmationState.claim(calculationInputs, currentInputs, pending, calculatedAt, now)) {
+                val reason = when {
+                    constraintsChanged -> "Изменился допустимый размер дозы. Нужен новый расчёт."
+                    rejection == WizardConfirmationState.Rejection.MISSING_INPUTS -> "Не удалось прочитать исходные данные калькулятора. Ошибка записана в журнал."
+                    rejection == WizardConfirmationState.Rejection.PENDING_TREATMENT -> "Предыдущая подача ещё не подтверждена или не учтена в расчёте."
+                    rejection == WizardConfirmationState.Rejection.CHANGED_INPUTS -> "После расчёта поступили новые данные. Проверьте обновлённый результат калькулятора."
+                    rejection == WizardConfirmationState.Rejection.ALREADY_SUBMITTED -> "Этот ввод уже подтверждён. Повторная отправка запрещена."
+                    else -> "Срок действия расчёта истёк или изменилось время. Нужен новый расчёт."
+                }
+                aapsLogger.warn(LTag.UI, "Wizard confirmation rejected: reason=$rejection, constraintsChanged=$constraintsChanged")
+                if (ctx != null) OKDialog.show(ctx, rh.gs(app.aaps.core.ui.R.string.boluswizard), "$reason Инсулин не отправлен.")
+                onRejected?.invoke("$reason Инсулин не отправлен.")
+                finishConfirmation(false)
+                return null
+            }
+        }
+        val pendingCarbs = if (recordCarbs) carbs.toDouble() else 0.0
+        val pendingCarbsTime = if (pendingCarbs > 0) now + T.mins(carbTime.toLong()).msecs() else 0L
+        if (givingInsulin && config.APS && !aimiMealAssist.beginTreatment(
+                PendingWizardTreatment(now, now, insulinAfterConstraints, pendingCarbsTime, pendingCarbs))) {
+            val reason = "Предыдущая подача еще не учтена в расчете. Новая доза не отправлена; проверьте историю подачи."
+            if (ctx != null) OKDialog.show(ctx, rh.gs(app.aaps.core.ui.R.string.boluswizard), reason)
+            onRejected?.invoke(reason)
+            finishConfirmation(false)
+            return null
+        }
+        aimiMealAssist.markTreatmentAccepted(now)
+        if (givingInsulin) automation.removeAutomationEventBolusReminder()
+        if (carbs > 0) automation.removeAutomationEventEatReminder()
+        return now
     }
 
     private fun bolusAdvisorProcessing(ctx: Context) {
         val confirmMessage = confirmMessageAfterConstraints(ctx, advisor = true)
         OKDialog.showConfirmation(ctx, rh.gs(app.aaps.core.ui.R.string.boluswizard), confirmMessage, {
+            val acceptedAt = claimConfirmation(ctx, recordCarbs = false) ?: return@showConfirmation
             DetailedBolusInfo().apply {
+                timestamp = acceptedAt
                 eventType = TE.Type.CORRECTION_BOLUS
                 insulin = insulinAfterConstraints
                 carbs = 0.0
@@ -687,17 +774,21 @@ class BolusWizard @Inject constructor(
                     )
                 )
                 if (insulin > 0) {
-                    commandQueue.bolus(this, object : Callback() {
+                    val queued = commandQueue.bolus(this, object : Callback() {
                         override fun run() {
+                            aimiMealAssist.completeTreatment(acceptedAt, bolusTimestamp ?: timestamp, result.bolusDelivered, result.success)
                             if (!result.success) {
                                 uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
                             } else
                                 automation.scheduleAutomationEventEatReminder()
+                            rxBus.send(EventRefreshOverview("Wizard advisor delivery result", now = true))
                         }
                     })
+                    if (!queued) aimiMealAssist.rejectTreatment(acceptedAt)
                 }
             }
-        })
+            finishConfirmation(true)
+        }, { finishConfirmation(false) })
     }
 
     fun explainShort(): String {
@@ -732,18 +823,103 @@ class BolusWizard @Inject constructor(
         return message
     }
 
+    private fun activateMealEpisode(deliveredInsulin: Double) {
+        val confirmedInsulin = deliveredInsulin.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
+        aimiMealDecision?.let { decision ->
+            aimiMealAssist.activate(buildAimiMealInput(), decision.copy(recommendedBolus = confirmedInsulin))
+        }
+    }
+
+    /** Executes the exact preview accepted on the watch through the phone wizard's receipt path. */
+    fun executeFromWear(onResult: (Boolean, String, Double) -> Unit) {
+        require(!useSuperBolus) { "Суперболюс подтверждается только на телефоне." }
+        require(carbs > 0 && insulinAfterConstraints.isFinite() && insulinAfterConstraints >= 0) { "Некорректный расчет еды." }
+        require(constraintChecker.applyCarbsConstraints(ConstraintObject(carbs, aapsLogger)).value() == carbs) { "Изменился предел углеводов. Нужен новый расчет." }
+        if (insulinAfterConstraints > 0) {
+            require(activePlugin.activePump.isInitialized() && !loop.runningMode.isSuspended()) { "Помпа сейчас недоступна." }
+        }
+        val now = claimConfirmation(null, onRejected = { onResult(false, it, 0.0) }) ?: return
+        rxBus.send(EventRefreshOverview("Wear wizard accepted", now = true))
+        enqueueConfirmedTreatment(null, now, Sources.Wear, onResult)
+    }
+
+    private fun enqueueConfirmedTreatment(ctx: Context?, now: Long, source: Sources, onResult: ((Boolean, String, Double) -> Unit)? = null) {
+        val receipt = onResult?.let { WizardDeliveryReceipt(insulinAfterConstraints, carbs, it) }
+        val info = DetailedBolusInfo().apply {
+            timestamp = now
+            eventType = TE.Type.BOLUS_WIZARD
+            insulin = insulinAfterConstraints
+            carbs = this@BolusWizard.carbs.toDouble()
+            context = ctx
+            mgdlGlucose = wizardBgToMgdl()
+            glucoseType = TE.MeterType.MANUAL
+            carbsTimestamp = now + T.mins(this@BolusWizard.carbTime.toLong()).msecs()
+            bolusCalculatorResult = createBolusCalculatorResult()
+            notes = this@BolusWizard.notesWithAimiFoodType()
+        }
+        val action = when {
+            insulinAfterConstraints == 0.0 -> Action.CARBS
+            carbs == 0 -> Action.BOLUS
+            else -> Action.TREATMENT
+        }
+        uel.log(action = action, source = source, note = info.notes,
+            listValues = listOfNotNull(
+                ValueWithUnit.TEType(info.eventType),
+                ValueWithUnit.Insulin(insulinAfterConstraints).takeIf { insulinAfterConstraints != 0.0 },
+                ValueWithUnit.Gram(carbs).takeIf { carbs != 0 },
+                ValueWithUnit.Minute(carbTime).takeIf { carbTime != 0 }
+            ))
+        val episodeActivated = AtomicBoolean(false)
+        val queued = commandQueue.bolus(info, object : Callback() {
+            override fun onCarbsStored(result: PumpEnactResult) {
+                if (!result.success) {
+                    uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
+                } else {
+                    if (useAlarm && carbs > 0 && carbTime > 0)
+                        automation.scheduleTimeToEatReminder(T.mins(carbTime.toLong()).secs().toInt())
+                    activateEpisode()
+                }
+                rxBus.send(EventRefreshOverview("Wizard carbs stored", now = true))
+                receipt?.carbs(result.success, result.comment)
+            }
+
+            private fun activateEpisode() {
+                if (episodeActivated.compareAndSet(false, true))
+                    activateMealEpisode(if (insulinAfterConstraints > 0.0) this.result.bolusDelivered else 0.0)
+            }
+
+            override fun run() {
+                aimiMealAssist.completeTreatment(now, info.bolusTimestamp ?: info.timestamp, result.bolusDelivered, result.success)
+                if (!result.success)
+                    uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
+                if (result.success && carbs == 0) activateEpisode()
+                rxBus.send(EventRefreshOverview("WizardDialog treatment delivered", now = true))
+                receipt?.insulin(result.success, result.comment, result.bolusDelivered)
+            }
+        })
+        if (!queued) {
+            aimiMealAssist.rejectTreatment(now)
+            receipt?.rejected("Запрос не поставлен в очередь. Проверьте историю подачи перед повторением.")
+        }
+        try {
+            info.bolusCalculatorResult?.let { persistenceLayer.insertOrUpdateBolusCalculatorResult(it).blockingGet() }
+        } catch (e: Exception) {
+            // A failed audit write must not turn an already queued dose into a retry invitation.
+            aapsLogger.error("Cannot persist wizard calculation after queue submission", e)
+        }
+    }
+
     @SuppressLint("CheckResult")
     private fun commonProcessing(ctx: Context, quickWizardEntry: QuickWizardEntry? = null) {
-        val profile = profileFunction.getProfile() ?: return
+        val profile = profileFunction.getProfile() ?: run { finishConfirmation(false); return }
         val pump = activePlugin.activePump
-        val now = dateUtil.now()
 
         val confirmMessage = confirmMessageAfterConstraints(ctx, advisor = false, quickWizardEntry)
         OKDialog.showConfirmation(ctx, rh.gs(app.aaps.core.ui.R.string.boluswizard), confirmMessage, {
+            val now = claimConfirmation(ctx) ?: return@showConfirmation
             if (insulinAfterConstraints > 0 || carbs > 0) {
-                aimiMealAssist.markTreatmentAccepted(dateUtil.now())
                 rxBus.send(EventRefreshOverview("WizardDialog treatment accepted", now = true))
-                if (useSuperBolus) {
+                if (useSuperBolus && insulinAfterConstraints > 0) {
                     if (loop.allowedNextModes().contains(RM.Mode.SUPER_BOLUS)) {
                         loop.handleRunningModeChange(
                             durationInMinutes = 2 * 60,
@@ -773,56 +949,13 @@ class BolusWizard @Inject constructor(
                         })
                     }
                 }
-                DetailedBolusInfo().apply {
-                    eventType = TE.Type.BOLUS_WIZARD
-                    insulin = insulinAfterConstraints
-                    carbs = this@BolusWizard.carbs.toDouble()
-                    context = ctx
-                    mgdlGlucose = wizardBgToMgdl()
-                    glucoseType = TE.MeterType.MANUAL
-                    carbsTimestamp = now + T.mins(this@BolusWizard.carbTime.toLong()).msecs()
-                    bolusCalculatorResult = createBolusCalculatorResult()
-                    notes = this@BolusWizard.notesWithAimiFoodType()
-                    if (insulin > 0 || carbs > 0) {
-                        val action = when {
-                            insulinAfterConstraints == 0.0 -> Action.CARBS
-                            carbs == 0.0                   -> Action.BOLUS
-                            else                           -> Action.TREATMENT
-                        }
-                        uel.log(
-                            action = action,
-                            source = if (quickWizard) Sources.QuickWizard else Sources.WizardDialog,
-                            note = notes,
-                            listValues = listOfNotNull(
-                                ValueWithUnit.TEType(eventType),
-                                ValueWithUnit.Insulin(insulinAfterConstraints).takeIf { insulinAfterConstraints != 0.0 },
-                                ValueWithUnit.Gram(this@BolusWizard.carbs).takeIf { this@BolusWizard.carbs != 0 },
-                                ValueWithUnit.Minute(carbTime).takeIf { carbTime != 0 }
-                            )
-                        )
-                        commandQueue.bolus(this, object : Callback() {
-                            override fun run() {
-                                if (!result.success) {
-                                    aimiMealAssist.clearPendingTreatment()
-                                    uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
-                                } else if (useAlarm && carbs > 0 && carbTime > 0) {
-                                    automation.scheduleTimeToEatReminder(T.mins(carbTime.toLong()).secs().toInt())
-                                }
-                                if (result.success) {
-                                    aimiMealAssist.markTreatmentAccepted(dateUtil.now())
-                                    aimiMealDecision?.let { aimiMealAssist.activate(buildAimiMealInput(), it) }
-                                }
-                                rxBus.send(EventRefreshOverview("WizardDialog treatment delivered", now = true))
-                            }
-                        })
-                    }
-                    bolusCalculatorResult?.let { persistenceLayer.insertOrUpdateBolusCalculatorResult(it).blockingGet() }
-                }
+                enqueueConfirmedTreatment(ctx, now, if (quickWizard) Sources.QuickWizard else Sources.WizardDialog)
             }
             if (quickWizardEntry != null) {
                 scheduleECarbsFromQuickWizard(ctx, quickWizardEntry)
             }
-        })
+            finishConfirmation(true)
+        }, { finishConfirmation(false) })
     }
 
     private fun scheduleECarbsFromQuickWizard(ctx: Context, quickWizardEntry: QuickWizardEntry) {

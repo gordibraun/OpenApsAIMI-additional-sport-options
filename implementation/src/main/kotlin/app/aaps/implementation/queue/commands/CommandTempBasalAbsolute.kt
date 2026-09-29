@@ -35,6 +35,11 @@ class CommandTempBasalAbsolute(
     override val commandType: Command.CommandType = Command.CommandType.TEMPBASAL
 
     override fun execute() {
+        callback?.validationErrorBeforeDelivery()?.let { reason ->
+            aapsLogger.debug(LTag.PUMPQUEUE, reason)
+            callback.result(pumpEnactResultProvider.get().enacted(false).success(false).comment(reason)).run()
+            return
+        }
         val r = activePlugin.activePump.setTempBasalAbsolute(absoluteRate, durationInMinutes, profile, enforceNew, tbrType)
         aapsLogger.debug(LTag.PUMPQUEUE, "Result rate: $absoluteRate durationInMinutes: $durationInMinutes success: ${r.success} enacted: ${r.enacted}")
         callback?.result(r)?.run()

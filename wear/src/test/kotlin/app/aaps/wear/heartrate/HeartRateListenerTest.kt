@@ -41,12 +41,12 @@ internal class HeartRateListenerTest {
         val ctx: Context = mock()
         whenever(
             aapsSchedulers.io.schedulePeriodicallyDirect(
-                any(), eq(60_000L), eq(60_000L), eq(TimeUnit.MILLISECONDS)
+                any(), eq(30_000L), eq(30_000L), eq(TimeUnit.MILLISECONDS)
             )
         ).thenReturn(schedule)
         val listener = HeartRateListener(ctx, aapsLogger, sp, aapsSchedulers, timestampMillis)
         verify(aapsSchedulers.io).schedulePeriodicallyDirect(
-            any(), eq(60_000L), eq(60_000L), eq(TimeUnit.MILLISECONDS)
+            any(), eq(30_000L), eq(30_000L), eq(TimeUnit.MILLISECONDS)
         )
         listener.sendHeartRate = { hr -> heartRates.add(hr) }
         return listener

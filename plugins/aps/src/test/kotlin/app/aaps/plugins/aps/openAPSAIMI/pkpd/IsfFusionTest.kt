@@ -1,7 +1,7 @@
 package app.aaps.plugins.aps.openAPSAIMI.pkpd
 
 import org.junit.Assert.assertEquals
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 class IsfFusionTest {
 
@@ -28,7 +28,9 @@ class IsfFusionTest {
         // 90 > 75 -> clamped to 75.
         // Wait, median of (80, 50, 100) -> 80.
         // 80 > 75 -> 75.
-        assertEquals(75.0, fusion.fused(80.0, 50.0, 2.0), 0.01)
+        // Isolate absolute bounds from the previous call's separate smoothing constraint.
+        val freshFusion = IsfFusion(IsfFusionBounds(minFactor = 0.5, maxFactor = 1.5, maxChangePer5Min = 0.1))
+        assertEquals(75.0, freshFusion.fused(80.0, 50.0, 2.0), 0.01)
     }
 
     @Test

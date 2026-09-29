@@ -54,7 +54,8 @@ data class RT(
     var consoleLog: MutableList<String>? = null,
     var consoleError: MutableList<String>? = null,
     var safetyMechanism: String? = null,
-    var isHypoRisk: Boolean = false
+    var isHypoRisk: Boolean = false,
+    var decisionTrace: List<DecisionTraceStep> = emptyList()
 ) {
 
     fun serialize() = Json.encodeToString(serializer(), this)

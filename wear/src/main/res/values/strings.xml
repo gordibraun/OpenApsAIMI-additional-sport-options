@@ -91,6 +91,8 @@
     <string name="menu_menu">Menu</string>
     <string name="quick_wizard_short">XL</string>
     <string name="action_duration_minutes">Duration\n[minutes]</string>
+    <string name="action_timeshift_minutes">Timeshift\n[minutes]</string>
+    <string name="action_exercise_mode_confirmation">Exercise Mode Requested</string>
     <string name="action_tempt_confirmation">Temp Target Requested</string>
     <string name="action_quick_wizard_confirmation">Quick Wizard Requested</string>
     <string name="action_user_action_confirmation">User Action Requested</string>

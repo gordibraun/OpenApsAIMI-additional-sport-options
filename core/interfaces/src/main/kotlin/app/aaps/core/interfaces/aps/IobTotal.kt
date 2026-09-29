@@ -18,6 +18,8 @@ data class IobTotal(
     var iobWithZeroTemp: IobTotal? = null,
     var netInsulin: Double = 0.0, // for calculations from temp basals only
     var extendedBolusInsulin: Double = 0.0, // total insulin for extended bolus
+    @kotlinx.serialization.Transient var bolusInputs: List<TreatmentInputStamp>? = null,
+    @kotlinx.serialization.Transient var bolusInputsSince: Long? = null,
 ) {
 
     companion object

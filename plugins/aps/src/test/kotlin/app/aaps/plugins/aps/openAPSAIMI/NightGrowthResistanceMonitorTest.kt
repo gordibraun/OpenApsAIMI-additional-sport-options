@@ -1,7 +1,7 @@
 package app.aaps.plugins.aps.openAPSAIMI
 
 import org.junit.Assert.assertEquals
-import org.junit.Test
+import org.junit.jupiter.api.Test
 import java.time.Instant
 import java.time.LocalTime
 import java.time.ZoneId
@@ -42,7 +42,7 @@ class NightGrowthResistanceMonitorTest {
             config = config
         )
         assertEquals(NGRState.INACTIVE, result.state)
-        assertEquals("NGR inactive: outside night window", result.reason)
+        assertEquals("", result.reason) // Inactive states intentionally do not emit a reason.
     }
 
     @Test

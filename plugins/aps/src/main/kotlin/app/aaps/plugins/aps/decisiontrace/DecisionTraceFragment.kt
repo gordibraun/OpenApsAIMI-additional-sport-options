@@ -2,6 +2,8 @@ package app.aaps.plugins.aps.decisiontrace
 
 import android.graphics.Color
 import android.graphics.Paint
+import android.content.res.Configuration
+import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -17,10 +19,14 @@ import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import android.widget.LinearLayout
 import androidx.core.view.MenuCompat
 import androidx.core.view.MenuProvider
 import androidx.lifecycle.Lifecycle
 import app.aaps.core.interfaces.aps.APSResult
+import app.aaps.core.interfaces.aps.DecisionStage
+import app.aaps.core.interfaces.aps.DecisionTraceStep
+import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.aps.RT
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.logging.AAPSLogger
@@ -38,8 +44,10 @@ import app.aaps.plugins.aps.R
 import app.aaps.plugins.aps.databinding.DecisionTraceFragmentBinding
 import app.aaps.plugins.aps.events.EventOpenAPSUpdateGui
 import app.aaps.plugins.aps.events.EventResetOpenAPSGui
+import app.aaps.core.interfaces.rx.events.EventLoopUpdateGui
 import dagger.android.support.DaggerFragment
 import io.reactivex.rxjava3.disposables.CompositeDisposable
+import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.kotlin.plusAssign
 import java.util.Locale
 import javax.inject.Inject
@@ -58,6 +66,7 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
     @Inject lateinit var persistenceLayer: PersistenceLayer
     @Inject lateinit var profileFunction: ProfileFunction
     @Inject lateinit var dateUtil: DateUtil
+    @Inject lateinit var loop: Loop
 
     @Suppress("PrivatePropertyName")
     private val ID_MENU_RUN = 504
@@ -68,6 +77,7 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
     )
 
     private val binding get() = _binding!!
+    private var historyLoaded = false
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View =
         DecisionTraceFragmentBinding.inflate(inflater, container, false).also {
@@ -84,7 +94,7 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
             rh.gac(context, com.google.android.material.R.attr.colorSecondary)
         )
         binding.swipeRefresh.setOnRefreshListener {
-            handler.post { activePlugin.activeAPS.invoke("Decision Trace swipe refresh", false) }
+            updateGUI()
         }
         binding.summaryTitle.paintFlags = binding.summaryTitle.paintFlags or Paint.UNDERLINE_TEXT_FLAG
         binding.traceTitle.paintFlags = binding.traceTitle.paintFlags or Paint.UNDERLINE_TEXT_FLAG
@@ -98,17 +108,28 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
         setSectionHelp(
             binding.traceTitle,
             "Этапы решения",
-            "Это последовательность шагов determine-basal: сигналы прогноза, решающий минимум, первичный запрос, safety-механизмы и итоговое действие."
+            "Шаги записываются во время расчёта, включая ранний выход. Ниже идут ограничения цикла и отдельно подтверждение помпы. Это не реконструкция по ключевым словам."
         )
         setSectionHelp(
             binding.rawTitle,
             "Подробный лог",
             "Сырьё для разбора: отфильтрованные строки reason и consoleLog, по которым можно понять, где именно логика усилила, ограничила или отменила инсулин."
         )
+        binding.summaryTitle.setOnClickListener { toggle(binding.summaryMain) }
+        binding.rawTitle.setOnClickListener { toggle(binding.rawTrace) }
+        binding.traceTitle.setOnClickListener {
+            toggle(binding.traceStages)
+            toggle(binding.journalSteps)
+            if (binding.journalSteps.visibility == View.VISIBLE) updateGUI()
+        }
+    }
+
+    private fun toggle(view: View) {
+        view.visibility = if (view.visibility == View.VISIBLE) View.GONE else View.VISIBLE
     }
 
     override fun onCreateMenu(menu: Menu, inflater: MenuInflater) {
-        menu.add(Menu.FIRST, ID_MENU_RUN, 0, rh.gs(R.string.openapsma_run))
+        menu.add(Menu.FIRST, ID_MENU_RUN, 0, "Обновить журнал")
             .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
         MenuCompat.setGroupDividerEnabled(menu, true)
     }
@@ -116,7 +137,7 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
     override fun onMenuItemSelected(item: MenuItem): Boolean =
         when (item.itemId) {
             ID_MENU_RUN -> {
-                handler.post { activePlugin.activeAPS.invoke("Decision Trace menu", false) }
+                updateGUI()
                 true
             }
 
@@ -125,6 +146,9 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
 
     override fun onResume() {
         super.onResume()
+        disposable += rxBus.toObservable(EventLoopUpdateGui::class.java)
+            .observeOn(aapsSchedulers.main)
+            .subscribe({ updateGUI() }, fabricPrivacy::logException)
         disposable += rxBus
             .toObservable(EventOpenAPSUpdateGui::class.java)
             .observeOn(aapsSchedulers.main)
@@ -135,11 +159,28 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
             .subscribe({ resetGUI(it.text) }, fabricPrivacy::logException)
 
         updateGUI()
+        binding.flowPlayer.start()
+        if (!historyLoaded) {
+            val now = dateUtil.now()
+            disposable += Single.fromCallable {
+                persistenceLayer.getApsResults(now - 2 * 60 * 60 * 1000L, now)
+                    .sortedByDescending { it.date }
+                    .mapNotNull { result -> (result.rawData() as? RT)?.decisionTrace?.takeIf { it.isNotEmpty() }?.let {
+                        TraceRun(result.date, it, TraceRunState.CALCULATED, DecisionContext.from(result))
+                    } }
+                    .take(12)
+            }.subscribeOn(aapsSchedulers.io).observeOn(aapsSchedulers.main).subscribe({ records ->
+                records.forEach { DecisionTraceLive.history.merge(it.id, it.steps, it.context) }
+                historyLoaded = true
+                _binding?.flowPlayer?.refresh()
+            }, fabricPrivacy::logException)
+        }
     }
 
     override fun onPause() {
         super.onPause()
         disposable.clear()
+        _binding?.flowPlayer?.stop()
         handler.removeCallbacksAndMessages(null)
     }
 
@@ -151,23 +192,32 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        _binding?.flowPlayer?.stop()
         _binding = null
     }
 
     private fun updateGUI() {
         if (_binding == null) return
         val apsPlugin = activePlugin.activeAPS
-        val lastAPSResult = apsPlugin.lastAPSResult
+        val requested = apsPlugin.lastAPSResult
+        val lastAPSResult = loop.lastRun?.constraintsProcessed?.takeIf { it.date == requested?.date } ?: requested
         if (lastAPSResult == null) {
             resetGUI(rh.gs(R.string.no_aps_selected))
             return
         }
         val raw = lastAPSResult.rawData() as? RT
-        val contextWarning = buildContextWarning(lastAPSResult)
+        val contextWarning = requested?.let { buildContextWarning(it) }
 
         binding.lastrun.text = dateUtil.dateAndTimeString(lastAPSResult.date)
-        setInteractiveText(binding.summaryMain, HtmlHelper.fromHtml(withContextWarning(contextWarning, buildDecisionSummary(lastAPSResult, raw))))
-        setInteractiveText(binding.traceStages, HtmlHelper.fromHtml(withContextWarning(contextWarning, buildDecisionStages(lastAPSResult, raw))))
+        val steps = raw?.decisionTrace.orEmpty()
+        DecisionTraceLive.history.merge(lastAPSResult.date, steps, requested?.takeIf { it.date == lastAPSResult.date }?.let(DecisionContext::from))
+        binding.flowPlayer.refresh()
+        val summary = if (steps.isEmpty()) buildDecisionSummary(lastAPSResult, raw) else buildRecordedSummary(lastAPSResult, raw!!)
+        setInteractiveText(binding.summaryMain, HtmlHelper.fromHtml(withContextWarning(contextWarning, summary)))
+        binding.traceStages.text = if (steps.isEmpty())
+            "В этом расчёте нет записанного порядка шагов. Исторический лог доступен ниже; порядок по его тексту не восстанавливается."
+        else "${steps.size} записей в порядке выполнения; расчёт ${dateUtil.dateAndTimeString(lastAPSResult.date)}"
+        if (binding.journalSteps.visibility == View.VISIBLE) renderJournal(steps)
         setInteractiveText(binding.rawTrace, HtmlHelper.fromHtml(withContextWarning(contextWarning, buildRawTrace(lastAPSResult, raw))))
         binding.swipeRefresh.isRefreshing = false
     }
@@ -201,7 +251,7 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
             append("<b>Внимание: расчет не от текущего контекста</b><br>")
             append(issues.joinToString("<br>"))
             append("<br>")
-            append("Ниже показан старый след решения; дождись нового цикла или запусти расчет из меню Decision Trace.")
+            append("Ниже показана запись старого расчёта. Новый цикл появится отдельно; просмотр не запускает алгоритм.")
         }
     }
 
@@ -210,8 +260,85 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
         binding.lastrun.text = ""
         binding.summaryMain.text = text
         binding.traceStages.text = ""
+        binding.journalSteps.removeAllViews()
         binding.rawTrace.text = ""
         binding.swipeRefresh.isRefreshing = false
+    }
+
+    private fun buildRecordedSummary(result: APSResult, raw: RT): String = buildString {
+        val proposed = activePlugin.activeAPS.lastAPSResult?.takeIf { it.date == result.date }?.rawData() as? RT ?: raw
+        append("<b>Предложение алгоритма, не факт подачи</b><br>")
+        append("Микродоза ${formatUnits(proposed.units)} Е; базал ${formatUnits(proposed.rate)} Е/ч; углеводы ${proposed.carbsReq ?: 0} г.<br>")
+        val constrained = loop.lastRun?.constraintsProcessed?.takeIf { it.date == result.date }
+        if (constrained != null) {
+            append("<b>После внешних ограничений</b><br>")
+            append("Микродоза ${formatUnits(constrained.smb)} Е; базал ${formatUnits(constrained.rate)} Е/ч.<br>")
+            if (abs(constrained.smb - (proposed.units ?: 0.0)) > 0.001 || abs(constrained.rate - (proposed.rate ?: constrained.rate)) > 0.001)
+                append("Прогноз рассчитан для предложения AIMI; ограничения изменили подачу.<br>")
+        } else append("Внешние ограничения этого расчёта ещё не получены.<br>")
+        val delivery = raw.decisionTrace.lastOrNull { it.stage == DecisionStage.DELIVERY }
+        append("<b>Состояние передачи</b><br>")
+        append(android.text.TextUtils.htmlEncode(delivery?.let { "${it.title}: ${it.detail}" } ?: "Подтверждения помпы для этого расчёта нет."))
+    }
+
+    private val expandedStages = mutableSetOf<Int>()
+    private var journalTimestamp: Long? = null
+
+    private fun renderJournal(steps: List<DecisionTraceStep>) {
+        if (journalTimestamp != (loop.lastRun?.constraintsProcessed?.date ?: activePlugin.activeAPS.lastAPSResult?.date)) {
+            expandedStages.clear()
+            journalTimestamp = loop.lastRun?.constraintsProcessed?.date ?: activePlugin.activeAPS.lastAPSResult?.date
+        }
+        binding.journalSteps.removeAllViews()
+        val density = resources.displayMetrics.density
+        val dark = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val groups = mutableListOf<MutableList<DecisionTraceStep>>()
+        steps.forEach { step ->
+            if (groups.lastOrNull()?.lastOrNull()?.stage != step.stage) groups.add(mutableListOf())
+            groups.last().add(step)
+        }
+        groups.forEach { group ->
+            val first = group.first()
+            val (name, color) = when (first.stage) {
+                DecisionStage.INPUT -> "Исходные данные" to if (dark) "#80CBC4" else "#00695C"
+                DecisionStage.INSULIN -> "Активный инсулин" to if (dark) "#64B5F6" else "#1565C0"
+                DecisionStage.SENSITIVITY -> "ISF решения и автосенс" to if (dark) "#CE93D8" else "#7B1FA2"
+                DecisionStage.CARBS -> "Еда и остаток углеводов" to if (dark) "#FFEB3B" else "#806000"
+                DecisionStage.FORECAST -> "Прогноз" to if (dark) "#80CBC4" else "#00695C"
+                DecisionStage.SMB -> "Автоматическая микродоза" to if (dark) "#64B5F6" else "#1565C0"
+                DecisionStage.SAFETY, DecisionStage.CONSTRAINTS -> "Проверки и ограничения" to if (dark) "#FF8A80" else "#B71C1C"
+                DecisionStage.BASAL -> "Временный базал" to if (dark) "#64B5F6" else "#1565C0"
+                DecisionStage.FINAL -> "Итог расчёта" to if (dark) "#A5D6A7" else "#2E7D32"
+                DecisionStage.DELIVERY -> "Передача помпе" to if (dark) "#FFCC80" else "#A34800"
+            }
+            val details = TextView(requireContext()).apply {
+                text = group.joinToString("\n\n") { "${it.sequence}. ${it.title}\n${it.detail}" }
+                textSize = 14f
+                setTextColor(Color.parseColor(color))
+                setTextIsSelectable(true)
+                setPadding((12 * density).toInt(), 0, (8 * density).toInt(), (12 * density).toInt())
+                visibility = if (first.sequence in expandedStages) View.VISIBLE else View.GONE
+            }
+            val heading = TextView(requireContext()).apply {
+                text = "${first.sequence}–${group.last().sequence}. $name"
+                textSize = 16f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(Color.parseColor(color))
+                minHeight = (48 * density).toInt()
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding((8 * density).toInt(), (8 * density).toInt(), (8 * density).toInt(), (8 * density).toInt())
+                setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.arrow_down_float, 0)
+                isFocusable = true
+                setOnClickListener {
+                    val expand = details.visibility != View.VISIBLE
+                    details.visibility = if (expand) View.VISIBLE else View.GONE
+                    if (expand) expandedStages.add(first.sequence) else expandedStages.remove(first.sequence)
+                    setCompoundDrawablesWithIntrinsicBounds(0, 0, if (expand) android.R.drawable.arrow_up_float else android.R.drawable.arrow_down_float, 0)
+                }
+            }
+            binding.journalSteps.addView(heading, LinearLayout.LayoutParams(-1, -2))
+            binding.journalSteps.addView(details, LinearLayout.LayoutParams(-1, -2))
+        }
     }
 
     private fun buildDecisionSummary(lastAPSResult: APSResult, raw: RT?): String {
@@ -352,6 +479,9 @@ class DecisionTraceFragment : DaggerFragment(), MenuProvider {
     }
 
     private fun buildRawTrace(lastAPSResult: APSResult, raw: RT?): String {
+        if (!raw?.decisionTrace.isNullOrEmpty()) return raw!!.decisionTrace.joinToString("<br><br>") {
+            android.text.TextUtils.htmlEncode("${it.sequence}. ${it.title}: ${it.detail}")
+        }
         val smbMismatch = detectSmbRecommendationMismatch(lastAPSResult, raw)
         val filteredReason = lastAPSResult.reason
             .split('\n')

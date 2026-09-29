@@ -208,10 +208,10 @@ class EopatchPumpPluginTest : EopatchTestBase() {
     }
 
     @Test
-    fun `batteryLevel should return 0 when not activated`() {
+    fun `batteryLevel should be unavailable when not activated`() {
         patchConfig.lifecycleEvent = PatchLifecycleEvent.createShutdown()
 
-        assertThat(plugin.batteryLevel).isEqualTo(0)
+        assertThat(plugin.batteryLevel).isNull()
     }
 
     @Test

@@ -1,7 +1,7 @@
 package app.aaps.plugins.aps.openAPSAIMI.carbs
 
 import org.junit.Assert.assertEquals
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 class CarbsAdvisorTest {
 
@@ -76,6 +76,7 @@ class CarbsAdvisorTest {
             nightNoMeal = false
         )
 
-        assertEquals(4, result)
+        // (117 + 5 - (95 - 2*30*0.20 - 0.8*30*0.35)) / 10 = 4.74 g.
+        assertEquals(5, result)
     }
 }

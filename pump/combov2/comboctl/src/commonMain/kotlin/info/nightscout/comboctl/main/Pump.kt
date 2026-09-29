@@ -60,6 +60,11 @@ import kotlin.time.toDuration
 private val logger = Logger.get("Pump")
 
 private const val NUM_IDEMPOTENT_COMMAND_DISPATCH_ATTEMPTS = 10
+// The Combo applies each short press with a lag of a second or more and drops the setting screen
+// a few seconds after the last key it accepted, so a long run of taps does not fit in that window.
+// A long press moves the quantity quickly and keeps the screen alive; the taps that follow it are
+// only the fine-tuning, and adjustQuantityOnScreen() confirms each of those on screen.
+private const val TBR_PERCENTAGE_LONG_PRESS_THRESHOLD = 50
 private const val DEFAULT_MAX_NUM_REGULAR_CONNECT_ATTEMPTS = 10
 private const val DELAY_IN_MS_BETWEEN_COMMAND_DISPATCH_ATTEMPTS = 2000L
 private const val PUMP_DATETIME_UPDATE_LONG_RT_BUTTON_PRESS_THRESHOLD = 5
@@ -1459,14 +1464,16 @@ class Pump(
     suspend fun deliverBolus(
         bolusAmount: Int,
         bolusReason: StandardBolusReason,
-        bolusStatusUpdateIntervalInMs: Long = 250
+        bolusStatusUpdateIntervalInMs: Long = 250,
+        onStandardBolusRecorded: (LastBolus) -> Unit = { }
     ) = deliverBolus(
         totalBolusAmount = bolusAmount,
         immediateBolusAmount = 0,
         durationInMinutes = 0,
         standardBolusReason = bolusReason,
         bolusType = CMDDeliverBolusType.STANDARD_BOLUS,
-        bolusStatusUpdateIntervalInMs = bolusStatusUpdateIntervalInMs
+        bolusStatusUpdateIntervalInMs = bolusStatusUpdateIntervalInMs,
+        onStandardBolusRecorded = onStandardBolusRecorded
     )
 
     /**
@@ -1556,7 +1563,8 @@ class Pump(
         durationInMinutes: Int,
         standardBolusReason: StandardBolusReason,
         bolusType: CMDDeliverBolusType,
-        bolusStatusUpdateIntervalInMs: Long = 250
+        bolusStatusUpdateIntervalInMs: Long = 250,
+        onStandardBolusRecorded: (LastBolus) -> Unit = { }
     ) = executeCommand(
         // Instruct executeCommand() to not set the mode on its own.
         // This function itself switches manually between the
@@ -1834,6 +1842,11 @@ class Pump(
                                     }
                                 }
                         }
+                    }
+
+                    if (bolusType == CMDDeliverBolusType.STANDARD_BOLUS) {
+                        findStandardBolusReceipt(historyDelta, currentPumpUtcOffset!!, totalBolusAmount)
+                            ?.let(onStandardBolusRecorded)
                     }
 
                     if (bolusFinishedCompletely) {
@@ -3211,8 +3224,7 @@ class Pump(
             // From here on, we just need to press MENU to move to the next datetime screen.
 
             setDateTimeProgressReporter.setCurrentProgressStage(RTCommandProgressStage.SettingDateTimeMinute)
-            rtNavigationContext.shortPressButton(RTNavigationButton.MENU)
-            waitUntilScreenAppears(rtNavigationContext, ParsedScreen.TimeAndDateSettingsMinuteScreen::class)
+            pressButtonUntilScreenAppears(rtNavigationContext, RTNavigationButton.MENU, ParsedScreen.TimeAndDateSettingsMinuteScreen::class)
             adjustQuantityOnScreen(
                 rtNavigationContext,
                 targetQuantity = newPumpLocalDateTime.minute,
@@ -3224,8 +3236,7 @@ class Pump(
             }
 
             setDateTimeProgressReporter.setCurrentProgressStage(RTCommandProgressStage.SettingDateTimeYear)
-            rtNavigationContext.shortPressButton(RTNavigationButton.MENU)
-            waitUntilScreenAppears(rtNavigationContext, ParsedScreen.TimeAndDateSettingsYearScreen::class)
+            pressButtonUntilScreenAppears(rtNavigationContext, RTNavigationButton.MENU, ParsedScreen.TimeAndDateSettingsYearScreen::class)
             adjustQuantityOnScreen(
                 rtNavigationContext,
                 targetQuantity = newPumpLocalDateTime.year,
@@ -3236,8 +3247,7 @@ class Pump(
             }
 
             setDateTimeProgressReporter.setCurrentProgressStage(RTCommandProgressStage.SettingDateTimeMonth)
-            rtNavigationContext.shortPressButton(RTNavigationButton.MENU)
-            waitUntilScreenAppears(rtNavigationContext, ParsedScreen.TimeAndDateSettingsMonthScreen::class)
+            pressButtonUntilScreenAppears(rtNavigationContext, RTNavigationButton.MENU, ParsedScreen.TimeAndDateSettingsMonthScreen::class)
             adjustQuantityOnScreen(
                 rtNavigationContext,
                 targetQuantity = newPumpLocalDateTime.month.number,
@@ -3254,8 +3264,7 @@ class Pump(
             // in kotlinx.datetime can be used for this. Avoid self-made calendar
             // logic here; such logic is easily error prone.
             setDateTimeProgressReporter.setCurrentProgressStage(RTCommandProgressStage.SettingDateTimeDay)
-            rtNavigationContext.shortPressButton(RTNavigationButton.MENU)
-            waitUntilScreenAppears(rtNavigationContext, ParsedScreen.TimeAndDateSettingsDayScreen::class)
+            pressButtonUntilScreenAppears(rtNavigationContext, RTNavigationButton.MENU, ParsedScreen.TimeAndDateSettingsDayScreen::class)
             adjustQuantityOnScreen(
                 rtNavigationContext,
                 targetQuantity = newPumpLocalDateTime.day,
@@ -3366,12 +3375,16 @@ class Pump(
 
         try {
             var initialQuantityDistance: Int? = null
+            // Duration the Combo proposes on the percentage screen (usually the last one used).
+            var durationShownOnPercentageScreen: Int? = null
 
-            // Only long-press the RT button if we have to increase / decrease
-            // the TBR percentage by more than 50. Otherwise, short-pressing
-            // is sufficient; adjusting by 50 requires only 5 button presses.
+            // Long-press the RT button only for very large percentage distances. The first
+            // short press that follows a long press is unreliable on at least one Combo: the
+            // pump applies it late, after it has already dropped the setting screen, so the
+            // TBR is never confirmed. Runs of short presses are reliable; a 100 % distance is
+            // ten short presses and takes a few seconds.
             val longRTButtonPressPercentagePredicate = fun(targetQuantity: Int, quantityOnScreen: Int): Boolean =
-                ((targetQuantity - quantityOnScreen).absoluteValue) >= 50
+                ((targetQuantity - quantityOnScreen).absoluteValue) >= TBR_PERCENTAGE_LONG_PRESS_THRESHOLD
 
             // First, set the TBR percentage.
             navigateToRTScreen(rtNavigationContext, ParsedScreen.TemporaryBasalRatePercentageScreen::class, pumpSuspended)
@@ -3383,6 +3396,8 @@ class Pump(
                 incrementSteps = arrayOf(Pair(0, 10))
             ) {
                 val currentPercentage = (it as ParsedScreen.TemporaryBasalRatePercentageScreen).percentage
+                if (currentPercentage != null)
+                    durationShownOnPercentageScreen = it.remainingDurationInMinutes
 
                 // Calculate the progress out of the "distance" from the
                 // current percentage to the target percentage. As we adjust
@@ -3422,9 +3437,16 @@ class Pump(
 
                 setTbrProgressReporter.setCurrentProgressStage(RTCommandProgressStage.SettingTBRDuration(0))
 
-                // Now move to the duration screen by pressing MENU.
-                rtNavigationContext.shortPressButton(RTNavigationButton.MENU)
-                waitUntilScreenAppears(rtNavigationContext, ParsedScreen.TemporaryBasalRateDurationScreen::class)
+                // Pressing CHECK on the percentage screen programs the TBR with the duration shown
+                // there. When that duration is already the requested one, confirm right away: this
+                // skips the MENU transition to the duration screen, which at least one Combo applies
+                // late or not at all, while arrow and CHECK presses on this screen are reliable.
+                // The main screen is verified afterwards either way.
+                if (durationShownOnPercentageScreen == durationInMinutes) {
+                    logger(LogLevel.DEBUG) { "Duration $durationInMinutes shown on the percentage screen already matches; confirming without the duration screen" }
+                } else {
+                // Now move to the duration screen by pressing MENU (re-pressing if the pump ignores it).
+                pressButtonUntilScreenAppears(rtNavigationContext, RTNavigationButton.MENU, ParsedScreen.TemporaryBasalRateDurationScreen::class)
 
                 adjustQuantityOnScreen(
                     rtNavigationContext,
@@ -3451,6 +3473,7 @@ class Pump(
                     }
 
                     currentDuration
+                }
                 }
             }
 

@@ -9,7 +9,7 @@ import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 class BasalDecisionEngineTest {
 
@@ -22,8 +22,8 @@ class BasalDecisionEngineTest {
     fun `test interpolateBasalFactor`() {
         // < 80 -> 0.5
         assertEquals(0.5, engine.interpolateBasalFactor(70.0), 0.01)
-        // 100 -> 2.0
-        assertEquals(2.0, engine.interpolateBasalFactor(100.0), 0.01)
+        // 100 is midway between (80, 0.5) and (120, 2.0).
+        assertEquals(1.25, engine.interpolateBasalFactor(100.0), 0.01)
         // 120 -> 2.0 (start of next segment)
         assertEquals(2.0, engine.interpolateBasalFactor(120.0), 0.01)
         // 180 -> 5.0
@@ -64,6 +64,7 @@ class BasalDecisionEngineTest {
 
     @Test
     fun `test lunch mode with PKPD boost`() {
+        every { basalPlanner.plan(any(), any()) } returns null
         // Setup mock input
         val input =
                 BasalDecisionEngine.Input(
@@ -141,6 +142,12 @@ class BasalDecisionEngineTest {
 
         // Execute
         val decision = engine.decide(input, rT, helpers)
+        val visits = mutableListOf<Pair<String, String>>()
+        val traced = engine.decide(input, RT(runningDynamicIsf = false), helpers) { id, outcome, _, _, _ -> visits.add(id to outcome) }
+        assertEquals(decision, traced)
+        assertTrue(visits.contains("basal.meal_window" to "selected"))
+        assertTrue(visits.contains("basal.plateau" to "skipped"))
+        assertTrue(visits.contains("basal.low_prediction" to "unchanged"))
 
         // Verify
         // Sensitivity ratio = 40 / 20 = 2.0

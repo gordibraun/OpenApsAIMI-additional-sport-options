@@ -11,8 +11,8 @@ import app.aaps.plugins.aps.openAPSAIMI.model.PumpCaps
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
-import org.junit.Before
-import org.junit.Test
+import org.junit.jupiter.api.BeforeEach as Before
+import org.junit.jupiter.api.Test
 import java.text.DecimalFormat
 
 class BasalPlannerTest {
@@ -137,6 +137,25 @@ class BasalPlannerTest {
         assertNotNull(plan)
         assertEquals(1.1, plan!!.rateUph, 0.01)
         assert(plan.reason.startsWith("Anti-stall"))
+    }
+
+    @Test fun `recording branch does not change plan across glucose and trend ranges`() {
+        for (bg in listOf(55.0, 70.0, 100.0, 117.0, 150.0, 220.0)) {
+            for (delta in listOf(-5.0, 0.0, 3.0, 8.0)) {
+                val ctx = createLoopContext(bg = bg, delta = delta, eventualBg = bg + 20.0)
+                val expected = planner.plan(ctx)
+                val choices = mutableListOf<String>()
+                assertEquals(expected, planner.plan(ctx, choices::add))
+                assertEquals(1, choices.size)
+            }
+        }
+    }
+
+    @Test fun `hard hypo branch remains an actual stop`() {
+        val choices = mutableListOf<String>()
+        val plan = planner.plan(createLoopContext(bg = 55.0), choices::add)
+        assertEquals(listOf("hard_low"), choices)
+        assertEquals(0.0, plan!!.rateUph, 0.0)
     }
 
     private fun createLoopContext(

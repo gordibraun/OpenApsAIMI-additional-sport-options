@@ -36,6 +36,11 @@ class CommandTempBasalPercent(
     override val commandType: Command.CommandType = Command.CommandType.TEMPBASAL
 
     override fun execute() {
+        callback?.validationErrorBeforeDelivery()?.let { reason ->
+            aapsLogger.debug(LTag.PUMPQUEUE, reason)
+            callback.result(pumpEnactResultProvider.get().enacted(false).success(false).comment(reason)).run()
+            return
+        }
         val r =
             if (percent == 100)
                 activePlugin.activePump.cancelTempBasal(enforceNew)

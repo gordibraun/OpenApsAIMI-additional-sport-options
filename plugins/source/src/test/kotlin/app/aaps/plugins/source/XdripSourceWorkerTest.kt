@@ -48,6 +48,7 @@ class XdripSourceWorkerTest : TestBaseWithProfile() {
 
     @BeforeEach
     fun setupMock() {
+        XdripSourcePlugin.XdripSourceWorker.lastDataTimestamp = 0L
         whenever(workerParameters.inputData).thenReturn(workDataOf(DataWorkerStorage.STORE_KEY to 1L))
         worker = XdripSourcePlugin.XdripSourceWorker(context, workerParameters)
     }
@@ -115,6 +116,7 @@ class XdripSourceWorkerTest : TestBaseWithProfile() {
             whenever(xdripSourcePlugin.isEnabled()).thenReturn(true)
             val bundle = BundleMock.mocked().apply {
                 putString("sensorType", "G6")
+                putLong(Intents.EXTRA_TIMESTAMP, now)
             }
             whenever(dataWorkerStorage.pickupBundle(any())).thenReturn(bundle)
 

@@ -52,6 +52,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.ExperimentalSerializationApi
 import javax.inject.Inject
+import java.util.concurrent.TimeUnit
 
 class DataLayerListenerServiceWear :
     WearableListenerService(),
@@ -157,6 +158,8 @@ class DataLayerListenerServiceWear :
         super.onDestroy()
         capabilityClient.removeListener(this, PHONE_CAPABILITY)
         stopKeepAlive()
+        handler.removeCallbacksAndMessages(null)
+        handler.looper.quitSafely()
         aapsLogger.debug(LTag.WEAR, "$TAG onDestroy: keepAlive stopped, scope cancel pending")
         scope.cancel()
         disposable.clear()
@@ -481,7 +484,7 @@ class DataLayerListenerServiceWear :
             } catch (t: Throwable) {
                 aapsLogger.error(LTag.WEAR, "$TAG keepAlive error: $t")
             } finally {
-                scheduleExactKeepAlive()
+                if (keepAliveStarted) scheduleExactKeepAlive()
             }
         }
     }
@@ -499,6 +502,11 @@ class DataLayerListenerServiceWear :
             keepAliveStarted = false
             handler.removeCallbacks(keepAliveRunnable)
             lastPingMs = 0L
+            val intent = Intent(this, DataLayerListenerServiceWear::class.java).setAction(ACTION_KEEPALIVE)
+            android.app.PendingIntent.getService(this, 1001, intent,
+                android.app.PendingIntent.FLAG_NO_CREATE or android.app.PendingIntent.FLAG_IMMUTABLE)?.let {
+                getSystemService(android.app.AlarmManager::class.java).cancel(it)
+            }
             aapsLogger.debug(LTag.WEAR, "$TAG keepAlive stopped")
         }
     }
@@ -524,7 +532,7 @@ class DataLayerListenerServiceWear :
                 capabilityClient.getCapability(
                     PHONE_CAPABILITY,
                     CapabilityClient.FILTER_REACHABLE
-                )
+                ), 5, TimeUnit.SECONDS
             )
             aapsLogger.debug(
                 LTag.WEAR,
@@ -543,11 +551,12 @@ class DataLayerListenerServiceWear :
     }
 
     private fun updateTranscriptionCapability() {
+        try {
         val capabilityInfo: CapabilityInfo = Tasks.await(
             capabilityClient.getCapability(
                 PHONE_CAPABILITY,
                 CapabilityClient.FILTER_REACHABLE
-            )
+            ), 5, TimeUnit.SECONDS
         )
         aapsLogger.debug(
             LTag.WEAR,
@@ -555,8 +564,12 @@ class DataLayerListenerServiceWear :
                 capabilityInfo.nodes.joinToString(", ") { it.displayName + "(" + it.id + ")" }
             }"
         )
-        pickBestNodeId(capabilityInfo.nodes)?.let { transcriptionNodeId = it }
+        transcriptionNodeId = pickBestNodeId(capabilityInfo.nodes)
         aapsLogger.debug(LTag.WEAR, "$TAG Selected node: $transcriptionNodeId")
+        } catch (e: Exception) {
+            transcriptionNodeId = null
+            aapsLogger.error(LTag.WEAR, "Capability lookup failed; waiting for reconnect", e)
+        }
     }
 
     private fun pickBestNodeId(nodes: Set<Node>): String? =
@@ -602,6 +615,7 @@ class DataLayerListenerServiceWear :
                 aapsLogger.debug(LTag.WEAR, "$TAG sendMessage: $path success $it")
             }
             addOnFailureListener {
+                transcriptionNodeId = null
                 aapsLogger.debug(LTag.WEAR, "$TAG sendMessage: $path failure $it")
             }
         }

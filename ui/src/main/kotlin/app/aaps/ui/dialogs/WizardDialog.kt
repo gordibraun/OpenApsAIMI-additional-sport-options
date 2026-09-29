@@ -1,5 +1,7 @@
 package app.aaps.ui.dialogs
 
+import app.aaps.core.objects.aps.ApsDecisionSnapshot
+
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
@@ -50,7 +52,6 @@ import app.aaps.core.interfaces.protection.ProtectionCheck
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.rx.bus.RxBus
-import app.aaps.core.interfaces.rx.events.EventAutosensCalculationFinished
 import app.aaps.core.interfaces.rx.events.EventRefreshOverview
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.DecimalFormatter
@@ -62,7 +63,6 @@ import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.core.objects.extensions.formatColor
-import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.extensions.valueToUnits
 import app.aaps.core.objects.forecast.ForecastCarbsCalculator
 import app.aaps.core.objects.profile.ProfileSealed
@@ -115,6 +115,7 @@ class WizardDialog : DaggerDialogFragment() {
     @Inject lateinit var processedDeviceStatusData: ProcessedDeviceStatusData
     @Inject lateinit var loop: Loop
     @Inject lateinit var aimiMealAssist: AimiMealAssist
+    @Inject lateinit var commandQueue: app.aaps.core.interfaces.queue.CommandQueue
     private val handler = Handler(HandlerThread(this::class.simpleName + "Handler").also { it.start() }.looper)
 
     private var queryingProtection = false
@@ -131,6 +132,8 @@ class WizardDialog : DaggerDialogFragment() {
     private var _binding: DialogWizardBinding? = null
     private var suppressFoodTypeCallbacks = false
     private var aimiDetailsExpanded = false
+    private var dialogInitialized = false
+    private var initializationPending = false
 
     // This property is only valid between onCreateView and onDestroyView.
     private val binding get() = _binding!!
@@ -170,6 +173,7 @@ class WizardDialog : DaggerDialogFragment() {
         savedInstanceState.putDouble("carb_time_input", binding.carbTimeInput.value)
         savedInstanceState.putString("food_type", currentSelectedFoodType())
         savedInstanceState.putBoolean("aimi_details_expanded", aimiDetailsExpanded)
+        savedInstanceState.putString("notes_input", binding.notesLayout.notes.text.toString())
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -188,6 +192,7 @@ class WizardDialog : DaggerDialogFragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        binding.deliveryReview.setOnClickListener { reviewPendingDelivery() }
         aimiDetailsExpanded = savedInstanceState?.getBoolean("aimi_details_expanded") ?: false
         loadCheckedStates()
         processCobCheckBox()
@@ -195,6 +200,7 @@ class WizardDialog : DaggerDialogFragment() {
         binding.sbCheckbox.visibility = useSuperBolus.toVisibility()
         binding.superBolusRow.visibility = useSuperBolus.toVisibility()
         binding.notesLayout.root.visibility = preferences.get(BooleanKey.OverviewShowNotesInDialogs).toVisibility()
+        binding.notesLayout.notes.setText(savedInstanceState?.getString("notes_input") ?: notesPassedIntoWizard)
 
         val maxCarbs = constraintChecker.getMaxCarbsAllowed().value()
         val maxCorrection = constraintChecker.getMaxBolusAllowed().value()
@@ -213,7 +219,7 @@ class WizardDialog : DaggerDialogFragment() {
         }
         binding.carbsInput.setParams(
             savedInstanceState?.getDouble("carbs_input")
-                ?: 0.0, 0.0, maxCarbs.toDouble(), 1.0, DecimalFormat("0"), false, binding.okcancel.ok, textWatcher
+                ?: carbsPassedIntoWizard, 0.0, maxCarbs.toDouble(), 1.0, DecimalFormat("0"), false, binding.okcancel.ok, textWatcher
         )
 
         // If there is no BG using % lower that 100% leads to high BGs
@@ -251,7 +257,6 @@ class WizardDialog : DaggerDialogFragment() {
             savedInstanceState?.getDouble("carb_time_input")
                 ?: 0.0, -1440.0, 1440.0, 5.0, DecimalFormat("0"), false, binding.okcancel.ok, timeTextWatcher
         )
-        handler.post { initDialog() }
         calculatedPercentage = preferences.get(IntKey.OverviewBolusPercentage)
         binding.percentUsed.text = rh.gs(app.aaps.core.ui.R.string.format_percent, calculatedPercentage)
         binding.percentUsed.visibility = (calculatedPercentage != 100 || usePercentage).toVisibility()
@@ -265,14 +270,18 @@ class WizardDialog : DaggerDialogFragment() {
             if (okClicked) {
                 aapsLogger.debug(LTag.UI, "guarding: ok already clicked")
             } else {
-                okClicked = true
-                calculateInsulin()
+                val displayedWizard = wizard ?: return@setOnClickListener
                 context?.let { context ->
-                    wizard?.confirmAndExecute(context)
+                    okClicked = true
+                    displayedWizard.confirmAndExecute(context, onFinished = { accepted ->
+                        okClicked = false
+                        if (_binding != null) {
+                            if (accepted) dismiss() else calculateInsulin()
+                        }
+                    })
                 }
                 aapsLogger.debug(LTag.APS, "Dialog ok pressed: ${this.javaClass.simpleName}")
             }
-            dismiss()
         }
         binding.bgCheckboxIcon.setOnClickListener { binding.bgCheckbox.isChecked = !binding.bgCheckbox.isChecked }
         binding.ttCheckboxIcon.setOnClickListener { binding.ttCheckbox.isChecked = !binding.ttCheckbox.isChecked }
@@ -330,10 +339,9 @@ class WizardDialog : DaggerDialogFragment() {
         // profile
         binding.profileList.onItemClickListener = AdapterView.OnItemClickListener { _, _, _, _ -> calculateInsulin() }
         // bus
-        disposable += rxBus
-            .toObservable(EventAutosensCalculationFinished::class.java)
+        disposable += wizardInputUpdates(rxBus)
             .observeOn(aapsSchedulers.main)
-            .subscribe({ calculateInsulin() }, fabricPrivacy::logException)
+            .subscribe({ refreshCalculation() }, fabricPrivacy::logException)
         setA11yLabels()
         binding.wizardTitle.paintFlags = binding.wizardTitle.paintFlags or Paint.UNDERLINE_TEXT_FLAG
         binding.foodTypeTitle.paintFlags = binding.foodTypeTitle.paintFlags or Paint.UNDERLINE_TEXT_FLAG
@@ -348,7 +356,7 @@ class WizardDialog : DaggerDialogFragment() {
             OKDialog.show(
                 requireContext(),
                 "AIMI в Мастере Болюса",
-                "AIMI использует ГК, углеводы, время углеводов, target, IC, ISF, COB, IOB, тренд и выбранный тип еды. Тип еды влияет на bolus через carb factor, prebolus и прогнозную проверку, а также на форму carb-кривой."
+                "AIMI использует ГК, углеводы, время углеводов, target, IC, ISF, COB, IOB, тренд и выбранный тип еды. Коэффициент типа еды влияет на пищевую часть болюса, а тип еды также задаёт форму усвоения углеводов. Коэффициенты и фиксированные предболюсы ручных режимов сюда не добавляются."
             )
         }
         binding.wizardAimiLogicToggle.setOnClickListener {
@@ -357,6 +365,7 @@ class WizardDialog : DaggerDialogFragment() {
         }
         updateAimiDetailsVisibility()
         setupFoodTypeCheckboxes(savedInstanceState?.getString("food_type"))
+        refreshCalculation()
     }
 
     private fun setA11yLabels() {
@@ -369,6 +378,7 @@ class WizardDialog : DaggerDialogFragment() {
     override fun onPause() {
         super.onPause()
         handler.removeCallbacksAndMessages(null)
+        initializationPending = false
     }
 
     override fun onDestroy() {
@@ -380,6 +390,10 @@ class WizardDialog : DaggerDialogFragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        disposable.clear()
+        handler.removeCallbacksAndMessages(null)
+        dialogInitialized = false
+        initializationPending = false
         _binding = null
     }
 
@@ -498,56 +512,125 @@ class WizardDialog : DaggerDialogFragment() {
         binding.wizardAimiLogicToggle.text = rh.gs(if (aimiDetailsExpanded) R.string.aimi_details_hide else R.string.aimi_details_show)
     }
 
+    private fun refreshCalculation() {
+        val viewBinding = _binding ?: return
+        if (dialogInitialized) calculateInsulin()
+        else if (!initializationPending) {
+            initializationPending = true
+            showCalculationUnavailable("Загружаются данные калькулятора. Введённые значения сохраняются.")
+            handler.post {
+                try {
+                    initDialog()
+                } catch (e: Exception) {
+                    aapsLogger.error("Cannot initialize wizard inputs", e)
+                    runOnUiThread {
+                        if (_binding !== viewBinding) return@runOnUiThread
+                        initializationPending = false
+                        showCalculationUnavailable("Не удалось загрузить данные калькулятора. Ошибка записана в журнал; введённые значения сохранены.")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showCalculationUnavailable(reason: String) {
+        _binding ?: return
+        wizard = null
+        binding.total.text = "Нет расчёта"
+        binding.totalReason.text = reason
+        binding.totalReason.visibility = View.VISIBLE
+        binding.okcancel.ok.visibility = View.VISIBLE
+        binding.okcancel.ok.isEnabled = false
+    }
+
     private fun initDialog() {
+        val viewBinding = _binding ?: return
         val profile = profileFunction.getProfile()
         val profileStore = activePlugin.activeProfileSource.profile
-        val tempTarget = persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())
 
         if (profile == null || profileStore == null) {
-            ToastUtils.errorToast(ctx, app.aaps.core.ui.R.string.noprofile)
-            dismiss()
+            runOnUiThread {
+                if (_binding !== viewBinding) return@runOnUiThread
+                initializationPending = false
+                showCalculationUnavailable("Активный профиль пока недоступен. Расчёт обновится после загрузки профиля.")
+            }
             return
         }
-
-        // IOB calculation
-        val bolusIob = iobCobCalculator.calculateIobFromBolus().round()
-        val basalIob = iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended().round()
+        val tempTarget = persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())
 
         runOnUiThread {
-            _binding ?: return@runOnUiThread
-            if (carbsPassedIntoWizard != 0.0) {
-                binding.carbsInput.value = carbsPassedIntoWizard
-            }
-            if (notesPassedIntoWizard.isNotBlank()) {
-                binding.notesLayout.notes.setText(notesPassedIntoWizard)
-            }
+            if (_binding !== viewBinding) return@runOnUiThread
+            initializationPending = false
+            if (dialogInitialized) return@runOnUiThread
 
-            val profileList: ArrayList<CharSequence> = profileStore.getProfileList()
+            val selectedProfile = binding.profileList.text.toString()
+            val profileList = ArrayList(profileStore.getProfileList())
             profileList.add(0, rh.gs(app.aaps.core.ui.R.string.active))
             context?.let { context ->
                 binding.profileList.setAdapter(ArrayAdapter(context, app.aaps.core.ui.R.layout.spinner_centered, profileList))
-                binding.profileList.setText(profileList[0], false)
+                binding.profileList.setText(selectedProfile.takeIf { it.isNotBlank() } ?: profileList[0], false)
             }
 
             val units = profileFunction.getUnits()
             binding.bgUnits.text = units.asText
             binding.bgInput.step = if (units == GlucoseUnit.MGDL) 1.0 else 0.1
 
-            // Set BG if not old
-            binding.bgInput.value = iobCobCalculator.ads.actualBg()?.valueToUnits(units) ?: 0.0
+            // Do not overwrite a value entered while the profile was loading.
+            if (binding.bgInput.value == 0.0)
+                binding.bgInput.value = iobCobCalculator.ads.actualBg()?.valueToUnits(units) ?: 0.0
 
             binding.ttCheckbox.isEnabled = binding.bgCheckbox.isChecked && tempTarget != null
             binding.ttCheckbox.isChecked = binding.ttCheckbox.isEnabled
             binding.ttCheckboxIcon.visibility = binding.ttCheckbox.isEnabled.toVisibility()
-            binding.iobInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, -bolusIob.iob - basalIob.basaliob)
-
+            dialogInitialized = true
             calculateInsulin()
         }
     }
 
     @SuppressLint("SetTextI18n")
+    private fun reviewPendingDelivery() {
+        val pending = aimiMealAssist.pendingTreatment() ?: return
+        if (commandQueue.size() > 0 || commandQueue.performing() != null) {
+            OKDialog.show(requireContext(), "Сверка дозы", "Дождитесь завершения обмена с помпой. Запрос ещё может выполняться.")
+            return
+        }
+        val check = android.widget.CheckBox(requireContext()).apply {
+            text = "Я проверил историю на помпе и записи инсулина и еды в AAPS: фактически введённое и съеденное учтено верно."
+            setPadding(24, 16, 24, 16)
+        }
+        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Сверка предыдущего ввода")
+            .setMessage("Запрос от ${dateUtil.dateAndTimeString(pending.acceptedAt)}: ${pending.insulin} Е, ${pending.carbs} г. Это запрос, не доказательство подачи.\n\nОтсутствие ответа не означает, что инсулин не введён. Сначала сравните историю самой помпы с записями AAPS. Подтверждение ниже не вводит инсулин и не изменяет историю; потребуется новый расчёт.")
+            .setView(check)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Сверка завершена") { _, _ ->
+                if (check.isChecked && commandQueue.size() == 0 && commandQueue.performing() == null) {
+                    aimiMealAssist.confirmManualTreatmentReview(pending.acceptedAt, dateUtil.now())
+                    calculateInsulin()
+                    rxBus.send(EventRefreshOverview("Wizard delivery review", now = true))
+                }
+            }.create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).isEnabled = false
+            check.setOnCheckedChangeListener { _, checked -> dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).isEnabled = checked }
+        }
+        dialog.show()
+    }
+
     private fun calculateInsulin() {
-        val profileStore = activePlugin.activeProfileSource.profile ?: return // not initialized yet
+        if (_binding == null) return
+        if (!dialogInitialized) {
+            showCalculationUnavailable("Данные профиля ещё не загружены. Введённые значения сохраняются; расчёт обновится автоматически.")
+            return
+        }
+        val pendingDelivery = aimiMealAssist.pendingTreatment()
+        binding.deliveryReview.visibility = if (pendingDelivery != null && pendingDelivery.manuallyReviewedAt == null &&
+            dateUtil.now() - pendingDelivery.acceptedAt >= 5 * 60_000L) View.VISIBLE else View.GONE
+        val profileStore = activePlugin.activeProfileSource.profile ?: run {
+            dialogInitialized = false
+            showCalculationUnavailable("Профили пока недоступны. Расчёт обновится после их загрузки.")
+            return
+        }
         var profileName = binding.profileList.text.toString()
         val specificProfile: Profile?
         if (profileName == rh.gs(app.aaps.core.ui.R.string.active)) {
@@ -556,7 +639,10 @@ class WizardDialog : DaggerDialogFragment() {
         } else
             specificProfile = profileStore.getSpecificProfile(profileName)?.let { ProfileSealed.Pure(it, activePlugin) }
 
-        if (specificProfile == null) return
+        if (specificProfile == null) {
+            showCalculationUnavailable("Выбранный профиль недоступен. Дождитесь его загрузки или выберите доступный профиль.")
+            return
+        }
 
         // Entered values
         val usePercentage = binding.correctionPercent.isChecked
@@ -596,7 +682,8 @@ class WizardDialog : DaggerDialogFragment() {
         val carbTime = SafeParse.stringToInt(binding.carbTimeInput.text)
         val selectedFoodType = currentSelectedFoodType()
         val foodTypeMissing = carbsAfterConstraint > 0.0 && selectedFoodType == null
-        val forecastRequiredCarbs = forecastRequiredCarbsFromFinalLine(specificProfile, tempTarget, binding.ttCheckbox.isChecked)
+        val apsSnapshot = if (config.APS) ApsDecisionSnapshot.fromLoop(loop, aimiMealAssist, persistenceLayer, dateUtil.now()) else null
+        val forecastRequiredCarbs = requiredCarbsForWizard(specificProfile, tempTarget, binding.ttCheckbox.isChecked, apsSnapshot)
         val activityBolusContext = futureActivityBolusContext(dateUtil.now())
         refreshOverviewIfForecastCarbsChanged(forecastRequiredCarbs)
 
@@ -617,7 +704,8 @@ class WizardDialog : DaggerDialogFragment() {
             totalPercentage = percentageCorrection.toDouble(),
             forecastRequiredCarbs = forecastRequiredCarbs,
             activityNewInsulinFactor = activityBolusContext?.factor ?: 1.0,
-            activityDescription = activityBolusContext?.description
+            activityDescription = activityBolusContext?.description,
+            forecastRequiredCarbsSource = if (config.APS) "APS.carbsReq" else "AIMI_FINAL"
         )
 
         wizard?.let { wizard ->
@@ -677,58 +765,26 @@ class WizardDialog : DaggerDialogFragment() {
                 abs(correction) > 0.01 ||
                 carbTime != 0 ||
                 (usePercentage && abs(percentageCorrection.toDouble() - preferences.get(IntKey.OverviewBolusPercentage).toDouble()) > 0.01)
-            val apsInsulinReq = apsInsulinReqFromLoop()
-            val apsForecastInsulinDeficit = maxOf(apsForecastInsulinDeficitFromLoop(), forecastInsulinDeficitFromFinalLine(specificProfile, tempTarget, binding.ttCheckbox.isChecked))
-            if (!manualWizardInput && wizard.forecastRequiredCarbs > 0) {
-                binding.total.text = HtmlHelper.fromHtml(rh.gs(R.string.missing_carbs, wizard.forecastRequiredCarbs).formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor))
+            if (apsSnapshot != null && !manualWizardInput) {
+                val snapshot = apsSnapshot
+                binding.total.text = when {
+                    (snapshot.carbs ?: 0) > 0 -> HtmlHelper.fromHtml(
+                        rh.gs(R.string.missing_carbs, snapshot.carbs).formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor)
+                    )
+                    snapshot.unverifiedCarbWarning -> HtmlHelper.fromHtml(
+                        snapshot.requirementLabel.formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor)
+                    )
+                    snapshot.state != ApsDecisionSnapshot.State.CURRENT -> snapshot.requirementLabel
+                    else -> HtmlHelper.fromHtml(
+                        snapshot.insulin?.let {
+                            rh.gs(app.aaps.core.ui.R.string.format_insulin_units, it).formatColor(context, rh, app.aaps.core.ui.R.attr.bolusColor)
+                        } ?: rh.gs(app.aaps.core.ui.R.string.value_unavailable_short)
+                    )
+                }
                 binding.totalReason.visibility = View.VISIBLE
-                binding.totalReason.text = "Финальный прогноз ниже цели: калькулятор показывает ту же потребность в углеводах, что и главный экран."
+                binding.totalReason.text = snapshot.requirementExplanation
                 binding.okcancel.ok.visibility = View.INVISIBLE
                 binding.okcancel.ok.isEnabled = false
-            } else if (config.APS && !manualWizardInput && (loop.lastRun?.constraintsProcessed != null || apsForecastInsulinDeficit > 0.01)) {
-                val useForecastCorrection = apsForecastInsulinDeficit > apsInsulinReq + 0.1
-                val forecastCorrectionWizard = if (useForecastCorrection) {
-                    bolusWizardProvider.get().doCalc(
-                        specificProfile,
-                        profileName,
-                        tempTarget,
-                        0,
-                        0.0,
-                        0.0,
-                        apsForecastInsulinDeficit,
-                        preferences.get(IntKey.OverviewBolusPercentage),
-                        false,
-                        false,
-                        false,
-                        false,
-                        false,
-                        false,
-                        false,
-                        binding.alarm.isChecked,
-                        "AIMI_FORECAST_DEFICIT",
-                        0,
-                        selectedFoodType ?: "balanced",
-                        usePercentage = false,
-                        totalPercentage = 100.0,
-                        skipAimiMealAssist = true
-                    )
-                } else null
-                if (forecastCorrectionWizard != null) this@WizardDialog.wizard = forecastCorrectionWizard
-                val visibleInsulin = if (useForecastCorrection) (forecastCorrectionWizard?.insulinAfterConstraints ?: apsForecastInsulinDeficit) else apsInsulinReq
-                val insulinText = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, visibleInsulin)
-                    .formatColor(context, rh, app.aaps.core.ui.R.attr.bolusColor)
-                binding.total.text = HtmlHelper.fromHtml(if (useForecastCorrection) "Потребность по прогнозу: $insulinText" else "APS хочет: $insulinText")
-                binding.totalReason.visibility = View.VISIBLE
-                binding.totalReason.text =
-                    if (useForecastCorrection)
-                        "Это ручная correction-доза по финальному прогнозу. Автоподача APS может быть заблокирована, но OK подаст эту дозу через обычные ограничения болюса."
-                    else if (apsInsulinReq > 0.01)
-                        "Это автоматическое решение APS. Кнопка OK скрыта, потому что ручной калькулятор мог бы выполнить другой болюс."
-                    else
-                        "APS сейчас не хочет подавать дополнительный инсулин."
-                val correctionAfterConstraints = forecastCorrectionWizard?.insulinAfterConstraints ?: 0.0
-                binding.okcancel.ok.visibility = if (correctionAfterConstraints > 0.01) View.VISIBLE else View.INVISIBLE
-                binding.okcancel.ok.isEnabled = correctionAfterConstraints > 0.01
             } else if (wizard.calculatedTotalInsulin > 0.0 || carbsAfterConstraint > 0.0) {
                 val insulinText =
                     if (wizard.calculatedTotalInsulin > 0.0) rh.gs(app.aaps.core.ui.R.string.format_insulin_units, wizard.calculatedTotalInsulin)
@@ -739,7 +795,11 @@ class WizardDialog : DaggerDialogFragment() {
                 ) else ""
                 // Работаем со следующей строкой чтобы вывести на главное активити результат
                 binding.total.text = HtmlHelper.fromHtml(rh.gs(R.string.result_insulin_carbs, insulinText, carbsText))
-                if (wizard.calculatedTotalInsulin <= 0.0 && carbsAfterConstraint > 0.0 && wizard.insulinFromCarbs > 0.0) {
+                if (wizard.calculatedTotalInsulin <= 0.0 && wizard.forecastRequiredCarbs > 0 &&
+                    carbsAfterConstraint > 0 && carbsAfterConstraint <= wizard.forecastRequiredCarbs) {
+                    binding.totalReason.visibility = View.VISIBLE
+                    binding.totalReason.text = "Эти $carbsAfterConstraint г входят в текущую потребность ${wizard.forecastRequiredCarbs} г. Дополнительный инсулин не предложен."
+                } else if (wizard.calculatedTotalInsulin <= 0.0 && carbsAfterConstraint > 0.0 && wizard.insulinFromCarbs > 0.0) {
                     binding.totalReason.visibility = View.VISIBLE
                     binding.totalReason.text = rh.gs(
                         R.string.wizard_zero_bolus_reason,
@@ -750,6 +810,20 @@ class WizardDialog : DaggerDialogFragment() {
                 }
                 binding.okcancel.ok.visibility = View.VISIBLE
                 binding.okcancel.ok.isEnabled = !foodTypeMissing
+                if (foodTypeMissing) {
+                    binding.totalReason.visibility = View.VISIBLE
+                    binding.totalReason.text = "Выберите тип углеводов: быстрые, обычные или медленные."
+                }
+                if (wizard.insulinAfterConstraints > 0.0 && !wizard.hasConfirmationInputs) {
+                    binding.okcancel.ok.isEnabled = false
+                    binding.totalReason.visibility = View.VISIBLE
+                    binding.totalReason.text = "Не удалось прочитать данные для подтверждения дозы. Инсулин не будет отправлен; ошибка записана в журнал."
+                }
+                if (config.APS && wizard.calculatedTotalInsulin > 0.0 && aimiMealAssist.pendingTreatment() != null) {
+                    binding.okcancel.ok.isEnabled = false
+                    binding.totalReason.visibility = View.VISIBLE
+                    binding.totalReason.text = ApsDecisionSnapshot.fromLoop(loop, aimiMealAssist, persistenceLayer, dateUtil.now()).explanation
+                }
             } else {
                 // Здесь Не хватает углеводов выводится
                 binding.total.text = HtmlHelper.fromHtml(rh.gs(R.string.missing_carbs, wizard.forecastRequiredCarbs).formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor))
@@ -764,18 +838,6 @@ class WizardDialog : DaggerDialogFragment() {
 
     }
 
-    private fun apsInsulinReqFromLoop(): Double {
-        val value = loop.lastRun?.constraintsProcessed?.json()?.optDouble("insulinReq", 0.0) ?: 0.0
-        return if (java.lang.Double.isFinite(value)) value else 0.0
-    }
-
-    private fun apsForecastInsulinDeficitFromLoop(): Double {
-        val result = loop.lastRun?.constraintsProcessed
-        val rawValue = (result?.rawData() as? RT)?.finalForecastInsulinDeficit
-        val jsonValue = result?.json()?.optDouble("finalForecastInsulinDeficit", 0.0) ?: 0.0
-        val value = rawValue ?: jsonValue
-        return if (java.lang.Double.isFinite(value)) value else 0.0
-    }
 
     private fun updateCarbTimingHint(
         wizard: BolusWizard,
@@ -811,7 +873,10 @@ class WizardDialog : DaggerDialogFragment() {
         )
     }
 
-    private fun forecastRequiredCarbsFromFinalLine(profile: Profile, tempTarget: TT?, useTT: Boolean): Int {
+    private fun requiredCarbsForWizard(profile: Profile, tempTarget: TT?, useTT: Boolean, apsSnapshot: ApsDecisionSnapshot?): Int? {
+        // Use the same verified carbohydrate requirement as Overview and the empty wizard.
+        // Unknown is not zero: without a current APS value the wizard keeps its arithmetic fallback.
+        if (config.APS) return apsSnapshot?.carbs
         val now = dateUtil.now()
         if (finalForecastPendingTreatmentRecalculation(now, "Wizard forecast carbs")) return 0
         val targetMgdl = forecastCarbsTargetMgdl(profile, tempTarget, useTT) ?: return 0
@@ -835,40 +900,6 @@ class WizardDialog : DaggerDialogFragment() {
         return carbsReq
     }
 
-    private fun forecastInsulinDeficitFromFinalLine(profile: Profile, tempTarget: TT?, useTT: Boolean): Double {
-        val now = dateUtil.now()
-        val targetMgdl = forecastCarbsTargetMgdl(profile, tempTarget, useTT) ?: return 0.0
-        val values = freshFinalAimiPredictionValues()
-            .filter { it.timestamp >= now + T.mins(15).msecs() && it.value.isFinite() && it.value > 0.0 }
-        if (values.isEmpty()) return 0.0
-        val minForecast = values.minOf { it.value }
-        if (minForecast < targetMgdl || forecastRequiredCarbsFromFinalLine(profile, tempTarget, useTT) > 0) {
-            aapsLogger.debug(
-                LTag.APS,
-                "Wizard forecast insulin deficit suppressed: min=${"%.0f".format(minForecast)} target=${"%.0f".format(targetMgdl)}"
-            )
-            return 0.0
-        }
-        val peak = values.maxOf { it.value }
-        val isfMgdl = currentDecisionIsfMgdl(profile, "Wizard forecast insulin deficit")
-            .takeIf { it.isFinite() && it > 0.0 } ?: return 0.0
-        val deficit = if (peak > targetMgdl + 10.0) Round.roundTo((peak - targetMgdl) / isfMgdl, 0.01) else 0.0
-        aapsLogger.debug(
-            LTag.APS,
-            "Wizard forecast insulin deficit from AIMI_FINAL: deficit=${"%.2f".format(deficit)} " +
-                "peak=${"%.0f".format(peak)} target=${"%.0f".format(targetMgdl)} isf=${"%.1f".format(isfMgdl)}"
-        )
-        return deficit
-    }
-
-    private fun currentDecisionIsfMgdl(profile: Profile, caller: String): Double {
-        val decisionIsf = when {
-            config.APS        -> loop.lastRun?.request?.variableSens
-            config.AAPSCLIENT -> processedDeviceStatusData.getAPSResult()?.variableSens
-            else              -> null
-        }?.takeIf { it.isFinite() && it > 0.0 }
-        return decisionIsf ?: profile.getIsfMgdl(caller)
-    }
 
     private fun loopForecastCarbsReq(now: Long, caller: String): Int {
         var carbs = 0
@@ -904,18 +935,9 @@ class WizardDialog : DaggerDialogFragment() {
     }
 
     private fun finalForecastPendingTreatmentRecalculation(now: Long, caller: String): Boolean {
-        val lastRunTime = loop.lastRun?.lastAPSRun ?: return false
-        val lastCarbsChangeTime = persistenceLayer.getNewestCarbs()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
-        val lastBolusChangeTime = persistenceLayer.getNewestBolus()?.let { maxOf(it.timestamp, it.dateCreated) } ?: 0L
-        val lastAcceptedTreatmentTime = aimiMealAssist.lastTreatmentAcceptedAt()
-        val lastActivityChangeTime = latestAimiActivityChangeTime(now)
-        val latestTreatmentChangeTime = maxOf(lastCarbsChangeTime, lastBolusChangeTime, lastAcceptedTreatmentTime, lastActivityChangeTime)
-        if (latestTreatmentChangeTime <= lastRunTime) return false
-        aapsLogger.debug(
-            LTag.APS,
-            "$caller waits for treatment-aware APS recalculation: latestTreatment=${dateUtil.dateAndTimeString(latestTreatmentChangeTime)} " +
-                "lastAPS=${dateUtil.dateAndTimeString(lastRunTime)} now=${dateUtil.dateAndTimeString(now)}"
-        )
+        val snapshot = ApsDecisionSnapshot.fromLoop(loop, aimiMealAssist, persistenceLayer, now)
+        if (snapshot.carbs != null) return false
+        aapsLogger.debug(LTag.APS, "$caller: ${snapshot.state}")
         return true
     }
 
@@ -945,70 +967,8 @@ class WizardDialog : DaggerDialogFragment() {
         }
     }
 
-    private data class ActivityBolusContext(
-        val factor: Double,
-        val description: String
-    )
-
-    private fun futureActivityBolusContext(now: Long): ActivityBolusContext? {
-        val event = aimiActivityEvents(now)
-            .mapNotNull { event ->
-                val mode = tokenFromNote(event.note, "mode")?.uppercase() ?: return@mapNotNull null
-                val effect = activityEffectFraction(event, mode)
-                if (effect <= 0.0) return@mapNotNull null
-                val duration = (tokenFromNote(event.note, "duration")?.toLongOrNull() ?: (event.duration / T.mins(1).msecs()))
-                    .coerceAtLeast(0L)
-                val tail = (tokenFromNote(event.note, "tail")?.toLongOrNull() ?: 0L).coerceAtLeast(0L)
-                val start = event.timestamp
-                val activeEnd = start + T.mins(duration).msecs()
-                val tailEnd = activeEnd + T.mins(tail).msecs()
-                if (start > now + T.hours(2).msecs() || tailEnd < now - T.mins(5).msecs()) return@mapNotNull null
-                event to ActivityWindowForBolus(mode, effect, start, activeEnd, tailEnd, tail)
-            }
-            .minByOrNull { abs(it.first.timestamp - now) }
-            ?: return null
-
-        val window = event.second
-        val startOffset = ((window.start - now) / T.mins(1).msecs()).toInt()
-        val overlap = when {
-            now in window.start..window.activeEnd -> 1.0
-            now in (window.activeEnd + 1)..window.tailEnd && window.tailMinutes > 0L ->
-                ((window.tailEnd - now).toDouble() / T.mins(window.tailMinutes).msecs().toDouble()).coerceIn(0.0, 1.0)
-            startOffset in 1..75 -> 1.0
-            startOffset in 76..120 -> ((120 - startOffset).toDouble() / 45.0).coerceIn(0.0, 1.0)
-            else -> 0.0
-        }
-        if (overlap <= 0.0) return null
-
-        val factor = (1.0 - window.effectFraction * overlap).coerceIn(0.55, 1.0)
-        val phase = when {
-            now < window.start -> "старт через ${startOffset.coerceAtLeast(0)} мин"
-            now <= window.activeEnd -> "активна"
-            else -> "хвост"
-        }
-        return ActivityBolusContext(
-            factor = factor,
-            description = "${window.mode} $phase, новый инсулин x${"%.2f".format(factor)}"
-        )
-    }
-
-    private data class ActivityWindowForBolus(
-        val mode: String,
-        val effectFraction: Double,
-        val start: Long,
-        val activeEnd: Long,
-        val tailEnd: Long,
-        val tailMinutes: Long
-    )
-
-    private fun activityEffectFraction(event: TE, mode: String): Double {
-        tokenFromNote(event.note, "effect")?.toDoubleOrNull()?.let { return (it / 100.0).coerceIn(0.0, 0.45) }
-        return when (mode) {
-            "WALK"  -> 0.20
-            "SPORT" -> 0.30
-            else    -> 0.0
-        }
-    }
+    private fun futureActivityBolusContext(now: Long) =
+        app.aaps.core.objects.activity.ActivityBolusContextCalculator.calculate(aimiActivityEvents(now), now)
 
     private fun latestAimiActivityChangeTime(now: Long): Long =
         aimiActivityEvents(now)
@@ -1059,7 +1019,7 @@ class WizardDialog : DaggerDialogFragment() {
         return apsTarget ?: wizardTarget
     }
 
-    private fun refreshOverviewIfForecastCarbsChanged(forecastRequiredCarbs: Int) {
+    private fun refreshOverviewIfForecastCarbsChanged(forecastRequiredCarbs: Int?) {
         if (lastForecastRequiredCarbsOverviewRefresh == forecastRequiredCarbs) return
         lastForecastRequiredCarbsOverviewRefresh = forecastRequiredCarbs
         rxBus.send(EventRefreshOverview("WizardDialog forecast carbs", now = true))
@@ -1540,14 +1500,9 @@ class WizardDialog : DaggerDialogFragment() {
             append(currentSelectedFoodTypeLabel())
             append(".<br/>")
             if (decision != null) {
-                append("AIMI meal mode: <b>")
-                append(decision.mealMode)
-                append("</b>, factor ")
+                append("Коэффициент типа еды (factor): <b>")
                 append(decimalFormatter.to2Decimal(decision.modeFactor))
-                append(", prebolus ")
-                append(decimalFormatter.to2Decimal(decision.prebolusBonus))
-                append(" ед.<br/>")
-                append("Логика: базовая часть без carb-компонента + carb-компонент × factor + prebolus, затем ограничения болюса. Быстрые углеводы считаются как быстрое всасывание с осторожным покрытием bolus, а не как исчезающий до нуля всплеск.<br/>")
+                append("</b>.<br/>")
                 append("Результат AIMI: <b>")
                 append(rh.gs(app.aaps.core.ui.R.string.format_insulin_units, decision.recommendedBolus))
                 append("</b>. Объяснение: ")
@@ -1567,10 +1522,8 @@ class WizardDialog : DaggerDialogFragment() {
             "IOB" to GlossaryDefinition("IOB", "Insulin On Board — ещё действующий инсулин, который продолжает влиять на глюкозу."),
             "ISF" to GlossaryDefinition("ISF", "Insulin Sensitivity Factor — насколько 1 единица инсулина, по оценке системы, снижает глюкозу."),
             "IC" to GlossaryDefinition("IC", "Insulin to Carb ratio — сколько граммов углеводов покрывает 1 единица инсулина."),
-            "prebolus" to GlossaryDefinition("prebolus", "Часть стратегии до еды. Для быстрых углеводов он выключается, для медленной еды ослабляется."),
-            "factor" to GlossaryDefinition("factor", "Множитель carb-компонента. На него влияет meal mode AIMI и выбранный тип еды."),
+            "factor" to GlossaryDefinition("factor", "Множитель пищевой части по выбранному типу еды. Он не зависит от времени суток и настроек ручных режимов завтрака, обеда или ужина."),
             "тип еды" to GlossaryDefinition("Тип еды", "Переключатель carb-модели. Быстрые углеводы всасываются рано и покрываются осторожнее, обычная еда оставляет базовую форму, медленная растягивает влияние углеводов во времени."),
-            "meal mode" to GlossaryDefinition("meal mode", "Контекст еды, который AIMI определяет по размеру приёма пищи и времени суток: snack, breakfast, lunch, dinner, meal, highcarb."),
             "target" to GlossaryDefinition("Target", "Целевая зона глюкозы, к которой AIMI старается вести расчёт.")
         )
     }
@@ -1615,6 +1568,7 @@ class WizardDialog : DaggerDialogFragment() {
 
     override fun onResume() {
         super.onResume()
+        refreshCalculation()
         if (!queryingProtection) {
             queryingProtection = true
             activity?.let { activity ->

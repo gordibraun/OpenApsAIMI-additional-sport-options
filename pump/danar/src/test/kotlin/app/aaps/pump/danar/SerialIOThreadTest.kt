@@ -1,7 +1,8 @@
-package app.aaps.pump.danar
+package app.aaps.pump.danaR
 
 import android.bluetooth.BluetoothSocket
 import app.aaps.pump.dana.DanaPump
+import app.aaps.pump.danar.SerialIOThread
 import app.aaps.pump.danar.comm.MessageBase
 import app.aaps.pump.danar.comm.MessageHashTableBase
 import app.aaps.shared.tests.TestBase

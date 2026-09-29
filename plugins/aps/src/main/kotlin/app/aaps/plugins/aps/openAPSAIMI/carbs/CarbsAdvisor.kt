@@ -17,7 +17,8 @@ object CarbsAdvisor {
         cob: Double
     ): Int {
         val timeAhead = 20.0
-        val projectedDrop = slope * timeAhead
+        // Slope is signed: a negative trend lowers future glucose, not the estimated drop.
+        val projectedDrop = -slope * timeAhead
         val insulinEffect = iob * isf
         val totalPredictedDrop = projectedDrop + insulinEffect
         val futureBG = bg - totalPredictedDrop

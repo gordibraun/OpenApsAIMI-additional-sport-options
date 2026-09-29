@@ -38,6 +38,7 @@ class BasalLearner @Inject constructor(
     private var lastShortUpdate = 0L
     private var lastMediumUpdate = 0L
     private var lastLongUpdate = 0L
+    private var lastObservationTime = 0L
 
     // === Accumulators for each scale ===
     private val shortTermBuffer = mutableListOf<TimestampedBg>()
@@ -88,15 +89,25 @@ class BasalLearner @Inject constructor(
     /**
      * Main processing function. Called every 5 minutes from DetermineBasalAIMI2.
      */
+    @Synchronized
     fun process(
         currentBg: Double,
         currentDelta: Double,
         tdd7Days: Double,
         tdd30Days: Double,
-        isFastingTime: Boolean
-    ) {
-        val now = System.currentTimeMillis()
-        val observation = TimestampedBg(now, currentBg, currentDelta)
+        isFastingTime: Boolean,
+        observationTime: Long,
+        now: Long,
+        skipReason: String?
+    ): String {
+        if (skipReason != null) return "Обучение базала пропущено: $skipReason."
+        if (observationTime <= lastObservationTime) return "Обучение базала пропущено: это измерение уже учтено."
+        if (observationTime <= 0 || now - observationTime !in 0..12 * 60_000L ||
+            !currentBg.isFinite() || !currentDelta.isFinite() || currentBg <= 39.0) {
+            return "Обучение базала пропущено: недостоверное измерение."
+        }
+        lastObservationTime = observationTime
+        val observation = TimestampedBg(observationTime, currentBg, currentDelta)
 
         // Add to buffers
         shortTermBuffer.add(observation)
@@ -125,7 +136,7 @@ class BasalLearner @Inject constructor(
             fastingBgSum += currentBg
         }
 
-        if (now - lastLongUpdate >= LONG_INTERVAL_MS) {
+        if (now - lastLongUpdate >= LONG_INTERVAL_MS && fastingSamples > 10) {
             updateLongTerm(tdd7Days, tdd30Days)
             lastLongUpdate = now
             // Reset fasting accumulators
@@ -135,6 +146,7 @@ class BasalLearner @Inject constructor(
         }
 
         save()
+        return "Обучение базала: учтено одно измерение без известных влияний еды, болюса, временного базала и нагрузки."
     }
 
     /**
@@ -221,7 +233,7 @@ class BasalLearner @Inject constructor(
         var adjustment = 1.0
 
         // TDD Trend Analysis
-        if (tdd30Days > 0) {
+        if (tdd30Days.isFinite() && tdd30Days > 0 && tdd7Days.isFinite() && tdd7Days > 0) {
             val tddRatio = tdd7Days / tdd30Days
             adjustment *= when {
                 tddRatio > 1.15 -> 1.10  // Significant increase in insulin needs
@@ -245,7 +257,8 @@ class BasalLearner @Inject constructor(
         val newValue = longTermMultiplier * adjustment
         longTermMultiplier = ema(longTermMultiplier, newValue, ALPHA_LONG).coerceIn(CLAMP_MIN, CLAMP_MAX)
 
-        log.info(LTag.APS, "BasalLearner: Long-term update. TDD7/30=${"%.2f".format(tdd7Days/max(1.0, tdd30Days))}, " +
+        val tddTrend = if (tdd30Days.isFinite() && tdd30Days > 0) "%.2f".format(tdd7Days / tdd30Days) else "unavailable"
+        log.info(LTag.APS, "BasalLearner: Long-term update. TDD7/30=$tddTrend, " +
             "AvgFastingBG=${"%.0f".format(avgFastingBg)}, FastingSlope=${"%.2f".format(fastingScore)}, " +
             "NewMultiplier=${"%.3f".format(longTermMultiplier)}")
     }
@@ -304,6 +317,7 @@ class BasalLearner @Inject constructor(
                 lastShortUpdate = json.optLong("lastShortUpdate", 0L)
                 lastMediumUpdate = json.optLong("lastMediumUpdate", 0L)
                 lastLongUpdate = json.optLong("lastLongUpdate", 0L)
+                lastObservationTime = json.optLong("lastObservationTime", 0L)
                 log.info(LTag.APS, "BasalLearner: Loaded multipliers S=${"%.3f".format(shortTermMultiplier)} " +
                     "M=${"%.3f".format(mediumTermMultiplier)} L=${"%.3f".format(longTermMultiplier)}")
             }
@@ -321,6 +335,7 @@ class BasalLearner @Inject constructor(
             json.put("lastShortUpdate", lastShortUpdate)
             json.put("lastMediumUpdate", lastMediumUpdate)
             json.put("lastLongUpdate", lastLongUpdate)
+            json.put("lastObservationTime", lastObservationTime)
             file.writeText(json.toString())
         } catch (e: Exception) {
             log.error(LTag.APS, "Error saving BasalLearner data", e)

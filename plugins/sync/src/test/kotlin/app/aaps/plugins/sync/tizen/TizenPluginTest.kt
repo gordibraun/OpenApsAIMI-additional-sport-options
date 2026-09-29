@@ -103,7 +103,7 @@ internal class TizenPluginTest : TestBaseWithProfile() {
         assertThat(bundle.containsKey("tempBasalDurationInMinutes")).isTrue()
         assertThat(bundle.containsKey("tempBasalString")).isTrue()
         assertThat(bundle.containsKey("pumpTimeStamp")).isTrue()
-        assertThat(bundle.containsKey("pumpBattery")).isTrue()
+        assertThat(bundle.containsKey("pumpBattery")).isFalse() // Test pump has no battery reading.
         assertThat(bundle.containsKey("pumpReservoir")).isTrue()
         assertThat(bundle.containsKey("pumpStatus")).isTrue()
     }
@@ -142,7 +142,7 @@ internal class TizenPluginTest : TestBaseWithProfile() {
         assertThat(bundle.containsKey("tempBasalDurationInMinutes")).isTrue()
         assertThat(bundle.containsKey("tempBasalString")).isTrue()
         assertThat(bundle.containsKey("pumpTimeStamp")).isTrue()
-        assertThat(bundle.containsKey("pumpBattery")).isTrue()
+        assertThat(bundle.containsKey("pumpBattery")).isFalse()
         assertThat(bundle.containsKey("pumpReservoir")).isTrue()
         assertThat(bundle.containsKey("pumpStatus")).isTrue()
     }

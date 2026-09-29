@@ -300,8 +300,8 @@ class CommandQueueImplementation @Inject constructor(
                     action = Action.CARBS,
                     source = Sources.Database
                 ).subscribe(
-                    { callback?.result(pumpEnactResultProvider.get().enacted(false).success(true))?.run() },
-                    { callback?.result(pumpEnactResultProvider.get().enacted(false).success(false))?.run() }
+                    { callback?.onCarbsStored(pumpEnactResultProvider.get().enacted(false).success(true)) },
+                    { callback?.onCarbsStored(pumpEnactResultProvider.get().enacted(false).success(false)) }
                 )
             }
             // Do not process carbs anymore

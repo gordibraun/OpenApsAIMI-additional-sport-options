@@ -185,6 +185,7 @@ object OKDialog {
                     runOnUiThread(cancel)
                 }
             }
+            .setOnCancelListener { if (!okClicked) runOnUiThread(cancel) }
             .show()
             .setCanceledOnTouchOutside(false)
     }
@@ -250,7 +251,7 @@ object OKDialog {
     }
 
     @SuppressLint("InflateParams")
-    fun showYesNoCancel(context: Context, title: String, message: String, yes: Runnable?, no: Runnable? = null) {
+    fun showYesNoCancel(context: Context, title: String, message: String, yes: Runnable?, no: Runnable? = null, cancel: Runnable? = null) {
         var okClicked = false
         MaterialAlertDialogBuilder(context, R.style.DialogTheme)
             .setMessage(message)
@@ -274,8 +275,12 @@ object OKDialog {
                 }
             }
             .setNeutralButton(R.string.cancel) { dialog: DialogInterface, _: Int ->
+                if (okClicked) return@setNeutralButton
+                okClicked = true
                 dialog.dismiss()
+                runOnUiThread(cancel)
             }
+            .setOnCancelListener { if (!okClicked) runOnUiThread(cancel) }
             .show()
             .setCanceledOnTouchOutside(false)
     }

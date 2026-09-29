@@ -992,6 +992,7 @@ class ComboV2Plugin @Inject constructor(
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     override fun deliverTreatment(detailedBolusInfo: DetailedBolusInfo): PumpEnactResult {
         // Insulin value must be greater than 0
         require(detailedBolusInfo.carbs == 0.0) { detailedBolusInfo.toString() }
@@ -1048,23 +1049,19 @@ class ComboV2Plugin @Inject constructor(
         // Run the delivery in a sub-coroutine to be able
         // to cancel it via stopBolusDelivering().
         val newBolusJob = pumpCoroutineScope.async {
-            // NOTE: Above, we take a local reference to the acquired Pump instance,
-            // with a check that throws an exception in case the "pump" member is
-            // null. This local reference is particularly important inside this
-            // coroutine, because the "pump" member is set to null in case of an
-            // error or other disconnect reason (see disconnectInternal()). However,
-            // we still need to access the last delivered bolus inside this coroutine
-            // from the pump's lastBolusFlow, even if an error happened. Accessing
-            // it through the "pump" member would then result in an NPE. This is
-            // solved by instead accessing the lastBolusFlow through the local
-            // "acquiredPump" reference.
-
+            var deliveredBolus: ComboCtlPump.LastBolus? = null
             try {
                 executeCommand {
-                    acquiredPump.deliverBolus(requestedBolusAmount, bolusReason)
+                    acquiredPump.deliverBolus(requestedBolusAmount, bolusReason, onStandardBolusRecorded = {
+                        deliveredBolus = it
+                        detailedBolusInfo.bolusTimestamp = it.timestamp.toEpochMilliseconds()
+                    })
                 }
 
-                reportFinishedBolus(rh.gs(app.aaps.core.interfaces.R.string.bolus_delivered_successfully, detailedBolusInfo.insulin), detailedBolusInfo.id, pumpEnactResult, succeeded = true)
+                if (deliveredBolus != null)
+                    reportFinishedBolus(rh.gs(app.aaps.core.interfaces.R.string.bolus_delivered_successfully, detailedBolusInfo.insulin), detailedBolusInfo.id, pumpEnactResult, succeeded = true)
+                else
+                    reportFinishedBolus(R.string.combov2_bolus_delivery_failed, detailedBolusInfo.id, pumpEnactResult, succeeded = false)
             } catch (e: CancellationException) {
                 // Cancellation is not an error, but it also means
                 // that the profile update was not enacted.
@@ -1096,11 +1093,12 @@ class ComboV2Plugin @Inject constructor(
                 aapsLogger.error(LTag.PUMP, "Exception thrown during bolus delivery: $e")
                 reportFinishedBolus(R.string.combov2_bolus_delivery_failed, detailedBolusInfo.id, pumpEnactResult, succeeded = false)
             } finally {
-                // The delivery was enacted if even a partial amount was infused.
-                acquiredPump.lastBolusFlow.value?.also {
+                // A cached last bolus may belong to an earlier command; use this command's receipt only.
+                deliveredBolus?.also {
                     pumpEnactResult.enacted = (it.bolusAmount > 0)
                     pumpEnactResult.bolusDelivered = it.bolusAmount.cctlBolusToIU()
                 } ?: run {
+                    pumpEnactResult.success = false
                     pumpEnactResult.enacted = false
                     pumpEnactResult.bolusDelivered = 0.0
                 }

@@ -131,7 +131,8 @@ class DataHandlerMobile @Inject constructor(
     private val importExportPrefs: ImportExportPrefs,
     private val decimalFormatter: DecimalFormatter,
     private val bolusWizardProvider: Provider<BolusWizard>,
-    private val pumpStatusProvider: PumpStatusProvider
+    private val pumpStatusProvider: PumpStatusProvider,
+    private val watchControlHandler: WatchControlHandler
 ) {
 
     @Inject lateinit var automation: Automation
@@ -141,6 +142,10 @@ class DataHandlerMobile @Inject constructor(
     private var lastQuickWizardEntry: QuickWizardEntry? = null
 
     init {
+        disposable += rxBus.toObservable(EventData.WatchControlRequest::class.java)
+            .observeOn(aapsSchedulers.io).subscribe({ watchControlHandler.preview(it) }, fabricPrivacy::logException)
+        disposable += rxBus.toObservable(EventData.WatchControlConfirmed::class.java)
+            .observeOn(aapsSchedulers.io).subscribe({ watchControlHandler.confirm(it) }, fabricPrivacy::logException)
         // From Wear
         disposable += rxBus
             .toObservable(EventData.ActionPong::class.java)
@@ -1381,11 +1386,16 @@ class DataHandlerMobile @Inject constructor(
 
     // активность Exercise mode dвыделение - true, если сейчас активен Exercise Mode (TT c reason = ACTIVITY)
     private fun isExerciseModeActive(): Boolean {
-        val tt = persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())
-        return tt?.reason == TT.Reason.ACTIVITY
+        val now = dateUtil.now()
+        val tt = persistenceLayer.getTemporaryTargetActiveAt(now)
+        if (tt?.reason == TT.Reason.ACTIVITY) return true
+        return persistenceLayer.getTherapyEventDataFromTime(now - T.hours(12).msecs(), app.aaps.core.data.model.TE.Type.EXERCISE, false)
+            .any { it.isValid && it.timestamp <= now &&
+                (app.aaps.core.objects.activity.ActivityPlanCalculator.endWithTail(it.timestamp, it.duration, it.note) ?: 0) >= now }
     }
 
     private fun sendStatus(caller: String) {
+        rxBus.send(EventMobileToWear(EventData.WatchControlCapabilities(protocol = 2)))
         val profile = profileFunction.getProfile()
         var status = rh.gs(app.aaps.core.ui.R.string.noprofile)
         var iobSum = ""

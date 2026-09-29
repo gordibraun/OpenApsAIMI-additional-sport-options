@@ -41,7 +41,7 @@ class BasalPlanner @Inject constructor(
 
     private val MAX_MULT = 1.60               // plafond: 1.6× profil
 
-    fun plan(ctx: LoopContext): BasalPlan? {
+    fun plan(ctx: LoopContext, onChoice: (String) -> Unit = {}): BasalPlan? {
         val mgdl = ctx.bg.mgdl
         val d5 = ctx.bg.delta5
         val short = ctx.bg.shortAvgDelta ?: d5
@@ -61,7 +61,7 @@ class BasalPlanner @Inject constructor(
         val lastTempIsZero = hist.lastTempIsZero()
         val minutesSinceLastChange = hist.minutesSinceLastChange()
 
-        if (profileBasal <= 0.0) return null
+        if (profileBasal <= 0.0) { onChoice("next"); return null }
 
         val belowTarget = mgdl < target
         val forecastNotClearlyAboveTarget = ctx.eventualBg <= target + 5.0
@@ -78,6 +78,7 @@ class BasalPlanner @Inject constructor(
         // 1) Hypo guard / suspend
         // A) Hard limit : BG <= 60 -> Suspend immédiat
         if (mgdl <= HYPO_HARD_LIMIT) {
+            onChoice("hard_low")
             return BasalPlan(
                 rateUph = 0.0,
                 durationMin = HYPO_SUSPEND_MIN,
@@ -90,6 +91,7 @@ class BasalPlanner @Inject constructor(
         //    - Si stable/hausse (d5 >= 0) -> Micro-resume (50%) pour éviter le rebond
         if (mgdl <= HYPO_SUSPEND_MGDL) {
             if (d5 < 0.0) {
+                onChoice("soft_fall")
                 return BasalPlan(
                     rateUph = 0.0,
                     durationMin = HYPO_SUSPEND_MIN,
@@ -99,6 +101,7 @@ class BasalPlanner @Inject constructor(
                 // Trend positif ou plat -> on maintient un filet de basal
                 val safeRate = max(0.05, profileBasal * 0.5)
                 val rate = clampAndQuantize(safeRate, profileBasal, maxBasal, step)
+                onChoice("soft_rise")
                 return BasalPlan(
                     rateUph = rate,
                     durationMin = HYPO_SUSPEND_MIN,
@@ -110,11 +113,13 @@ class BasalPlanner @Inject constructor(
         // 2) Micro-resume après 0 basal prolongé
         if (lastTempIsZero && zeroSinceMin >= ZERO_RESUME_MIN) {
             if (conservativeBelowTarget && d5 < 1.5 && short < 1.0) {
+                onChoice("next")
                 return null
             }
             val base = max(KICK_MIN_UPH, profileBasal * ZERO_RESUME_FRAC)
             val rate = clampAndQuantize(base, profileBasal, maxBasal, step)
             val dur = min(ZERO_RESUME_MAX_MIN, max(minDur, minutesSinceLastChange / 2))
+            onChoice("resume")
             return BasalPlan(
                 rateUph = rate,
                 durationMin = dur,
@@ -130,6 +135,7 @@ class BasalPlanner @Inject constructor(
             val baseKick = max(KICK_MIN_UPH, profileBasal * (1.0 + KICK_FRAC))
             val rate = clampAndQuantize(baseKick, profileBasal, maxBasal, step)
             val dur = max(minDur, KICK_MINUTES)
+            onChoice("plateau")
             return BasalPlan(
                 rateUph = rate,
                 durationMin = dur,
@@ -142,6 +148,7 @@ class BasalPlanner @Inject constructor(
         if (nearFlat && d5 < DELTA_POS_RELEASE && mgdl >= target && ctx.eventualBg >= target + 5.0 && !loadedWithoutFood) {
             val base = profileBasal * (1.0 + ANTI_STALL_FRAC)
             val rate = clampAndQuantize(base, profileBasal, maxBasal, step)
+            onChoice("stall")
             return BasalPlan(
                 rateUph = rate,
                 durationMin = minDur,
@@ -150,6 +157,7 @@ class BasalPlanner @Inject constructor(
         }
 
         // Sinon : pas d'action prioritaire → laisser le moteur principal décider
+        onChoice("next")
         return null
     }
 

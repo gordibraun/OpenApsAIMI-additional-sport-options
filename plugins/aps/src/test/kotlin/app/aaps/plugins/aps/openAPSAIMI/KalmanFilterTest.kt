@@ -8,7 +8,7 @@ import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 class KalmanFilterTest {
 
@@ -36,6 +36,7 @@ class KalmanFilterTest {
         
         // Mock TDD
         every { preferences.get(DoubleKey.OApsAIMITDD7) } returns 50.0
+        every { tddCalculator.averageTDD(any()) } returns null
         // Mock TDD calculator to return null so it falls back to prefs or just mock it to return something
         // The code calls tddCalculator.averageTDD(...)
         // Let's just rely on the fallback to TDD7P which is 50.0
@@ -60,6 +61,7 @@ class KalmanFilterTest {
         val preferences = mockk<Preferences>(relaxed = true)
         val logger = mockk<AAPSLogger>(relaxed = true)
         every { preferences.get(DoubleKey.OApsAIMITDD7) } returns 50.0
+        every { tddCalculator.averageTDD(any()) } returns null
         val calculator = KalmanISFCalculator(tddCalculator, preferences, logger)
 
         val incidentSequence = listOf(

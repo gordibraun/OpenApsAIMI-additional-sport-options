@@ -57,8 +57,7 @@ fun app.aaps.database.entities.APSResult.fromDb(apsResultProvider: Provider<APSR
             apsResultProvider.get().with(Json.decodeFromString(this.resultJson)).also { result ->
                 result.date = this.timestamp
                 result.glucoseStatus = try {
-                    // Si AIMI a un GlucoseStatus spécifique, remplace par Json.decodeFromString<GlucoseStatusAimi>(it)
-                    this.glucoseStatusJson?.let { Json.decodeFromString<GlucoseStatusSMB>(it) }
+                    this.glucoseStatusJson?.let { Json.decodeFromString<GlucoseStatusAIMI>(it) }
                 } catch (_: Exception) {
                     null
                 }

@@ -85,7 +85,7 @@ internal object RecentSmbOverdeliveryGuard {
             CorrectionLimit(
                 maxSmbU = allowed,
                 reason = "расчет SMB приглушен: нет активной еды" +
-                    if (input.nightNoMeal) "/ночь" else "" +
+                    (if (input.nightNoMeal) "/ночь" else "") +
                     ", лимит ${"%.2f".format(highBgLimit)}U→${"%.2f".format(allowed)}U, " +
                     "15м=${"%.2f".format(input.recentSmb15U)}U, " +
                     "30м=${"%.2f".format(input.recentSmb30U)}U, " +
@@ -165,7 +165,7 @@ internal object RecentSmbOverdeliveryGuard {
 
     private fun unsafeForecastBlockReason(input: Input, highBgLimit: Double): String? {
         val forecastFloor = listOf(input.eventualBg, input.predictedBg, input.minGuardBg)
-            .filter { it.isFinite() && it > 0.0 }
+            .filter { it.isFinite() }
             .minOrNull() ?: return null
         val target = if (input.targetBg.isFinite() && input.targetBg > 0.0) input.targetBg else 117.0
         val forecastBelowTarget = forecastFloor <= max(70.0, target - 15.0)

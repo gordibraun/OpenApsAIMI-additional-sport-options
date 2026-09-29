@@ -6,7 +6,7 @@ import io.mockk.mockk
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 class BasalHistoryUtilsTest {
 
@@ -21,13 +21,13 @@ class BasalHistoryUtilsTest {
         // 2. Non-zero before that
         val tbZero = mockk<TB>(relaxed = true)
         every { tbZero.timestamp } returns now - 10 * 60000
-        every { tbZero.duration } returns 10
+        every { tbZero.duration } returns 10 * 60_000L
         every { tbZero.isAbsolute } returns true
         every { tbZero.rate } returns 0.0
 
         val tbNormal = mockk<TB>(relaxed = true)
         every { tbNormal.timestamp } returns now - 20 * 60000
-        every { tbNormal.duration } returns 10
+        every { tbNormal.duration } returns 10 * 60_000L
         every { tbNormal.isAbsolute } returns true
         every { tbNormal.rate } returns 1.0
 
@@ -46,7 +46,7 @@ class BasalHistoryUtilsTest {
         // Case 1: Active zero temp
         val tbZero = mockk<TB>(relaxed = true)
         every { tbZero.timestamp } returns now - 5 * 60000
-        every { tbZero.duration } returns 30 // Active
+        every { tbZero.duration } returns 30 * 60_000L // TB stores milliseconds, not minutes.
         every { tbZero.isAbsolute } returns true
         every { tbZero.rate } returns 0.0
 
@@ -56,7 +56,7 @@ class BasalHistoryUtilsTest {
         // Case 2: Active non-zero temp
         val tbNormal = mockk<TB>(relaxed = true)
         every { tbNormal.timestamp } returns now - 5 * 60000
-        every { tbNormal.duration } returns 30
+        every { tbNormal.duration } returns 30 * 60_000L
         every { tbNormal.isAbsolute } returns true
         every { tbNormal.rate } returns 1.0
 

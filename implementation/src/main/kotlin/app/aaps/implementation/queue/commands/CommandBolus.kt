@@ -38,7 +38,10 @@ class CommandBolus(
 
     override fun execute() {
         val r = activePlugin.activePump.deliverTreatment(detailedBolusInfo)
-        if (r.success) carbsRunnable.run()
+        // Entered food must survive a failed pump response. Publish the separate insulin
+        // receipt first so even synchronous carb persistence cannot credit a requested dose.
+        callback?.result(r)
+        carbsRunnable.run()
         BolusProgressData.bolusEnded = true
         rxBus.send(EventDismissBolusProgressIfRunning(r.success, detailedBolusInfo.id))
         aapsLogger.debug(LTag.PUMPQUEUE, "Result success: ${r.success} enacted: ${r.enacted}")

@@ -29,7 +29,7 @@ interface Kernel {
     fun actionAt(minFromDose: Double, p: PkPdParams): Double
 
     /** Remaining IOB fraction. */
-    fun iobResidual(minFromDose: Double, p: PkPdParams): Double = 1.0 - cdf(minFromDose, p)
+    fun iobResidual(minFromDose: Double, p: PkPdParams): Double = 1.0 - normalizedCdf(minFromDose, p)
 
     /** CDF of the insulin action (0..1). */
     fun cdf(minFromDose: Double, p: PkPdParams): Double
@@ -38,10 +38,11 @@ interface Kernel {
 /** Log-normal kernel parameterised by peak time and DIA. */
 class LogNormalKernel : Kernel {
     override fun actionAt(minFromDose: Double, p: PkPdParams): Double {
-        if (minFromDose <= 0.0) return 0.0
+        if (minFromDose <= 0.0 || minFromDose >= p.diaHrs * 60.0) return 0.0
         val tp = p.peakMin
         val sigma = 0.45
-        val mu = ln(tp) - sigma * sigma
+        // The mode is exp(mu - sigma^2), not exp(mu + sigma^2).
+        val mu = ln(tp) + sigma * sigma
         val x = minFromDose
         val pdf = (1.0 / (x * sigma * sqrt(2.0 * PI))) * exp(-(ln(x) - mu).pow(2) / (2.0 * sigma * sigma))
         val scale = 1.0 / cdf(p.diaHrs * 60.0, p)
@@ -52,7 +53,7 @@ class LogNormalKernel : Kernel {
         if (minFromDose <= 0.0) return 0.0
         val tp = p.peakMin
         val sigma = 0.45
-        val mu = ln(tp) - sigma * sigma
+        val mu = ln(tp) + sigma * sigma
         val z = (ln(minFromDose) - mu) / (sigma * sqrt(2.0))
         return 0.5 * (1 + erf(z))
     }

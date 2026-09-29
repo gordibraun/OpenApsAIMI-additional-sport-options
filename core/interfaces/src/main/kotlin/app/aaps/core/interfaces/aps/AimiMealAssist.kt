@@ -66,4 +66,10 @@ interface AimiMealAssist {
     fun markTreatmentAccepted(timestamp: Long) {}
     fun clearPendingTreatment() {}
     fun lastTreatmentAcceptedAt(): Long = 0L
+    fun pendingTreatment(): PendingWizardTreatment? = null
+    fun beginTreatment(treatment: PendingWizardTreatment): Boolean = false
+    fun completeTreatment(acceptedAt: Long, bolusTimestamp: Long, deliveredInsulin: Double, success: Boolean) {}
+    fun acknowledgeTreatment(iob: IobTotal?, meal: MealData?) {}
+    fun rejectTreatment(acceptedAt: Long) {}
+    fun confirmManualTreatmentReview(acceptedAt: Long, reviewedAt: Long): Boolean = false
 }

@@ -23,6 +23,9 @@ class MainMenuActivity : MenuListActivity() {
 
     override fun provideElements(): List<MenuItem> =
         ArrayList<MenuItem>().apply {
+            add(MenuItem(R.drawable.ic_carbs, "Углеводы"))
+            add(MenuItem(R.drawable.ic_bolus, "Инсулин"))
+            add(MenuItem(R.drawable.ic_target_activity, "Нагрузка"))
             if (!preferences.get(BooleanKey.WearControl)) {
                 add(MenuItem(R.drawable.ic_settings, getString(R.string.menu_settings)))
                 add(MenuItem(R.drawable.ic_sync, getString(R.string.menu_resync)))
@@ -42,6 +45,8 @@ class MainMenuActivity : MenuListActivity() {
 
     override fun doAction(position: String) {
         when (position) {
+            "Углеводы", "Инсулин", "Нагрузка" -> startActivity(Intent(this, app.aaps.wear.interaction.actions.WatchControlActivity::class.java)
+                .putExtra("kind", when (position) { "Инсулин" -> "INSULIN"; "Нагрузка" -> "ACTIVITY"; else -> "CARBS" }))
             getString(R.string.menu_settings)         -> startActivity(Intent(this, PreferenceMenuActivity::class.java).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
             getString(R.string.menu_resync)           -> rxBus.send(EventWearToMobile(ActionResendData("Re-Sync")))
             getString(R.string.status_profile_switch) -> rxBus.send(EventWearToMobile(EventData.ActionProfileSwitchSendInitialData(System.currentTimeMillis())))

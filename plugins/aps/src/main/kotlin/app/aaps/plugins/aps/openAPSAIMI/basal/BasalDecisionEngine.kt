@@ -95,7 +95,8 @@ class BasalDecisionEngine @Inject constructor(
     fun decide(
         input: Input,
         rT: RT,
-        helpers: Helpers
+        helpers: Helpers,
+        onBranch: (String, String, String, String, Double?) -> Unit = { _, _, _, _, _ -> }
     ): Decision {
         // ===== 0) BasalPlanner d'abord (avec tes modèles LoopContext / BgSnapshot / PumpCaps etc.) =====
         run {
@@ -154,7 +155,10 @@ class BasalDecisionEngine @Inject constructor(
                 nowEpochMillis = System.currentTimeMillis()
             )
 
-            basalPlanner.plan(ctx)?.let { plan ->
+            basalPlanner.plan(ctx) { outcome ->
+                onBranch("basal_planner", outcome, "Приоритетный выбор базала",
+                    "Глюкоза=${input.bg}; изменение=${input.delta}; цель=${input.targetBg}; прогноз=${input.eventualBg}", null)
+            }?.let { plan ->
                 rT.duration = plan.durationMin
                 rT.reason.append(" | BasalPlanner: ").append(plan.reason)
                 return Decision(
@@ -198,6 +202,8 @@ class BasalDecisionEngine @Inject constructor(
                 minutesSinceLastChange = minutesSinceLastChange
             )
             val aimiDecision = aimiAdaptiveBasal.suggest(inAimi)
+            onBranch("basal_adaptive", if (aimiDecision.rateUph == null) "none" else "candidate",
+                "Кандидат адаптивного базала", aimiDecision.reason, aimiDecision.rateUph)
             aimiDecision.rateUph?.let { candidate ->
                 val dur = aimiDecision.durationMin
                 if (chosenRate == null) {
@@ -215,6 +221,18 @@ class BasalDecisionEngine @Inject constructor(
             }
         }
 
+        if (input.glucoseStatus == null) onBranch("basal_adaptive", "none", "Кандидата нет", "Нет структуры тренда глюкозы", null)
+        fun tryRules(id: String, title: String, rules: () -> Unit) {
+            if (chosenRate != null) {
+                onBranch(id, "skipped", title, "Базал уже выбран предыдущим правилом", chosenRate)
+                return
+            }
+            val reasonStart = rT.reason.length
+            rules()
+            onBranch(id, if (chosenRate == null) "unchanged" else "selected", title,
+                rT.reason.substring(reasonStart), chosenRate)
+        }
+
         // ===== 3) … le reste de ta logique (inchangée) =====
         val inMealFirst30 = input.isMealActive && input.runtimeMinValue in 0..30
         if (input.safetyDecision.basalLS &&
@@ -224,9 +242,12 @@ class BasalDecisionEngine @Inject constructor(
             !inMealFirst30 &&
             !input.forcedMealActive
         ) {
+            onBranch("basal_rules", "profile", "Защитный возврат к базалу профиля", "basalLS; стабильный тренд и прогноз > 130", input.profileCurrentBasal)
             return Decision(input.profileCurrentBasal, 30, false)
         }
 
+        var modeRuleMatched = true
+        val modeReasonStart = rT.reason.length
         if (helpers.detectMealOnset(
                 input.delta.toFloat(),
                 input.delta.toFloat(), // predictedDelta placeholder
@@ -253,11 +274,13 @@ class BasalDecisionEngine @Inject constructor(
                 input.honeymoon && input.delta in 0.0..6.0 && input.bg in 99.0..141.0 -> helpers.calculateRate(input.profileCurrentBasal, input.profileCurrentBasal, input.delta, "Honeymoon")
                 input.bg in 81.0..99.0 && input.delta in 3.0..7.0 && input.honeymoon -> helpers.calculateRate(input.basalEstimate, input.profileCurrentBasal, 1.0, "Honeymoon small-rise")
                 input.bg > 120 && input.delta > 0 && input.smbToGive == 0.0 && input.honeymoon -> helpers.calculateRate(input.basalEstimate, input.profileCurrentBasal, 5.0, "Honeymoon corr.")
-                else -> chosenRate
+                else -> chosenRate.also { modeRuleMatched = false }
             }
         }
 
-        if (chosenRate == null) {
+        onBranch("basal_rules", if (modeRuleMatched) "selected" else "unchanged", "Режим еды, спорта, голодания или ремиссии",
+            rT.reason.substring(modeReasonStart), chosenRate)
+        tryRules("basal.low_prediction", "Низкий прогноз и избыток инсулина") {
             val predictedLow = input.predictedBg < 80 && input.mealData.slopeFromMaxDeviation <= 0
             val highIobStop = input.iob > input.maxIob && !input.allowMealHighIob
             
@@ -285,14 +308,15 @@ class BasalDecisionEngine @Inject constructor(
             }
         }
 
-        if (chosenRate == null) {
+        tryRules("basal.low_bg", "Диапазон низкой глюкозы") {
             when {
                 input.bg < 80.0 -> {
                     chosenRate = 0.0
                     rT.reason.append(context.getString(R.string.bg_below_80))
                 }
                 input.bg in 80.0..90.0 &&
-                    input.slopeFromMaxDeviation <= 0 && input.iob > 0.1 && !input.sportTime -> {
+                    !input.sportTime && (input.delta < 0.0 || (input.slopeFromMaxDeviation <= 0 && input.iob > 0.1)) -> {
+                    // Net IOB near zero does not cancel an observed fall below target.
                     if (input.delta < -2.0) {
                         // Was 0.0, now check if we can hold a floor
                         if (input.bg > 85 && input.predictedBg > 80 && input.safetyDecision.isHypoRisk == false) {
@@ -315,8 +339,8 @@ class BasalDecisionEngine @Inject constructor(
                     rT.reason.append(context.getString(R.string.bg_80_90_stable))
                 }
                 input.bg in 90.0..100.0 &&
-                    input.slopeFromMinDeviation <= 0.3 && input.iob > 0.1 && !input.sportTime &&
-                    input.bgAcceleration > 0.0 -> {
+                    !input.sportTime && (input.delta < 0.0 ||
+                        (input.slopeFromMinDeviation <= 0.3 && input.iob > 0.1 && input.bgAcceleration > 0.0)) -> {
                     chosenRate = input.profileCurrentBasal * 0.5
                     rT.reason.append("BG 90-100 moderate: 50%")
                 }
@@ -329,7 +353,7 @@ class BasalDecisionEngine @Inject constructor(
             }
         }
 
-        if (chosenRate == null) {
+        tryRules("basal.rising", "Растущая глюкоза и прогноз") {
             if (input.bg > 120 &&
                 input.slopeFromMinDeviation in 0.4..20.0 &&
                 input.combinedDelta > 1 && !input.sportTime &&
@@ -346,7 +370,7 @@ class BasalDecisionEngine @Inject constructor(
             }
         }
 
-        if (chosenRate == null) {
+        tryRules("basal.time", "Время суток и активность") {
             if ((input.timenow in 11..13 || input.timenow in 18..21) &&
                 input.iob < 0.8 && input.recentSteps5Minutes < 100 &&
                 input.combinedDelta > -1 && input.slopeFromMinDeviation > 0.3 &&
@@ -363,7 +387,7 @@ class BasalDecisionEngine @Inject constructor(
             }
         }
 
-        if (chosenRate == null) {
+        tryRules("basal.strong_rise", "Сильный рост") {
             val trendSignals = listOfNotNull(
                 input.delta,
                 input.shortAvgDelta,
@@ -395,7 +419,7 @@ class BasalDecisionEngine @Inject constructor(
             }
         }
 
-        if (chosenRate == null) {
+        tryRules("basal.meal_window", "Временное окно режима еды") {
             val windows = listOf(
                 input.snackTime to input.snackRuntimeMin,
                 input.mealTime to input.mealRuntimeMin,
@@ -436,7 +460,7 @@ class BasalDecisionEngine @Inject constructor(
             }
         }
 
-        if (chosenRate == null) {
+        tryRules("basal.plateau", "Повышенное плато") {
             val isPlateauHigh =
                 input.bg > 120 &&
                     abs(input.delta) <= 2.0 &&
@@ -455,7 +479,7 @@ class BasalDecisionEngine @Inject constructor(
             }
         }
 
-        if (chosenRate == null) {
+        tryRules("basal.hyper", "Высокая глюкоза или высокий прогноз") {
             when {
                 input.eventualBg > 120 && input.delta > 3 -> {
                     chosenRate = helpers.calculateBasalRate(input.basalEstimate, input.profileCurrentBasal, basalAdjustmentFactor)
@@ -468,7 +492,8 @@ class BasalDecisionEngine @Inject constructor(
             }
         }
 
-        if (chosenRate == null && input.honeymoon) {
+        tryRules("basal.remission", "Дополнительные правила ремиссии") {
+            if (input.honeymoon) {
             when {
                 input.bg in 140.0..169.0 && input.delta > 0 -> {
                     chosenRate = input.profileCurrentBasal
@@ -501,14 +526,19 @@ class BasalDecisionEngine @Inject constructor(
                     rT.reason.append(context.getString(R.string.honeymoon_meal_slope))
                 }
             }
+            }
         }
 
-        if (chosenRate == null && input.pregnancyEnable && input.delta > 0 && input.bg > 110 && !input.honeymoon) {
+        tryRules("basal.pregnancy", "Режим беременности") {
+            if (input.pregnancyEnable && input.delta > 0 && input.bg > 110 && !input.honeymoon) {
             chosenRate = helpers.calculateBasalRate(finalBasalRate, input.profileCurrentBasal, basalAdjustmentFactor)
             rT.reason.append(context.getString(R.string.pregnancy_delta_over_0_adjustment))
+            }
         }
 
         val finalRate = chosenRate ?: input.profileCurrentBasal
+        onBranch("basal_rules", if (chosenRate == null) "profile" else "selected", "Итог дальнейших правил базала",
+            rT.reason.toString(), finalRate)
         return Decision(finalRate, 30, overrideSafety)
     }
 

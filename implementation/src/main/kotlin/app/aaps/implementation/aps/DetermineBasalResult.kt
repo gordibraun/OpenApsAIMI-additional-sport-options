@@ -163,7 +163,20 @@ class DetermineBasalResult @Inject constructor(
         return if (isCarbsRequired) HtmlHelper.fromHtml(carbsRequiredText) else HtmlHelper.fromHtml(rh.gs(R.string.nochangerequested))
     }
 
-    override fun newAndClone(): APSResult = apsResultProvider.get().with(result)
+    override fun newAndClone(): APSResult = apsResultProvider.get().with(result).also {
+        // External constraints must retain the inputs that produced the decision.
+        it.autosensResult = autosensResult
+        it.iobData = iobData?.map { iob -> iob.copy(bolusInputs = iob.bolusInputs?.toList()) }?.toTypedArray()
+        it.glucoseStatus = glucoseStatus
+        it.currentTemp = currentTemp
+        it.oapsProfile = oapsProfile
+        it.oapsProfileAutoIsf = oapsProfileAutoIsf
+        it.oapsProfileAimi = oapsProfileAimi
+        it.mealData = mealData
+        it.inputConstraints = inputConstraints
+        it.usePercent = usePercent
+        it.percent = percent
+    }
     override fun json(): JSONObject = JSONObject(result.serialize())
 
     override fun predictions(): Predictions? = result.predBGs

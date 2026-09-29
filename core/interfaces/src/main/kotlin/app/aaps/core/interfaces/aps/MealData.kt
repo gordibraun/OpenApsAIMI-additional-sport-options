@@ -11,5 +11,6 @@ data class MealData(
     var slopeFromMinDeviation: Double = 999.0,
     var lastBolusTime: Long = 0,
     var lastCarbTime: Long = 0L,
-    var usedMinCarbsImpact: Double = 0.0
+    var usedMinCarbsImpact: Double = 0.0,
+    @kotlinx.serialization.Transient var carbInputs: List<TreatmentInputStamp>? = null
 )

@@ -102,6 +102,21 @@
 
             </com.google.android.material.card.MaterialCardView>
 
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/pending_delivery_notice"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="6dp"
+                android:minHeight="48dp"
+                android:paddingHorizontal="12dp"
+                android:paddingVertical="8dp"
+                android:text="Старый ввод не подтверждён. Подробнее"
+                android:textAllCaps="false"
+                android:textSize="14sp"
+                android:visibility="gone"
+                tools:ignore="HardcodedText" />
+
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/statusCard"
                 style="@style/Widget.MaterialComponents.CardView"

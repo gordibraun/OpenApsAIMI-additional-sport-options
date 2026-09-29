@@ -413,17 +413,20 @@ class GarminPluginTest : TestBaseWithProfile() {
 
     @Test
     fun testOnGetBloodGlucose_WithSteps() {
-        `when`(loopHub.isConnected).thenReturn(true)
-        `when`(loopHub.insulinOnboard).thenReturn(1.23)
-        `when`(loopHub.insulinBasalOnboard).thenReturn(0.0)
-        `when`(loopHub.temporaryBasal).thenReturn(0.0)
+        whenever(loopHub.isConnected).thenReturn(true)
+        whenever(loopHub.insulinOnboard).thenReturn(1.23)
+        whenever(loopHub.insulinBasalOnboard).thenReturn(0.0)
+        whenever(loopHub.temporaryBasal).thenReturn(0.0)
         val from = getGlucoseValuesFrom
-        `when`(loopHub.getGlucoseValues(from, true)).thenReturn(
+        whenever(loopHub.getGlucoseValues(from, true)).thenReturn(
             listOf(createGlucoseValue(Instant.ofEpochSecond(1_000)))
         )
         val params = createHeartRate(88).toMutableMap().apply { putAll(createSteps()) }
         val uri = createUri(params)
         gp.onGetBloodGlucose(uri)
+        verify(loopHub).getGlucoseValues(from, true)
+        verify(loopHub).glucoseUnit
+        verify(loopHub).isConnected
         verify(loopHub).storeHeartRate(
             Instant.ofEpochSecond(params["hrStart"] as Long),
             Instant.ofEpochSecond(params["hrEnd"] as Long),

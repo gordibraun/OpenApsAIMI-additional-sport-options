@@ -16,6 +16,8 @@ fun IobTotal.copy(): IobTotal {
     i.netbasalinsulin = netbasalinsulin
     i.hightempinsulin = hightempinsulin
     i.lastBolusTime = lastBolusTime
+    i.bolusInputs = bolusInputs
+    i.bolusInputsSince = bolusInputsSince
     i.iobWithZeroTemp = iobWithZeroTemp?.copy()
     i.netInsulin = netInsulin
     i.extendedBolusInsulin = extendedBolusInsulin
@@ -99,6 +101,8 @@ fun IobTotal.Companion.combine(bolusIOB: IobTotal, basalIob: IobTotal): IobTotal
     result.netInsulin = basalIob.netInsulin + bolusIOB.netInsulin
     result.extendedBolusInsulin = basalIob.extendedBolusInsulin + bolusIOB.extendedBolusInsulin
     result.lastBolusTime = bolusIOB.lastBolusTime
+    result.bolusInputs = bolusIOB.bolusInputs
+    result.bolusInputsSince = bolusIOB.bolusInputsSince
     result.iobWithZeroTemp = basalIob.iobWithZeroTemp
     return result
 }
@@ -110,4 +114,3 @@ fun Array<IobTotal>.convertToJSONArray(dateUtil: DateUtil): JSONArray {
     }
     return array
 }
-

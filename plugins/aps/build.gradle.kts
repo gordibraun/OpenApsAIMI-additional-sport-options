@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.ksp)
     id("kotlin-android")
+    id("kotlinx-serialization")
     id("android-module-dependencies")
     id("test-module-dependencies")
     id("jacoco-module-dependencies")
@@ -9,6 +10,21 @@ plugins {
 
 android {
     namespace = "app.aaps.plugins.aps"
+}
+
+val verifyUnitTestFramework by tasks.registering {
+    val sources = fileTree("src/test") { include("**/*.kt", "**/*.java") }
+    inputs.files(sources)
+    doLast {
+        val legacyAnnotation = Regex("(?m)^import org\\.junit\\.(Test|Before|After|BeforeClass|AfterClass|Rule|ClassRule)([;\\s]|$)")
+        val legacy = sources.filter { legacyAnnotation.containsMatchIn(it.readText()) }
+        check(legacy.isEmpty()) { "APS uses JUnit Platform/Jupiter; migrate legacy annotations in: ${legacy.joinToString { it.relativeTo(projectDir).path }}" }
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    dependsOn(verifyUnitTestFramework)
+    failOnNoDiscoveredTests = true
 }
 
 dependencies {

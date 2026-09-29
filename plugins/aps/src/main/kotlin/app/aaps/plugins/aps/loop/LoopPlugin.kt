@@ -28,6 +28,11 @@ import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
 import app.aaps.core.data.ue.ValueWithUnit
 import app.aaps.core.interfaces.aps.APSResult
+import app.aaps.core.interfaces.aps.DecisionStage
+import app.aaps.core.interfaces.aps.RT
+import app.aaps.core.interfaces.aps.recordDecisionStep
+import app.aaps.core.interfaces.aps.DecisionValue
+import app.aaps.plugins.aps.decisiontrace.DecisionTraceLive
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.aps.Loop.LastRun
 import app.aaps.core.interfaces.configuration.Config
@@ -79,6 +84,7 @@ import app.aaps.core.keys.IntNonKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.nssdk.interfaces.RunningConfiguration
 import app.aaps.core.objects.constraints.ConstraintObject
+import app.aaps.core.objects.aps.BolusInputSnapshot
 import app.aaps.core.objects.extensions.asAnnouncement
 import app.aaps.core.objects.extensions.convertedToAbsolute
 import app.aaps.core.objects.extensions.convertedToPercent
@@ -125,6 +131,7 @@ class LoopPlugin @Inject constructor(
     private val glucoseStatusProvider: GlucoseStatusProvider,
     private val pumpEnactResultProvider: Provider<PumpEnactResult>,
     private val pumpStatusProvider: PumpStatusProvider,
+    private val aimiMealAssist: app.aaps.core.interfaces.aps.AimiMealAssist,
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.LOOP)
@@ -146,6 +153,11 @@ class LoopPlugin @Inject constructor(
     override var closedLoopEnabled: Constraint<Boolean>? = null
 
     private var handler: Handler? = null
+
+    private fun RT.recordLoopStep(stage: DecisionStage, title: String, detail: String, values: List<DecisionValue> = emptyList(), branch: app.aaps.core.interfaces.aps.DecisionBranch? = null) {
+        recordDecisionStep(stage, title, detail, values, branch)
+        timestamp?.let { DecisionTraceLive.history.merge(it, decisionTrace) }
+    }
 
     override fun onStart() {
         createNotificationChannel()
@@ -563,18 +575,34 @@ class LoopPlugin @Inject constructor(
 
             // check rate for constraints
             val resultAfterConstraints = apsResult.newAndClone()
+            val trace = resultAfterConstraints.rawData() as? RT
             resultAfterConstraints.rateConstraint = ConstraintObject(resultAfterConstraints.rate, aapsLogger)
             resultAfterConstraints.rate = constraintChecker.applyBasalConstraints(resultAfterConstraints.rateConstraint!!, profile).value()
+            trace?.recordLoopStep(DecisionStage.CONSTRAINTS, "Лимиты базала после алгоритма",
+                resultAfterConstraints.rateConstraint?.getReasons().orEmpty(),
+                listOf(DecisionValue("Временный базал", resultAfterConstraints.rate.toString(), apsResult.rate.toString(), "Е/ч", DecisionStage.BASAL)))
             resultAfterConstraints.percentConstraint = ConstraintObject(resultAfterConstraints.percent, aapsLogger)
             resultAfterConstraints.percent = constraintChecker.applyBasalPercentConstraints(resultAfterConstraints.percentConstraint!!, profile).value()
+            trace?.recordLoopStep(DecisionStage.CONSTRAINTS, "Лимиты процентного базала",
+                "${apsResult.percent} -> ${resultAfterConstraints.percent}%; ${resultAfterConstraints.percentConstraint?.getReasons()}")
             resultAfterConstraints.smbConstraint = ConstraintObject(resultAfterConstraints.smb, aapsLogger)
             resultAfterConstraints.smb = constraintChecker.applyBolusConstraints(resultAfterConstraints.smbConstraint!!).value()
+            trace?.recordLoopStep(DecisionStage.CONSTRAINTS, "Лимиты микродозы после алгоритма",
+                listOfNotNull(resultAfterConstraints.smbConstraint?.getReasons(), resultAfterConstraints.rateConstraint?.getReasons(),
+                    resultAfterConstraints.percentConstraint?.getReasons()).filter { it.isNotBlank() }.joinToString("\n"),
+                listOf(DecisionValue("Микродоза", resultAfterConstraints.smb.toString(), apsResult.smb.toString(), "Е", DecisionStage.SMB),
+                    DecisionValue("Базал", resultAfterConstraints.rate.toString(), apsResult.rate.toString(), "Е/ч", DecisionStage.BASAL),
+                    DecisionValue("Базал в процентах", resultAfterConstraints.percent.toString(), apsResult.percent.toString(), "%", DecisionStage.BASAL)),
+                app.aaps.core.interfaces.aps.DecisionBranch("loop_limits", if (resultAfterConstraints.smb < apsResult.smb || resultAfterConstraints.rate < apsResult.rate || resultAfterConstraints.percent < apsResult.percent) "reduce" else "pass"))
 
             // safety check for multiple SMBs
             val lastBolusTime = persistenceLayer.getNewestBolus()?.timestamp ?: 0L
             if (lastBolusTime != 0L && lastBolusTime + T.mins(preferences.get(IntKey.ApsMaxSmbFrequency).toLong()).msecs() > dateUtil.now()) {
                 aapsLogger.debug(LTag.APS, "SMB requested but still in ${preferences.get(IntKey.ApsMaxSmbFrequency)} min interval")
                 resultAfterConstraints.smb = 0.0
+                trace?.recordLoopStep(DecisionStage.CONSTRAINTS, "Микродоза отменена: интервал после болюса",
+                    "Последний болюс=${dateUtil.dateAndTimeString(lastBolusTime)}; интервал=${preferences.get(IntKey.ApsMaxSmbFrequency)} мин",
+                    branch = app.aaps.core.interfaces.aps.DecisionBranch("delivery_smb", "wait"))
             }
             prevCarbsreq = lastRun?.constraintsProcessed?.carbsReq ?: prevCarbsreq
             if (lastRun == null) lastRun = LastRun()
@@ -582,6 +610,7 @@ class LoopPlugin @Inject constructor(
                 lastRun.request = apsResult
                 lastRun.constraintsProcessed = resultAfterConstraints
                 lastRun.lastAPSRun = dateUtil.now()
+                aimiMealAssist.acknowledgeTreatment(apsResult.iobData?.firstOrNull(), apsResult.mealData)
                 lastRun.source = (usedAPS as PluginBase).name
                 lastRun.tbrSetByPump = null
                 lastRun.smbSetByPump = null
@@ -592,24 +621,33 @@ class LoopPlugin @Inject constructor(
                 scheduleBuildAndStoreDeviceStatus("APS result")
 
                 if (forecastOnly) {
+                    trace?.recordLoopStep(DecisionStage.DELIVERY, "Только расчёт", "Передача решения помпе не выполняется",
+                        branch = app.aaps.core.interfaces.aps.DecisionBranch("loop_gate", "block"))
                     aapsLogger.debug(LTag.APS, "Forecast-only invoke finished; skipping enactment path")
                     rxBus.send(EventLoopUpdateGui())
                     return
                 }
 
                 if (!isEmptyQueue()) {
+                    trace?.recordLoopStep(DecisionStage.DELIVERY, "Подача отложена", "Очередь команд помпы занята",
+                        branch = app.aaps.core.interfaces.aps.DecisionBranch("loop_gate", "block"))
                     aapsLogger.debug(LTag.APS, rh.gs(app.aaps.core.ui.R.string.pump_busy))
                     rxBus.send(EventLoopSetLastRunGui(rh.gs(app.aaps.core.ui.R.string.pump_busy)))
                     return
                 }
 
                 if (runningMode.isSuspended()) {
+                    trace?.recordLoopStep(DecisionStage.DELIVERY, "Подача не выполняется", "Цикл приостановлен",
+                        branch = app.aaps.core.interfaces.aps.DecisionBranch("loop_gate", "block"))
                     aapsLogger.debug(LTag.APS, rh.gs(app.aaps.core.ui.R.string.loopsuspended))
                     rxBus.send(EventLoopSetLastRunGui(rh.gs(app.aaps.core.ui.R.string.loopsuspended)))
                     return
                 }
                 // Store reasons
                 closedLoopEnabled = constraintChecker.isClosedLoopAllowed()
+                trace?.recordLoopStep(DecisionStage.DELIVERY, "Проверка режима цикла",
+                    "Режим=$runningMode; разрешён=${closedLoopEnabled?.value()}; ${closedLoopEnabled?.getReasons()}",
+                    branch = app.aaps.core.interfaces.aps.DecisionBranch("loop_gate", if (runningMode.isClosedLoopOrLgs()) "pass" else "block"))
                 if (runningMode.isClosedLoopOrLgs()) {
                     if (allowNotification) {
                         if (resultAfterConstraints.isCarbsRequired && carbsSuggestionsSuspendedUntil < System.currentTimeMillis() && !treatmentTimeThreshold(-15)
@@ -698,6 +736,9 @@ class LoopPlugin @Inject constructor(
                         // SMB was executed and zero TBR afterwards failed
                         applyTBRRequest(resultAfterConstraints, profile, object : Callback() {
                             override fun run() {
+                                trace?.recordLoopStep(DecisionStage.DELIVERY, "Ответ помпы: временный базал",
+                                    "Успех=${result.success}; выполнено=${result.enacted}; $result",
+                                    branch = app.aaps.core.interfaces.aps.DecisionBranch("basal_result", if (result.enacted || result.success) "success" else "failed"))
                                 if (result.enacted || result.success) {
                                     lastRun.tbrSetByPump = result
                                     lastRun.lastTBRRequest = lastRun.lastAPSRun
@@ -709,6 +750,9 @@ class LoopPlugin @Inject constructor(
                                     if (resultAfterConstraints.isBolusRequested)
                                         applySMBRequest(resultAfterConstraints, object : Callback() {
                                             override fun run() {
+                                                trace?.recordLoopStep(DecisionStage.DELIVERY, "Ответ помпы: микродоза",
+                                                    "Успех=${result.success}; выполнено=${result.enacted}; $result",
+                                                    branch = app.aaps.core.interfaces.aps.DecisionBranch("delivery_result", when { result.enacted -> "success"; result.success -> "accepted"; else -> "failed" }))
                                                 // Callback is only called if a bolus was actually requested
                                                 if (result.enacted || result.success) {
                                                     lastRun.smbSetByPump = result
@@ -723,6 +767,8 @@ class LoopPlugin @Inject constructor(
                                         })
                                     else {
                                         aapsLogger.debug(LTag.APS, "No SMB requested")
+                                        trace?.recordLoopStep(DecisionStage.DELIVERY, "Микродоза не запрошена", "Команда SMB не отправлялась",
+                                            branch = app.aaps.core.interfaces.aps.DecisionBranch("delivery_smb", "none"))
                                         scheduleBuildAndStoreDeviceStatus("applyTBRRequest")
                                     }
                                 } else {
@@ -839,7 +885,7 @@ class LoopPlugin @Inject constructor(
      * expect absolute request and allow both absolute and percent response based on pump capabilities
      * TODO: update pump drivers to support APS request in %
      */
-    private fun applyTBRRequest(request: APSResult, profile: Profile, callback: Callback?) {
+    internal fun applyTBRRequest(request: APSResult, profile: Profile, callback: Callback?) {
         staleApsResultReason(request, profile)?.let { staleReason ->
             aapsLogger.debug(LTag.APS, "applyAPSRequest blocked: $staleReason")
             callback?.result(pumpEnactResultProvider.get().comment(staleReason).enacted(false).success(false))?.run()
@@ -848,6 +894,14 @@ class LoopPlugin @Inject constructor(
         if (!request.isTempBasalRequested) {
             callback?.result(pumpEnactResultProvider.get().enacted(false).success(true).comment(app.aaps.core.ui.R.string.nochangerequested))?.run()
             return
+        }
+        val increasesBasal = request.duration > 0 &&
+            (if (request.usePercent) request.percent > 100 else request.rate > profile.getBasal())
+        if (increasesBasal) {
+            withInsulinInputValidation(request, callback, "delivery_basal").validationErrorBeforeDelivery()?.let { reason ->
+                callback?.result(pumpEnactResultProvider.get().comment(reason).enacted(false).success(false))?.run()
+                return
+            }
         }
         val pump = activePlugin.activePump
         if (!pump.isInitialized()) {
@@ -909,7 +963,8 @@ class LoopPlugin @Inject constructor(
                         ValueWithUnit.Minute(request.duration)
                     )
                 )
-                commandQueue.tempBasalPercent(request.percent, request.duration, false, profile, PumpSync.TemporaryBasalType.NORMAL, callback)
+                commandQueue.tempBasalPercent(request.percent, request.duration, false, profile, PumpSync.TemporaryBasalType.NORMAL,
+                    if (request.percent > 100) withInsulinInputValidation(request, callback, "delivery_basal") else callback)
             }
         } else {
             if (activeTemp != null && activeTemp.plannedRemainingMinutes > 5 && request.duration - activeTemp.plannedRemainingMinutes < 30 && abs(
@@ -935,20 +990,29 @@ class LoopPlugin @Inject constructor(
                         ValueWithUnit.Minute(request.duration)
                     )
                 )
-                commandQueue.tempBasalAbsolute(request.rate, request.duration, false, profile, PumpSync.TemporaryBasalType.NORMAL, callback)
+                commandQueue.tempBasalAbsolute(request.rate, request.duration, false, profile, PumpSync.TemporaryBasalType.NORMAL,
+                    if (request.rate > profile.getBasal()) withInsulinInputValidation(request, callback, "delivery_basal") else callback)
             }
         }
     }
 
     private fun applySMBRequest(request: APSResult, callback: Callback?) {
         staleApsResultReason(request, null)?.let { staleReason ->
+            (request.rawData() as? RT)?.recordLoopStep(DecisionStage.DELIVERY, "Устаревший запрос", staleReason,
+                branch = app.aaps.core.interfaces.aps.DecisionBranch("delivery_smb", "blocked"))
             aapsLogger.debug(LTag.APS, "applySMBRequest blocked: $staleReason")
             callback?.result(pumpEnactResultProvider.get().comment(staleReason).enacted(false).success(false))?.run()
+            return
+        }
+        withInsulinInputValidation(request, callback, "delivery_smb").validationErrorBeforeDelivery()?.let { reason ->
+            callback?.result(pumpEnactResultProvider.get().comment(reason).enacted(false).success(false))?.run()
             return
         }
         val pump = activePlugin.activePump
         val lastBolusTime = persistenceLayer.getNewestBolus()?.timestamp ?: 0L
         if (lastBolusTime != 0L && lastBolusTime + T.mins(preferences.get(IntKey.ApsMaxSmbFrequency).toLong()).msecs() > dateUtil.now()) {
+            (request.rawData() as? RT)?.recordLoopStep(DecisionStage.DELIVERY, "Ожидание интервала", "Интервал=${preferences.get(IntKey.ApsMaxSmbFrequency)} мин",
+                branch = app.aaps.core.interfaces.aps.DecisionBranch("delivery_smb", "wait"))
             aapsLogger.debug(LTag.APS, "SMB requested but still in ${preferences.get(IntKey.ApsMaxSmbFrequency)} min interval")
             callback?.result(
                 pumpEnactResultProvider.get()
@@ -958,11 +1022,15 @@ class LoopPlugin @Inject constructor(
             return
         }
         if (!pump.isInitialized()) {
+            (request.rawData() as? RT)?.recordLoopStep(DecisionStage.DELIVERY, "Помпа не готова", "Запрос не отправлен",
+                branch = app.aaps.core.interfaces.aps.DecisionBranch("delivery_smb", "blocked"))
             aapsLogger.debug(LTag.APS, "applySMBRequest: " + rh.gs(R.string.pump_not_initialized))
             callback?.result(pumpEnactResultProvider.get().comment(R.string.pump_not_initialized).enacted(false).success(false))?.run()
             return
         }
         if (runningMode.isSuspended()) {
+            (request.rawData() as? RT)?.recordLoopStep(DecisionStage.DELIVERY, "Цикл приостановлен", "Запрос не отправлен",
+                branch = app.aaps.core.interfaces.aps.DecisionBranch("delivery_smb", "blocked"))
             aapsLogger.debug(LTag.APS, "applySMBRequest: " + rh.gs(app.aaps.core.ui.R.string.pumpsuspended))
             callback?.result(pumpEnactResultProvider.get().comment(app.aaps.core.ui.R.string.pumpsuspended).enacted(false).success(false))?.run()
             return
@@ -971,7 +1039,8 @@ class LoopPlugin @Inject constructor(
 
         // deliver SMB
         val detailedBolusInfo = DetailedBolusInfo()
-        detailedBolusInfo.lastKnownBolusTime = persistenceLayer.getNewestBolus()?.timestamp ?: 0L
+        detailedBolusInfo.lastKnownBolusTime = BolusInputSnapshot.from(request.iobData?.firstOrNull())?.lastBolusTime
+            ?: request.iobData?.firstOrNull()?.lastBolusTime ?: 0L
         detailedBolusInfo.eventType = TE.Type.CORRECTION_BOLUS
         detailedBolusInfo.insulin = request.smb
         detailedBolusInfo.bolusType = BS.Type.SMB
@@ -979,7 +1048,27 @@ class LoopPlugin @Inject constructor(
         aapsLogger.debug(LTag.APS, "applyAPSRequest: bolus()")
         if (request.smb > 0.0)
             uel.log(action = Action.SMB, source = Sources.Loop, value = ValueWithUnit.Insulin(detailedBolusInfo.insulin))
-        commandQueue.bolus(detailedBolusInfo, callback)
+        (request.rawData() as? RT)?.recordLoopStep(DecisionStage.DELIVERY, "Отправка запроса микродозы", "SMB=${request.smb} Е; подтверждения пока нет",
+            branch = app.aaps.core.interfaces.aps.DecisionBranch("delivery_smb", "requested"))
+        commandQueue.bolus(detailedBolusInfo, withInsulinInputValidation(request, callback, "delivery_smb"))
+    }
+
+    internal fun withInsulinInputValidation(request: APSResult, callback: Callback?, branchId: String): Callback {
+        val inputs = BolusInputSnapshot.from(request.iobData?.firstOrNull())
+        return object : Callback() {
+            override fun validationErrorBeforeDelivery(): String? {
+                val error = if (inputs == null) BolusInputSnapshot.MISSING_INPUTS
+                else inputs.validationError(persistenceLayer, dateUtil.now())
+                if (error != null) {
+                    (request.rawData() as? RT)?.recordLoopStep(DecisionStage.DELIVERY, "Новые данные инсулина: нужен пересчет", error,
+                        branch = app.aaps.core.interfaces.aps.DecisionBranch(branchId, "blocked"))
+                    aapsLogger.debug(LTag.APS, error)
+                }
+                return error
+            }
+
+            override fun run() { callback?.result(result)?.run() }
+        }
     }
 
     private fun allowPercentage(): Boolean {

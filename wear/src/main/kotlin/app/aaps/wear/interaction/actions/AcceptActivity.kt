@@ -13,6 +13,11 @@ import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
+import android.widget.Button
+import android.widget.LinearLayout
+import android.view.Gravity
+import app.aaps.core.interfaces.rx.weardata.EventData
+import app.aaps.wear.interaction.utils.RotaryScrollView
 import androidx.core.view.InputDeviceCompat
 import androidx.core.view.MotionEventCompat
 import androidx.core.view.ViewConfigurationCompat
@@ -28,6 +33,10 @@ class AcceptActivity : ViewSelectorActivity() {
     var message = ""
     var actionKey = ""
     private var dismissThread: DismissThread? = null
+    private var controlScroll: RotaryScrollView? = null
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean =
+        controlScroll?.handleRotary(event) == true || super.dispatchGenericMotionEvent(event)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,10 +49,45 @@ class AcceptActivity : ViewSelectorActivity() {
             finish()
             return
         }
-        setAdapter(MyGridViewPagerAdapter())
+        if (runCatching { EventData.deserialize(actionKey) }.getOrNull() is EventData.WatchControlConfirmed) {
+            showControlConfirmation()
+        } else setAdapter(MyGridViewPagerAdapter())
         val vibrator = getSystemService(VIBRATOR_SERVICE) as Vibrator
         val vibratePattern = longArrayOf(0, 100, 50, 100, 50)
         vibrator.vibrate(vibratePattern, -1)
+    }
+
+    private fun showControlConfirmation() {
+        fun dp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(30), dp(30), dp(30), dp(40))
+            setBackgroundColor(android.graphics.Color.BLACK)
+            addView(TextView(this@AcceptActivity).apply {
+                text = intent.getStringExtra(DataLayerListenerServiceWear.KEY_TITLE) ?: "Подтверждение"
+                textSize = 18f; gravity = Gravity.CENTER; setTextColor(android.graphics.Color.WHITE)
+            })
+            addView(TextView(this@AcceptActivity).apply {
+                text = message; textSize = 15f; setTextColor(android.graphics.Color.WHITE)
+                setPadding(0, dp(12), 0, dp(12))
+            })
+            addView(Button(this@AcceptActivity).apply {
+                text = "Подтвердить"; isAllCaps = false
+                setOnClickListener {
+                    isEnabled = false
+                    startService(IntentWearToMobile(this@AcceptActivity, actionKey))
+                    startForegroundService(IntentCancelNotification(this@AcceptActivity))
+                    finishAffinity()
+                }
+            }, LinearLayout.LayoutParams(-1, -2))
+            addView(Button(this@AcceptActivity).apply {
+                text = "Отмена"; isAllCaps = false
+                setOnClickListener { finish() }
+            }, LinearLayout.LayoutParams(-1, -2))
+        }
+        controlScroll = RotaryScrollView(this).apply { addView(content) }
+        setContentView(controlScroll)
+        controlScroll?.requestFocus()
     }
 
     override fun onPause() {

@@ -100,7 +100,7 @@ class OverviewPlugin @Inject constructor(
 
     override val overviewBus = RxBusImpl(aapsSchedulers, aapsLogger)
 
-    private val aimiBuildLabel = "1.0 - Борьба с ночным заливанием"
+    private val aimiBuildLabel = "1.1 - Борьба с горками"
 
     override fun onStart() {
         super.onStart()

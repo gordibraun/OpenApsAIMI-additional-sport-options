@@ -113,6 +113,16 @@
             android:visibility="gone"
             tools:text="Углеводы учтены, но новый болюс сейчас 0" />
 
+        <Button
+            android:id="@+id/delivery_review"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:text="Сверить предыдущую дозу"
+            android:visibility="gone"
+            tools:ignore="HardcodedText" />
+
         <LinearLayout
             android:id="@+id/spacer"
             android:layout_width="match_parent"

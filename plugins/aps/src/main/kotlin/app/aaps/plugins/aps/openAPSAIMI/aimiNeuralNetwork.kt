@@ -11,17 +11,18 @@ class AimiNeuralNetwork(
     private val hiddenSize: Int,
     private val outputSize: Int,
     private val config: TrainingConfig = TrainingConfig(),
-    private val regularizationLambda: Double = 0.01 // L2 reg (optionnel)
+    private val regularizationLambda: Double = 0.01, // L2 reg (optionnel)
+    private val random: Random = Random.Default
 ) {
 
     // Poids et biais
     private var weightsInputHidden = Array(inputSize) {
-        DoubleArray(hiddenSize) { Random.nextDouble(-sqrt(2.0 / inputSize), sqrt(2.0 / inputSize)) }
+        DoubleArray(hiddenSize) { random.nextDouble(-sqrt(2.0 / inputSize), sqrt(2.0 / inputSize)) }
     }
     private var biasHidden = DoubleArray(hiddenSize) { 0.01 }
 
     private var weightsHiddenOutput = Array(hiddenSize) {
-        DoubleArray(outputSize) { Random.nextDouble(-sqrt(2.0 / hiddenSize), sqrt(2.0 / hiddenSize)) }
+        DoubleArray(outputSize) { random.nextDouble(-sqrt(2.0 / hiddenSize), sqrt(2.0 / hiddenSize)) }
     }
     private var biasOutput = DoubleArray(outputSize) { 0.01 }
 
@@ -41,7 +42,7 @@ class AimiNeuralNetwork(
     }
 
     private fun applyDropout(values: DoubleArray, dropoutRate: Double): DoubleArray {
-        return values.map { if (Random.nextDouble() < dropoutRate) 0.0 else it }.toDoubleArray()
+        return values.map { if (random.nextDouble() < dropoutRate) 0.0 else it }.toDoubleArray()
     }
 
     fun predict(input: FloatArray): DoubleArray {
@@ -90,7 +91,7 @@ class AimiNeuralNetwork(
         // Application du dropout (in place) si activé et pas en mode inférence
         if (!inferenceMode && config.useDropout) {
             for (h in 0 until hiddenSize) {
-                if (Random.nextDouble() < config.dropoutRate) {
+                if (random.nextDouble() < config.dropoutRate) {
                     hidden[h] = 0.0
                 }
             }
@@ -215,7 +216,7 @@ class AimiNeuralNetwork(
         var epochsWithoutImprovement = 0
 
         for (epoch in 1..totalEpochs) {
-            val indices = trainInputs.indices.shuffled()
+            val indices = trainInputs.indices.shuffled(random)
             var totalLoss = 0.0
 
             // mini-batch

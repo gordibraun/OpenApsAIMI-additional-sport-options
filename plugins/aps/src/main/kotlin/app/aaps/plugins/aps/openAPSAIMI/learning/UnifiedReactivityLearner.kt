@@ -15,8 +15,6 @@ import java.util.Date
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.pow
-import kotlin.math.sqrt
 
 /**
  * Unified Reactivity Learner - Remplace le système de buckets temporels
@@ -119,15 +117,21 @@ class UnifiedReactivityLearner @Inject constructor(
         val cv_percent: Double,       // Coefficient de Variation (%)
         val crossing_count: Int,      // Oscillations (crossings de seuil 120)
         val mean_bg: Double,          // Glycémie moyenne
-        val total_readings: Int       // Nombre total de lectures
+        val total_readings: Int,       // Nombre total de lectures
+        val observedMinutes: Double = 0.0,
+        val coveragePercent: Double = 0.0
     )
     
     /**
      * Analyse les dernières 24h pour calculer les métriques glycémiques
      */
     fun analyzeLast24h(): GlycemicPerformance? {
+        return analyzeWindow(24, 12)
+    }
+
+    private fun analyzeWindow(hours: Int, minSamples: Int): GlycemicPerformance? {
         val now = dateUtil.now()
-        val start = now - (24 * 60 * 60 * 1000L)
+        val start = now - hours * 60 * 60 * 1000L
         
         try {
             // Récupérer toutes les valeurs BG des 24 dernières heures
@@ -135,82 +139,14 @@ class UnifiedReactivityLearner @Inject constructor(
             val bgReadingsList = persistenceLayer.getBgReadingsDataFromTime(start, false)
                 .blockingGet()
             
-            // Extraire les valeurs et filtrer
-            val bgReadings = bgReadingsList
-                .mapNotNull { gv ->
-                    // GV type a la propriété 'value' de type Double
-                    val value = gv.value
-                    if (value > 39.0) value else null
-                }
-            
-            if (bgReadings.isEmpty() || bgReadings.size < 12) {
-                log.warn(LTag.APS, "UnifiedReactivityLearner: Pas assez de données BG (${bgReadings.size})")
-                return null
-            }
-            
-            // 1. TIR (Time In Range) - Breakdown détaillé
-            val inRange70_140 = bgReadings.count { it in 70.0..140.0 }
-            val inRange140_180 = bgReadings.count { it in 140.0..180.0 }
-            val inRange180_250 = bgReadings.count { it in 180.0..250.0 }
-            val above250 = bgReadings.count { it > 250.0 }
-            val above180 = bgReadings.count { it > 180.0 }
-            
-            val tir70_140 = (inRange70_140.toDouble() / bgReadings.size.toDouble()) * 100.0
-            val tir140_180 = (inRange140_180.toDouble() / bgReadings.size.toDouble()) * 100.0
-            val tir70_180 = tir70_140 + tir140_180
-            val tir180_250 = (inRange180_250.toDouble() / bgReadings.size.toDouble()) * 100.0
-            val tir_above_250 = (above250.toDouble() / bgReadings.size.toDouble()) * 100.0
-            val tir_above_180 = (above180.toDouble() / bgReadings.size.toDouble()) * 100.0
-            
-            // 2. Détection épisodes hypo (groupements contigus < 70)
-            var hypo_count = 0
-            var inHypo = false
-            for (bg in bgReadings) {
-                if (bg < 70.0 && !inHypo) {
-                    hypo_count++
-                    inHypo = true
-                } else if (bg >= 70.0) {
-                    inHypo = false
-                }
-            }
-            
-            // 3. Coefficient de Variation (CV%)
-            val mean = bgReadings.average()
-            val variance = bgReadings.map { (it - mean).pow(2) }.average()
-            val stdDev = sqrt(variance)
-            val cv_percent = (stdDev / mean) * 100.0
-            
-            // 4. Oscillations (crossings du seuil 120 mg/dL)
-            var crossing_count = 0
-            for (i in 1 until bgReadings.size) {
-                val prev = bgReadings[i - 1]
-                val curr = bgReadings[i]
-                if ((prev < 120.0 && curr > 120.0) || (prev > 120.0 && curr < 120.0)) {
-                    crossing_count++
-                }
-            }
-            
-            val performance = GlycemicPerformance(
-                tir70_180 = tir70_180,
-                tir70_140 = tir70_140,
-                tir140_180 = tir140_180,
-                tir180_250 = tir180_250,
-                tir_above_250 = tir_above_250,
-                tir_above_180 = tir_above_180,
-                hypo_count = hypo_count,
-                cv_percent = cv_percent,
-                crossing_count = crossing_count,
-                mean_bg = mean,
-                total_readings = bgReadings.size
-            )
-            
-            log.debug(LTag.APS, "UnifiedReactivityLearner: TIR=${tir70_180.toInt()}%, Hyper=${tir_above_180.toInt()}%, " +
-                "Hypo=$hypo_count, CV=${cv_percent.toInt()}%, Crossings=$crossing_count")
+            val performance = GlycemicStats.calculate(bgReadingsList, start, now, minSamples) ?: return null
+            log.debug(LTag.APS, "UnifiedReactivityLearner: window=${hours}h, observed=${performance.observedMinutes}min, " +
+                "coverage=${performance.coveragePercent}%, TIR=${performance.tir70_180}%, hypos=${performance.hypo_count}")
             
             return performance
             
         } catch (e: Exception) {
-            log.error(LTag.APS, "UnifiedReactivityLearner: Erreur analyse 24h", e)
+            log.error(LTag.APS, "UnifiedReactivityLearner: Error analyzing ${hours}h", e)
             return null
         }
     }
@@ -354,58 +290,7 @@ class UnifiedReactivityLearner @Inject constructor(
      * Analyse les dernières 2h pour réaction rapide
      */
     fun analyzeLast2h(): GlycemicPerformance? {
-        val now = dateUtil.now()
-        val start = now - (2 * 60 * 60 * 1000L)  // 2 hours
-        
-        try {
-            val bgReadingsList = persistenceLayer.getBgReadingsDataFromTime(start, false)
-                .blockingGet()
-            
-            val bgReadings = bgReadingsList
-                .mapNotNull { gv -> if (gv.value > 39.0) gv.value else null }
-            
-            if (bgReadings.isEmpty() || bgReadings.size < 6) {
-                return null  // Need at least 30 min of data
-            }
-            
-            val inRange70_140 = bgReadings.count { it in 70.0..140.0 }
-            val inRange140_180 = bgReadings.count { it in 140.0..180.0 }
-            val inRange180_250 = bgReadings.count { it in 180.0..250.0 }
-            val above250 = bgReadings.count { it > 250.0 }
-            val above180 = bgReadings.count { it > 180.0 }
-            
-            val tir70_140 = (inRange70_140.toDouble() / bgReadings.size) * 100.0
-            val tir140_180 = (inRange140_180.toDouble() / bgReadings.size) * 100.0
-            val tir70_180 = tir70_140 + tir140_180
-            val tir180_250 = (inRange180_250.toDouble() / bgReadings.size) * 100.0
-            val tir_above_250 = (above250.toDouble() / bgReadings.size) * 100.0
-            val tir_above_180 = (above180.toDouble() / bgReadings.size) * 100.0
-            
-            var hypo_count = 0
-            var inHypo = false
-            for (bg in bgReadings) {
-                if (bg < 70.0 && !inHypo) { hypo_count++; inHypo = true }
-                else if (bg >= 70.0) { inHypo = false }
-            }
-            
-            val mean = bgReadings.average()
-            val variance = bgReadings.map { (it - mean).pow(2) }.average()
-            val cv_percent = (sqrt(variance) / mean) * 100.0
-            
-            var crossing_count = 0
-            for (i in 1 until bgReadings.size) {
-                if ((bgReadings[i-1] < 120 && bgReadings[i] > 120) || 
-                    (bgReadings[i-1] > 120 && bgReadings[i] < 120)) crossing_count++
-            }
-            
-            return GlycemicPerformance(
-                tir70_180, tir70_140, tir140_180, tir180_250, tir_above_250,
-                tir_above_180, hypo_count, cv_percent, crossing_count, mean, bgReadings.size
-            )
-        } catch (e: Exception) {
-            log.error(LTag.APS, "UnifiedReactivityLearner: Error in 2h analysis", e)
-            return null
-        }
+        return analyzeWindow(2, 6)
     }
     
     /**

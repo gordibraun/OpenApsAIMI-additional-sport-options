@@ -9,4 +9,12 @@ abstract class Callback : Runnable {
         this.result = result
         return this
     }
+
+    /** Revalidate immutable APS inputs after connecting to the pump, before issuing a dose command. */
+    open fun validationErrorBeforeDelivery(): String? = null
+
+    /** Carb persistence is a separate event from the pump's insulin delivery result. */
+    open fun onCarbsStored(result: PumpEnactResult) {
+        result(result).run()
+    }
 }

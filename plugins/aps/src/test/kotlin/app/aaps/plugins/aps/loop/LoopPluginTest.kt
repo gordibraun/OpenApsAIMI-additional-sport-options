@@ -53,6 +53,7 @@ class LoopPluginTest : TestBaseWithProfile() {
     @Mock lateinit var processedDeviceStatusData: ProcessedDeviceStatusData
     @Mock lateinit var glucoseStatusProvider: GlucoseStatusProvider
     @Mock lateinit var pumpStatusProvider: PumpStatusProvider
+    @Mock lateinit var aimiMealAssist: app.aaps.core.interfaces.aps.AimiMealAssist
 
     private lateinit var loopPlugin: LoopPlugin
 
@@ -62,7 +63,7 @@ class LoopPluginTest : TestBaseWithProfile() {
         loopPlugin = LoopPlugin(
             aapsLogger, aapsSchedulers, rxBus, preferences, config,
             constraintChecker, rh, profileFunction, context, commandQueue, activePlugin, virtualPumpPlugin, iobCobCalculator, processedTbrEbData, receiverStatusStore, fabricPrivacy, dateUtil, uel,
-            persistenceLayer, runningConfiguration, uiInteraction, processedDeviceStatusData, glucoseStatusProvider, pumpEnactResultProvider, pumpStatusProvider
+            persistenceLayer, runningConfiguration, uiInteraction, processedDeviceStatusData, glucoseStatusProvider, pumpEnactResultProvider, pumpStatusProvider, aimiMealAssist
         )
         whenever(activePlugin.activePump).thenReturn(virtualPumpPlugin)
         whenever(context.getSystemService(Context.NOTIFICATION_SERVICE)).thenReturn(notificationManager)
@@ -95,6 +96,44 @@ class LoopPluginTest : TestBaseWithProfile() {
         assertThat(loopPlugin.isFragmentVisible()).isFalse()
         loopPlugin.setFragmentVisible(PluginType.LOOP, true)
         assertThat(loopPlugin.isFragmentVisible()).isTrue()
+    }
+
+    @Test fun queuedRequestKeepsOriginalInputsWhenLateHistoryArrives() {
+        val now = 10_000_000L
+        whenever(dateUtil.now()).thenReturn(now + 30_000)
+        val request = org.mockito.kotlin.mock<app.aaps.core.interfaces.aps.APSResult>()
+        whenever(request.iobData).thenReturn(arrayOf(app.aaps.core.interfaces.aps.IobTotal(now,
+            bolusInputs = emptyList(), bolusInputsSince = now - 18_000_000)))
+        whenever(persistenceLayer.getBolusesFromTime(any(), any())).thenReturn(Single.just(emptyList()))
+        val callback = loopPlugin.withInsulinInputValidation(request, null, "delivery_smb")
+        assertThat(callback.validationErrorBeforeDelivery()).isNull()
+        val late = app.aaps.core.data.model.BS(timestamp = now - 600_000, amount = 2.0,
+            dateCreated = now + 20_000, type = app.aaps.core.data.model.BS.Type.NORMAL)
+        whenever(persistenceLayer.getBolusesFromTime(any(), any())).thenReturn(Single.just(listOf(late)))
+        assertThat(callback.validationErrorBeforeDelivery()).isNotNull()
+    }
+
+    @Test fun missingInputSnapshotCannotAuthorizeQueuedDose() {
+        val request = org.mockito.kotlin.mock<app.aaps.core.interfaces.aps.APSResult>()
+        val callback = loopPlugin.withInsulinInputValidation(request, null, "delivery_smb")
+        assertThat(callback.validationErrorBeforeDelivery()).isNotNull()
+    }
+
+    @Test fun zeroBasalSurvivesInvalidSmbInputsInSameRequest() {
+        val now = 10_000_000L
+        whenever(dateUtil.now()).thenReturn(now)
+        whenever(virtualPumpPlugin.isInitialized()).thenReturn(true)
+        whenever(virtualPumpPlugin.pumpDescription).thenReturn(PumpDescription())
+        whenever(virtualPumpPlugin.baseBasalRate).thenReturn(1.0)
+        val request = org.mockito.kotlin.mock<app.aaps.core.interfaces.aps.APSResult>()
+        whenever(request.date).thenReturn(now)
+        whenever(request.isTempBasalRequested).thenReturn(true)
+        whenever(request.duration).thenReturn(30)
+        whenever(request.rate).thenReturn(0.0)
+        whenever(request.smb).thenReturn(1.3)
+        loopPlugin.applyTBRRequest(request, validProfile, null)
+        verify(commandQueue).tempBasalAbsolute(eq(0.0), eq(30), eq(false), eq(validProfile),
+            eq(app.aaps.core.interfaces.pump.PumpSync.TemporaryBasalType.NORMAL), anyOrNull())
     }
 
     @Test

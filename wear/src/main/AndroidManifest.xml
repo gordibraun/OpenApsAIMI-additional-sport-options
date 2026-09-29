@@ -603,6 +603,18 @@
             </intent-filter>
         </activity>
 
+        <activity android:name=".interaction.actions.WatchControlActivity" android:exported="true" android:label="AAPS" android:launchMode="singleTask" />
+        <activity-alias
+            android:name=".interaction.actions.WatchCarbsShortcut"
+            android:targetActivity=".interaction.actions.WatchControlActivity"
+            android:exported="true"
+            android:label="@string/action_carbs" />
+        <activity-alias
+            android:name=".interaction.actions.WatchActivityShortcut"
+            android:targetActivity=".interaction.actions.WatchControlActivity"
+            android:exported="true"
+            android:label="@string/menu_exercise_mode" />
+
         <activity
             android:name=".interaction.WatchfaceConfigurationActivity"
             android:exported="true"

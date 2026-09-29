@@ -130,20 +130,18 @@ class HardLimitsImplTest : TestBase() {
 
     @Test
     fun `minDia returns correct values for all ages`() {
-        whenever(preferences.get(StringKey.SafetyAge)).thenReturn("child")
-        assertThat(hardLimits.minDia()).isEqualTo(5.0)
-
-        whenever(preferences.get(StringKey.SafetyAge)).thenReturn("pregnant")
-        assertThat(hardLimits.minDia()).isEqualTo(5.0)
+        mapOf("child" to 5.0, "teenage" to 5.0, "adult" to 4.0, "resistantadult" to 4.0, "pregnant" to 4.0).forEach { (age, expected) ->
+            whenever(preferences.get(StringKey.SafetyAge)).thenReturn(age)
+            assertThat(hardLimits.minDia()).isEqualTo(expected)
+        }
     }
 
     @Test
     fun `maxDia returns correct values for all ages`() {
-        whenever(preferences.get(StringKey.SafetyAge)).thenReturn("child")
-        assertThat(hardLimits.maxDia()).isEqualTo(9.0)
-
-        whenever(preferences.get(StringKey.SafetyAge)).thenReturn("pregnant")
-        assertThat(hardLimits.maxDia()).isEqualTo(10.0)
+        mapOf("child" to 9.0, "teenage" to 9.0, "adult" to 9.0, "resistantadult" to 9.0, "pregnant" to 12.0).forEach { (age, expected) ->
+            whenever(preferences.get(StringKey.SafetyAge)).thenReturn(age)
+            assertThat(hardLimits.maxDia()).isEqualTo(expected)
+        }
     }
 
     @Test

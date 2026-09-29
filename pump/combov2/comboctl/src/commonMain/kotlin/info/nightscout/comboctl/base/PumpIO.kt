@@ -1,5 +1,8 @@
 package info.nightscout.comboctl.base
 
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.TimeSource
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -26,6 +29,9 @@ import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 
 private val logger = Logger.get("PumpIO")
+
+// See sendShortRTButtonPress(): an RT button held longer than this is auto-repeated by the Combo.
+private val MAX_SHORT_RT_BUTTON_PRESS_HOLD = 300.milliseconds
 
 private object PumpIOConstants {
     const val MAX_NUM_REGULAR_CONNECTION_ATTEMPTS = 3
@@ -775,7 +781,14 @@ class PumpIO(
         // barrier is woken up. Pass "false" to these functions
         // to let them know that they need to abort any loop
         // they might be running.
+        longRTPressLoopRunning = false
         rtButtonConfirmationBarrier.trySend(false)
+
+        // Long-press cancellation sends NO_BUTTON; let it finish before stopping IO.
+        withContext(NonCancellable) {
+            currentLongRTPressJob?.cancelAndJoin()
+            currentLongRTPressJob = null
+        }
 
         stopCMDPingHeartbeat()
         stopRTKeepAliveHeartbeat()
@@ -1099,11 +1112,22 @@ class PumpIO(
 
             try {
                 withContext(sequencedDispatcher) {
+                    val pressStart = TimeSource.Monotonic.markNow()
                     sendPacketWithoutResponse(ApplicationLayer.createRTButtonStatusPacket(buttonCodes, true))
                     // Wait by "receiving" a value. We aren't actually interested
                     // in that value, just in receive() suspending this coroutine
                     // until the RT button was confirmed by the Combo.
-                    rtButtonConfirmationBarrier.receive()
+                    //
+                    // Releasing quickly is what makes this a tap. The Combo only sends a display
+                    // frame when something changes, so on a static screen waiting for the
+                    // confirmation can take over a second - and a MENU/CHECK held that long is
+                    // auto-repeated by the Combo, skipping past the intended screen or discarding
+                    // the edit. Measured on pump 10392647: presses up to ~0.3 s always registered,
+                    // presses from ~0.85 s did not take effect. So cap the wait; the transport's
+                    // own 200 ms send interval still paces us, and callers verify the result on
+                    // screen and repeat the press if the Combo missed it.
+                    withTimeoutOrNull(MAX_SHORT_RT_BUTTON_PRESS_HOLD) { rtButtonConfirmationBarrier.receive() }
+                    logger(LogLevel.DEBUG) { "Short RT button press of ${buttons.joinToString()} held for ${pressStart.elapsedNow()}; releasing" }
                 }
             } catch (e: CancellationException) {
                 delayBeforeNoButton = true

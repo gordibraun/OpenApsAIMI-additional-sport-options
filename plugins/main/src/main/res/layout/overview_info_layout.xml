@@ -176,7 +176,7 @@
         android:layout_marginEnd="10sp"
         android:ellipsize="end"
         android:maxLines="1"
-        android:text="1.0 - Борьба с ночным заливанием"
+                android:text="1.1 - Борьба с горками"
         android:textAlignment="viewEnd"
         android:textSize="10sp"
         app:layout_constraintEnd_toStartOf="@+id/simple_mode"

@@ -5,6 +5,7 @@ import app.aaps.core.keys.DoubleKey
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.keys.interfaces.Preferences
+import app.aaps.plugins.aps.openAPSAIMI.ISF.KalmanIsfState
 import kotlin.math.abs
 import kotlin.math.ln
 
@@ -55,6 +56,15 @@ class KalmanISFCalculator(
     }
 
     private var kalmanFilter: KalmanFilter? = null
+
+    fun snapshot(): KalmanIsfState? = kalmanFilter?.let { KalmanIsfState(it.stateEstimate, it.estimationError) }
+
+    fun restore(state: KalmanIsfState?) {
+        kalmanFilter = state?.takeIf { it.isValid() }?.let {
+            // Measurement variance is recomputed from current deltas on the next update.
+            KalmanFilter(it.estimate, it.error, 0.5, 2.0)
+        }
+    }
 
     private fun computeEffectiveTDD(): Double {
         val tdd7P = preferences.get(DoubleKey.OApsAIMITDD7)

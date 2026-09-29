@@ -982,8 +982,8 @@ class RTNavigationTest : TestBase() {
                 // No 2 quantity here, on purpose, to test overshoot handling
                 ParsedScreen.TimeAndDateSettingsMinuteScreen(3),
                 ParsedScreen.TimeAndDateSettingsMinuteScreen(2),
-                // This is a dummy screen to avoid an exception due to the next() call in TestRTNavigationContext.shortButtonPress()
-                ParsedScreen.TimeAndDateSettingsMinuteScreen(0)
+                // Screen shown after the final short press; adjustQuantityOnScreen() verifies it against the target.
+                ParsedScreen.TimeAndDateSettingsMinuteScreen(2)
             )
         )
 

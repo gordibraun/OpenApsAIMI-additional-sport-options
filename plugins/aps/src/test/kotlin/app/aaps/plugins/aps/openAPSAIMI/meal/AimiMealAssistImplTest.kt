@@ -2,43 +2,28 @@ package app.aaps.plugins.aps.openAPSAIMI.meal
 
 import app.aaps.core.interfaces.aps.AimiMealInput
 import app.aaps.core.interfaces.logging.AAPSLogger
-import app.aaps.core.keys.DoubleKey
-import app.aaps.core.keys.interfaces.Preferences
-import io.mockk.every
 import io.mockk.mockk
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
-import org.junit.Before
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import java.time.LocalDate
+import java.time.ZoneId
 
 class AimiMealAssistImplTest {
 
     private val logger: AAPSLogger = mockk(relaxed = true)
-    private val preferences: Preferences = mockk(relaxed = true)
 
     private lateinit var sut: AimiMealAssistImpl
 
-    @Before
+    @BeforeEach
     fun setUp() {
-        every { preferences.get(DoubleKey.OApsAIMISnackFactor) } returns 100.0
-        every { preferences.get(DoubleKey.OApsAIMISnackPrebolus) } returns 1.0
-        every { preferences.get(DoubleKey.OApsAIMIMealFactor) } returns 100.0
-        every { preferences.get(DoubleKey.OApsAIMIMealPrebolus) } returns 0.0
-        every { preferences.get(DoubleKey.OApsAIMIBFFactor) } returns 100.0
-        every { preferences.get(DoubleKey.OApsAIMIBFPrebolus) } returns 0.0
-        every { preferences.get(DoubleKey.OApsAIMILunchFactor) } returns 100.0
-        every { preferences.get(DoubleKey.OApsAIMILunchPrebolus) } returns 0.0
-        every { preferences.get(DoubleKey.OApsAIMIDinnerFactor) } returns 100.0
-        every { preferences.get(DoubleKey.OApsAIMIDinnerPrebolus) } returns 0.0
-        every { preferences.get(DoubleKey.OApsAIMIHCFactor) } returns 100.0
-        every { preferences.get(DoubleKey.OApsAIMIHighCarbPrebolus) } returns 0.0
-
-        sut = AimiMealAssistImpl(logger, preferences)
+        sut = AimiMealAssistImpl(logger, mockk(relaxed = true))
     }
 
     @Test
-    fun `below required carbs forces zero bolus even if prebolus would otherwise add insulin`() {
+    fun `below required carbs forces zero bolus`() {
         val input = baseInput(
             carbs = 8,
             requiredCarbs = 15,
@@ -66,12 +51,44 @@ class AimiMealAssistImplTest {
     }
 
     @Test
+    fun `exact rescue carbs cannot revive positive nonfood correction`() {
+        for (foodType in listOf("balanced", "fast", "slow")) {
+            for (carbs in 0..3) {
+                val input = baseInput(
+                    carbs = carbs, requiredCarbs = 3,
+                    wizardCalculatedBolus = carbs / 10.0 + 0.5,
+                    wizardInsulinFromCarbs = carbs / 10.0,
+                    selectedFoodType = foodType, basalIob = -0.5
+                )
+                assertEquals(0.0, sut.evaluate(input).recommendedBolus, 0.0, "carbs=$carbs type=$foodType")
+            }
+        }
+    }
+
+    @Test
+    fun `zero requirement still allows ordinary food and correction`() {
+        val input = baseInput(carbs = 3, requiredCarbs = 0,
+            wizardCalculatedBolus = 0.8, wizardInsulinFromCarbs = 0.3, basalIob = -0.5)
+        assertEquals(0.8, sut.evaluate(input).recommendedBolus, 0.0)
+    }
+
+    @Test
+    fun `rescue boundary changes automatic proposal but preserves explicit manual adjustment`() {
+        val base = baseInput(carbs = 3, requiredCarbs = 3,
+            wizardCalculatedBolus = 0.8, wizardInsulinFromCarbs = 0.3)
+        for (manual in listOf(-0.5, 0.0, 0.2)) {
+            val input = base.copy(correction = manual, wizardCalculatedBolus = 0.8 + manual)
+            assertEquals(manual.coerceAtLeast(0.0), sut.evaluate(input).recommendedBolus, 0.0)
+        }
+    }
+
+    @Test
     fun `one gram above protective carbs can produce insulin again`() {
         val input = baseInput(
             carbs = 16,
             requiredCarbs = 15,
             wizardCalculatedBolus = 0.10,
-            wizardInsulinFromCarbs = 2.67
+            wizardInsulinFromCarbs = 1.6
         )
 
         val decision = sut.evaluate(input)
@@ -196,7 +213,7 @@ class AimiMealAssistImplTest {
 
         val decision = sut.evaluate(topUpInput)
 
-        assertEquals(1.45, decision.recommendedBolus, 0.0)
+        assertEquals(1.5, decision.recommendedBolus, 0.0)
     }
 
     @Test
@@ -280,7 +297,9 @@ class AimiMealAssistImplTest {
             wizardInsulinFromCarbs = 1.33,
             selectedFoodType = "balanced"
         )
-        sut.activate(extraInput, sut.evaluate(extraInput))
+        val extraDecision = sut.evaluate(extraInput)
+        assertEquals(0.0, extraDecision.recommendedBolus, 0.0)
+        sut.activate(extraInput, extraDecision)
 
         val activeEpisode = checkNotNull(sut.activeEpisode())
         assertEquals(20, activeEpisode.carbs)
@@ -465,6 +484,73 @@ class AimiMealAssistImplTest {
 
         assertNull(sut.activeEpisode())
     }
+
+    @Test
+    fun `breakfast replay keeps protective carbs without halving the food component`() {
+        val input = baseInput(
+            timestamp = atHour(7), carbs = 30, requiredCarbs = 5,
+            wizardCalculatedBolus = 2.9708769194648807,
+            wizardInsulinFromCarbs = 30.0 / 10.3,
+            bg = 79.0, basalIob = -0.767
+        ).copy(ic = 10.3, isf = 55.436061005843314,
+            wizardInsulinFromBg = -0.6854743881603449,
+            wizardInsulinFromTrend = -0.023270051598074867,
+            wizardInsulinFromBasalIob = -0.767)
+
+        val decision = sut.evaluate(input)
+
+        // Replay the program's arithmetic, not a recommended patient dose.
+        assertEquals(2.5, decision.recommendedBolus, 0.0001)
+        assertEquals(1.0, decision.modeFactor)
+        assertEquals(0.0, decision.prebolusBonus)
+    }
+
+    @Test
+    fun `breakfast at full percentage does not add a fixed manual mode prebolus`() {
+        val input = baseInput(timestamp = atHour(7), carbs = 30, requiredCarbs = 0,
+            wizardCalculatedBolus = 3.0, wizardInsulinFromCarbs = 3.0)
+
+        for (carbTime in listOf(-15, 0, 15)) {
+            val decision = sut.evaluate(input.copy(carbTimeMinutes = carbTime))
+            assertEquals(3.0, decision.recommendedBolus, 0.0001, "carbTime=$carbTime")
+            assertEquals(0.0, decision.prebolusBonus)
+        }
+    }
+
+    @Test
+    fun `ordinary meal dose is independent of hour and former meal size modes`() {
+        for (hour in 0..23) {
+            for (carbs in listOf(10, 15, 16, 30, 39, 40, 60)) {
+                val decision = sut.evaluate(baseInput(timestamp = atHour(hour), carbs = carbs,
+                    requiredCarbs = 0, wizardCalculatedBolus = carbs / 10.0,
+                    wizardInsulinFromCarbs = carbs / 10.0))
+                assertEquals(carbs / 10.0, decision.recommendedBolus, 0.0001, "hour=$hour carbs=$carbs")
+                assertEquals(1.0, decision.modeFactor)
+                assertEquals(0.0, decision.prebolusBonus)
+                assertEquals("meal", decision.mealMode)
+            }
+        }
+    }
+
+    @Test
+    fun `explicit food type still changes its own food component`() {
+        for ((type, expected) in mapOf("balanced" to 3.0, "fast" to 2.4, "slow" to 2.75)) {
+            val input = baseInput(timestamp = atHour(7), carbs = 30, requiredCarbs = 0,
+                wizardCalculatedBolus = 3.0, wizardInsulinFromCarbs = 3.0, selectedFoodType = type)
+            assertEquals(expected, sut.evaluate(input).recommendedBolus, 0.0001, type)
+        }
+    }
+
+    @Test
+    fun `explicit wizard percentage and existing insulin correction are not replaced by meal modes`() {
+        val input = baseInput(timestamp = atHour(7), carbs = 30, requiredCarbs = 0,
+            wizardCalculatedBolus = 1.5, wizardInsulinFromCarbs = 3.0)
+        assertEquals(1.5, sut.evaluate(input).recommendedBolus, 0.0001)
+        assertEquals(0.0, sut.evaluate(input.copy(wizardCalculatedBolus = -0.2)).recommendedBolus)
+    }
+
+    private fun atHour(hour: Int): Long =
+        LocalDate.of(2026, 9, 14).atTime(hour, 25).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
 
     private fun baseInput(
         timestamp: Long = 0L,

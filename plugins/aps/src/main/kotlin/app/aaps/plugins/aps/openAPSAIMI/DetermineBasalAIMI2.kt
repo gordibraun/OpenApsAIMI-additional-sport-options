@@ -53,6 +53,8 @@ import app.aaps.plugins.aps.openAPSAIMI.pkpd.PkPdRuntime
 import app.aaps.plugins.aps.openAPSAIMI.ports.PkpdPort
 import app.aaps.plugins.aps.openAPSAIMI.safety.HypoTools
 import app.aaps.plugins.aps.openAPSAIMI.safety.RecentSmbOverdeliveryGuard
+import app.aaps.plugins.aps.openAPSAIMI.safety.EarlyOverdeliveryGuard
+import app.aaps.plugins.aps.openAPSAIMI.safety.SmbCapAttribution
 import app.aaps.plugins.aps.openAPSAIMI.safety.SafetyDecision
 import app.aaps.plugins.aps.openAPSAIMI.smb.SmbDampingUsecase
 import app.aaps.plugins.aps.openAPSAIMI.smb.SmbInstructionExecutor
@@ -63,7 +65,14 @@ import app.aaps.plugins.aps.openAPSAIMI.wcycle.WCycleInfo
 import app.aaps.plugins.aps.openAPSAIMI.wcycle.WCycleLearner
 import app.aaps.plugins.aps.openAPSAIMI.wcycle.WCyclePreferences
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.AdvancedPredictionEngine
-import app.aaps.plugins.aps.openAPSAIMI.pkpd.CarbAbsorptionModel
+import app.aaps.plugins.aps.openAPSAIMI.pkpd.ForecastCarbImpact
+import app.aaps.plugins.aps.openAPSAIMI.pkpd.ForecastDecisionSearch
+import app.aaps.core.interfaces.aps.DecisionStage
+import app.aaps.plugins.aps.decisiontrace.DecisionJournal
+import app.aaps.plugins.aps.decisiontrace.DecisionTraceLive
+import app.aaps.core.interfaces.aps.DecisionValue
+import app.aaps.plugins.aps.openAPSAIMI.safety.MealDeviationInput
+import app.aaps.plugins.aps.openAPSAIMI.pkpd.DeclaredCarbForecast
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.InsulinActionProfiler
 import java.io.File
 import java.text.DecimalFormat
@@ -117,6 +126,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
     @Inject lateinit var aimiMealAssist: AimiMealAssist
     @Inject lateinit var persistenceLayer: PersistenceLayer
     @Inject lateinit var tddCalculator: TddCalculator
+    @Inject lateinit var isfStateStore: app.aaps.plugins.aps.openAPSAIMI.ISF.IsfStateStore
     @Inject lateinit var tirCalculator: TirCalculator
     @Inject lateinit var dateUtil: DateUtil
     @Inject lateinit var profileFunction: ProfileFunction
@@ -169,14 +179,16 @@ class DetermineBasalaimiSMB2 @Inject constructor(
     private var lastHypoBlockAt: Long = 0L
     private var hypoClearCandidateSince: Long? = null
     private var mealModeSmbReason: String? = null
-    private val consoleError = mutableListOf<String>()
-    private val consoleLog = mutableListOf<String>()
+    private var traceRunId = 0L
+    private val decisionJournal = DecisionJournal { DecisionTraceLive.history.append(traceRunId, it) }
+    private val consoleError = decisionJournal.log("Диагностика")
+    private val consoleLog = decisionJournal.log("Расчёт")
     private val externalDir = File(Environment.getExternalStorageDirectory().absolutePath + "/Documents/AAPS")
     //private val modelFile = File(externalDir, "ml/model.tflite")
     //private val modelFileUAM = File(externalDir, "ml/modelUAM.tflite")
     private val csvfile = File(externalDir, "oapsaimiML2_records.csv")
     private val csvfile2 = File(externalDir, "oapsaimi2_records.csv")
-    private val pkpdIntegration = PkPdIntegration(preferences)
+    private val pkpdIntegration by lazy { PkPdIntegration(preferences, isfStateStore, "decision") }
     //private val tempFile = File(externalDir, "temp.csv")
     private var bgacc = 0.0
     private var predictedSMB = 0.0f
@@ -239,7 +251,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
     private var recentSteps180Minutes: Int = 0
     private var basalaimi = 0.0f
     private var aimilimit = 0.0f
-    private var ci = 0.0f
+    private var estimatedCarbRatio = 0.0f
     private var sleepTime = false
     private var sportTime = false
     private var snackTime = false
@@ -908,7 +920,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         aimiMealAssist.activeEpisode()?.selectedFoodType != null
 
     private fun nightNoMealContext(mealData: MealData): Boolean {
-        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val hour = Calendar.getInstance().apply { timeInMillis = traceRunId }.get(Calendar.HOUR_OF_DAY)
         val nightWindow = sleepTime || hour >= 22 || hour <= 6
         return nightWindow &&
             noActiveMealMode() &&
@@ -921,7 +933,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         proposedSmb: Double,
         recentSmb15: Double,
         recentSmb30: Double,
-        targetBg: Double
+        targetBg: Double,
+        minGuardBg: Double
     ): Pair<Double?, String?> {
         val decision = RecentSmbOverdeliveryGuard.evaluate(
             RecentSmbOverdeliveryGuard.Input(
@@ -939,7 +952,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 delta = delta.toDouble(),
                 eventualBg = eventualBG,
                 predictedBg = predictedBg.toDouble(),
-                minGuardBg = minOf(predictedBg.toDouble(), eventualBG),
+                minGuardBg = minGuardBg,
                 targetBg = targetBg
             )
         )
@@ -1017,9 +1030,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         else -> 0.0
     }
 
-    private fun unannouncedFoodConfidence(mealData: MealData, rescueFastRebound: Boolean): Double {
-        val explicitFoodType = aimiMealAssist.activeEpisode()?.selectedFoodType
-        if (mealData.mealCOB > 0.0 && explicitFoodType != null) return 0.0
+    private fun unannouncedFoodConfidence(mealData: MealData, rescueFastRebound: Boolean, forecastCobG: Double, selectedFoodType: String?): Double {
+        if (explicitCarbEntryActive(forecastCobG) && selectedFoodType != null) return 0.0
         if (rescueFastRebound) return 0.15
 
         val sustainedRiseScore = listOf(
@@ -1031,7 +1043,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         ).sum()
         val recentLowPenalty = if (bg < 95.0 || lastHourTIRLow > 0.0 || lastHourTIRLow100 > 0.0) 0.35 else 0.0
         val freshSmbPenalty = if (freshSmbPressureUnits() >= 0.2) 0.25 else 0.0
-        val cobSupport = if (mealData.mealCOB > 0.0) 0.20 else 0.0
+        val cobSupport = if (explicitCarbEntryActive(forecastCobG)) 0.20 else 0.0
         val nightNoMeal = nightNoMealContext(mealData)
         val nightNoMealPenalty = if (nightNoMeal) {
             when {
@@ -1052,8 +1064,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
     }
 
-    private fun explicitCarbEntryActive(mealData: MealData): Boolean =
-        mealData.mealCOB > 0.0 || aimiMealAssist.activeEpisode()?.selectedFoodType != null
+    private fun explicitCarbEntryActive(forecastCobG: Double): Boolean =
+        forecastCobG.isFinite() && forecastCobG > 0.0
 
     private fun rescueFastSmbCap(): Float = when {
         bg < 140.0 -> 0f
@@ -1061,22 +1073,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         else -> 0.5f
     }
 
-    private fun earlyOverdeliverySmbCap(mealData: MealData): Double? {
+    private fun earlyOverdeliveryDecision(mealData: MealData): EarlyOverdeliveryGuard.Decision {
         val noActiveMealMode = noActiveMealMode()
-        val noVisibleCarbTail = mealData.mealCOB <= 5.0
-        val smallActiveCarbTail = mealData.mealCOB > 0.0 && mealData.mealCOB <= 6.0
-        val freshSmb = lastsmbtime in 0..35 && lastBolusSMBUnit >= 0.3f
-        val strongRecentSmb = lastsmbtime in 0..60 && lastBolusSMBUnit >= 0.8f
-        val insulinPressure = iob >= 1.0f || freshSmb || strongRecentSmb
-        val fallingOrTurningDown = delta <= -1.0f ||
-            shortAvgDelta <= -0.5f ||
-            decceleratingUp == 1 ||
-            acceleratingDown == 1
-        val forecastNearLow = minOf(predictedBg.toDouble(), eventualBG) < 125.0
-        val notYetLowButVulnerable = bg in 90.0..170.0
         val explicitFoodTypeRaw = aimiMealAssist.activeEpisode()?.selectedFoodType
-        val explicitFoodType = explicitFoodTypeRaw?.lowercase()
-        val explicitlySlowCarbs = explicitFoodType == "slow"
         val recentSmb15 = recentSmbUnits(15)
         val recentSmb30 = recentSmbUnits(30)
         val cumulativeSmbGuard = RecentSmbOverdeliveryGuard.evaluate(
@@ -1105,43 +1104,22 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     "COB=${"%.1f".format(mealData.mealCOB)}, " +
                     "прогноз=${"%.0f".format(predictedBg)}, итог=${"%.0f".format(eventualBG)}"
             )
-            return 0.0
         }
-        val sharpSmallTailRise = noActiveMealMode &&
-            smallActiveCarbTail &&
-            !explicitlySlowCarbs &&
-            bg in 100.0..170.0 &&
-            delta >= 3.0f &&
-            shortAvgDelta >= 2.0f
-        val repeatSmbOnSmallTail = noActiveMealMode &&
-            smallActiveCarbTail &&
-            !explicitlySlowCarbs &&
-            strongRecentSmb &&
-            bg < 180.0 &&
-            (delta >= 0.0f || shortAvgDelta >= 0.0f)
-
-        if (noActiveMealMode &&
-            noVisibleCarbTail &&
-            insulinPressure &&
-            notYetLowButVulnerable &&
-            (fallingOrTurningDown || forecastNearLow)
-        ) {
-            return 0.0
-        }
-
-        if (repeatSmbOnSmallTail) {
-            return 0.0
-        }
-
-        if (sharpSmallTailRise) {
-            return 0.3
-        }
-
-        return null
+        return EarlyOverdeliveryGuard.evaluate(EarlyOverdeliveryGuard.Input(
+            noActiveMealMode = noActiveMealMode,
+            cobG = mealData.mealCOB,
+            bg = bg,
+            delta = delta.toDouble(),
+            shortAvgDelta = shortAvgDelta.toDouble(),
+            iobU = iob.toDouble(),
+            lastSmbMinutes = lastsmbtime,
+            lastSmbU = lastBolusSMBUnit.toDouble(),
+            turningDown = decceleratingUp == 1 || acceleratingDown == 1,
+            minForecastBg = minOf(predictedBg.toDouble(), eventualBG),
+            explicitlySlowCarbs = explicitFoodTypeRaw?.lowercase() == "slow",
+            cumulativeSmbBlocked = cumulativeSmbGuard.blockSmb
+        ))
     }
-
-    private fun isEarlyOverdeliveryRisk(mealData: MealData): Boolean =
-        earlyOverdeliverySmbCap(mealData) != null
 
     private fun earlyOverdeliveryBasalRate(profileCurrentBasal: Double): Double {
         val preliminaryLowForecast = minOf(predictedBg.toDouble(), eventualBG) < 120.0
@@ -1320,6 +1298,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         overrideSafetyLimits: Boolean = false,
         forceExact: Boolean = false
     ): RT {
+        decisionJournal.enter(DecisionStage.BASAL, "Выбор временного базала",
+            "Запрошено=$_rate Е/ч на $duration мин; текущий=${currenttemp.rate}; обход обычных лимитов=$overrideSafetyLimits; точное значение=$forceExact")
         // 0) LGS kill-switch (sans récursion)
         val lgsPref = profile.lgsThreshold
         val hypoGuard = computeHypoThreshold(minBg = profile.min_bg, lgsThreshold = lgsPref)
@@ -1659,7 +1639,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return 0f
         }
 
-        if (isSportSafetyCondition()) {
+        val sportBlocked = isSportSafetyCondition()
+        decisionJournal.branch("sport", if (!sportBlocked) "pass" else if (mealWeights.guardScale > 0.0) "cap" else "block",
+            "Спортивная проверка SMB", "Режим спорта=$sportTime; множитель режима еды=${mealWeights.guardScale}")
+        if (sportBlocked) {
             if (mealWeights.guardScale > 0.0 && smbToGive > 0f) {
                 val before = smbToGive
                 smbToGive = (smbToGive * mealWeights.guardScale.toFloat()).coerceAtLeast(0f)
@@ -2043,40 +2026,45 @@ class DetermineBasalaimiSMB2 @Inject constructor(
      */
     private fun determineCriticalConditions(ctx:Context,context: SafetyContext): List<String> {
         val conditions = mutableListOf<String>()
+        fun traceCritical(id: String, blocked: Boolean): Boolean {
+            decisionJournal.branch("critical.$id", if (blocked) "block" else "pass", "Критическая проверка: $id",
+                "BG=${context.bg}; delta=${context.delta}; IOB=${context.iob}; прогноз=${context.predictedBg}; COB=${context.cob}")
+            return blocked
+        }
 
         // Vérification des conditions critiques avec des noms explicites
         //if (isHypoBlocked(context)) conditions.add("hypoGuard")
-        if (isHypoBlocked(context)) conditions.add(ctx.getString(R.string.condition_hypoguard))
+        if (traceCritical("hypo", isHypoBlocked(context))) conditions.add(ctx.getString(R.string.condition_hypoguard))
         //if (isNosmbHm(context)) conditions.add("nosmbHM")
-        if (isNosmbHm(context)) conditions.add(ctx.getString(R.string.condition_nosmbhm))
+        if (traceCritical("remission", isNosmbHm(context))) conditions.add(ctx.getString(R.string.condition_nosmbhm))
         //if (isHoneysmb(context)) conditions.add("honeysmb")
-        if (isHoneysmb(context)) conditions.add(ctx.getString(R.string.condition_honeysmb))
+        if (traceCritical("remission_fall", isHoneysmb(context))) conditions.add(ctx.getString(R.string.condition_honeysmb))
         //if (isNegDelta(context)) conditions.add("negdelta")
-        if (isNegDelta(context)) conditions.add(ctx.getString(R.string.condition_negdelta))
+        if (traceCritical("negative_delta", isNegDelta(context))) conditions.add(ctx.getString(R.string.condition_negdelta))
         //if (isNosmb(context)) conditions.add("nosmb")
-        if (isNosmb(context)) conditions.add(ctx.getString(R.string.condition_nosmb))
+        if (traceCritical("iob_low", isNosmb(context))) conditions.add(ctx.getString(R.string.condition_nosmb))
         //if (isFasting(context)) conditions.add("fasting")
-        if (isFasting(context)) conditions.add(ctx.getString(R.string.condition_fasting))
+        if (traceCritical("fasting", isFasting(context))) conditions.add(ctx.getString(R.string.condition_fasting))
         //if (isBelowMinThreshold(context)) conditions.add("belowMinThreshold")
-        if (isBelowMinThreshold(context)) conditions.add(ctx.getString(R.string.condition_belowminthreshold))
+        if (traceCritical("minimum", isBelowMinThreshold(context))) conditions.add(ctx.getString(R.string.condition_belowminthreshold))
         //if (isNewCalibration(context)) conditions.add("isNewCalibration")
-        if (isNewCalibration(context)) conditions.add(ctx.getString(R.string.condition_newcalibration))
+        if (traceCritical("calibration", isNewCalibration(context))) conditions.add(ctx.getString(R.string.condition_newcalibration))
         //if (isBelowTargetAndDropping(context)) conditions.add("belowTargetAndDropping")
-        if (isBelowTargetAndDropping(context)) conditions.add(ctx.getString(R.string.condition_belowtarget_dropping))
+        if (traceCritical("below_falling", isBelowTargetAndDropping(context))) conditions.add(ctx.getString(R.string.condition_belowtarget_dropping))
         //if (isBelowTargetAndStableButNoCob(context)) conditions.add("belowTargetAndStableButNoCob")
-        if (isBelowTargetAndStableButNoCob(context)) conditions.add(ctx.getString(R.string.condition_belowtarget_stable_nocob))
+        if (traceCritical("below_empty", isBelowTargetAndStableButNoCob(context))) conditions.add(ctx.getString(R.string.condition_belowtarget_stable_nocob))
         //if (isDroppingFast(context)) conditions.add("droppingFast")
-        if (isDroppingFast(context)) conditions.add(ctx.getString(R.string.condition_droppingfast))
+        if (traceCritical("fast_fall", isDroppingFast(context))) conditions.add(ctx.getString(R.string.condition_droppingfast))
         //if (isDroppingFastAtHigh(context)) conditions.add("droppingFastAtHigh")
-        if (isDroppingFastAtHigh(context)) conditions.add(ctx.getString(R.string.condition_droppingfastathigh))
+        if (traceCritical("high_fall", isDroppingFastAtHigh(context))) conditions.add(ctx.getString(R.string.condition_droppingfastathigh))
         //if (isDroppingVeryFast(context)) conditions.add("droppingVeryFast")
-        if (isDroppingVeryFast(context)) conditions.add(ctx.getString(R.string.condition_droppingveryfast))
+        if (traceCritical("very_fast_fall", isDroppingVeryFast(context))) conditions.add(ctx.getString(R.string.condition_droppingveryfast))
         //if (isPrediction(context)) conditions.add("prediction")
-        if (isPrediction(context)) conditions.add(ctx.getString(R.string.condition_prediction))
+        if (traceCritical("prediction_fall", isPrediction(context))) conditions.add(ctx.getString(R.string.condition_prediction))
         //if (isBg90(context)) conditions.add("bg90")
-        if (isBg90(context)) conditions.add(ctx.getString(R.string.condition_bg90))
+        if (traceCritical("below90", isBg90(context))) conditions.add(ctx.getString(R.string.condition_bg90))
         //if (isAcceleratingDown(context)) conditions.add("acceleratingDown")
-        if (isAcceleratingDown(context)) conditions.add(ctx.getString(R.string.condition_acceleratingdown))
+        if (traceCritical("accelerating_fall", isAcceleratingDown(context))) conditions.add(ctx.getString(R.string.condition_acceleratingdown))
 
         return conditions
     }
@@ -2797,14 +2785,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             .takeIf { it.isFinite() && it > 0.0 }
             ?: fallbackBasal
 
-    private fun selectedFoodTypeForForecast(cobG: Double): String? =
-        aimiMealAssist.activeEpisode()?.selectedFoodType ?: activityCarbFoodType(cobG)
-
-    private data class ParallelCarbEntry(
-        val timestamp: Long,
-        val amount: Double,
-        val foodType: String
-    )
+    private fun selectedFoodTypeForForecast(): String? =
+        aimiMealAssist.activeEpisode()?.selectedFoodType
 
     private data class ParallelCarbForecast(
         val cobG: Double,
@@ -2812,40 +2794,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val impactMgdlPer5m: List<Double>?
     )
 
-    private fun activityCarbFoodType(cobG: Double): String? {
-        val now = dateUtil.now()
-        return try {
-            val activityCarbs = persistenceLayer.getCarbsFromTimeToTimeExpanded(now - T.hours(6).msecs(), now + T.hours(6).msecs(), true)
-                .asSequence()
-                .filter { it.isValid && it.amount > 0.0 && it.notes?.contains("AIMI_ACTIVITY_V2_CARBS") == true }
-                .toList()
-            if (activityCarbs.isEmpty()) return null
-            val activityCarbAmount = activityCarbs.sumOf { it.amount }
-            if (cobG > activityCarbAmount + 2.0) {
-                consoleLog.add(
-                    "Тип углеводов нагрузки не применен ко всему COB: " +
-                        "activityCarbs=${"%.1f".format(activityCarbAmount)}г, totalCOB=${"%.1f".format(cobG)}г"
-                )
-                return null
-            }
-            activityCarbs
-                .maxByOrNull { it.timestamp }
-                ?.notes
-                ?.let { note ->
-                    when {
-                        note.contains("type=fast")     -> "fast"
-                        note.contains("type=balanced") -> "balanced"
-                        else                           -> null
-                    }
-                }
-        } catch (_: Exception) {
-            null
-        }
-    }
-
     private fun parallelCarbForecast(
         aapsCobG: Double,
-        activityEvents: List<TE>,
         delta: Double,
         carbSensitivityMgdlPerGram: Double?,
         horizonMinutes: Int = 240
@@ -2855,18 +2805,18 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
 
         val now = dateUtil.now()
-        val fallbackCob = activityForecastCob(aapsCobG, activityEvents)
+        val fallbackCob = aapsCobG
         return try {
             val activeEpisode = aimiMealAssist.activeEpisode()
             val entries = persistenceLayer.getCarbsFromTimeToTimeExpanded(
                 now - T.hours(6).msecs(),
-                now + T.mins(horizonMinutes.toLong()).msecs(),
+                now,
                 true
             )
                 .asSequence()
                 .filter { it.isValid && it.amount > 0.0 }
                 .map { carb ->
-                    ParallelCarbEntry(
+                    DeclaredCarbForecast.Entry(
                         timestamp = carb.timestamp,
                         amount = carb.amount,
                         foodType = carbFoodTypeForParallelForecast(carb.notes, carb.timestamp, activeEpisode)
@@ -2874,75 +2824,24 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 }
                 .toList()
 
-            if (entries.isEmpty()) return ParallelCarbForecast(fallbackCob, selectedFoodTypeForForecast(fallbackCob), null)
+            if (entries.isEmpty()) return ParallelCarbForecast(fallbackCob, selectedFoodTypeForForecast(), null)
 
-            val currentEntries = entries.filter { it.timestamp <= now }
-            val physiologicalCob = currentEntries.sumOf { entry ->
-                val elapsedMinutes = (now - entry.timestamp) / 60_000.0
-                entry.amount * CarbAbsorptionModel.remainingFraction(
-                    elapsedMinutes = elapsedMinutes,
-                    selectedFoodType = entry.foodType,
-                    delta = delta
-                )
-            }
-
-            if (physiologicalCob <= 0.0) {
-                return ParallelCarbForecast(0.0, null, emptyList())
-            }
-
-            val forecastCob = min(fallbackCob, physiologicalCob).coerceAtLeast(0.0)
-            val currentScale = if (physiologicalCob > 0.0 && forecastCob < physiologicalCob) {
-                (forecastCob / physiologicalCob).coerceIn(0.0, 1.0)
-            } else {
-                1.0
-            }
-            val remainingByType = currentEntries.groupBy { it.foodType }.mapValues { (_, typedEntries) ->
-                typedEntries.sumOf { entry ->
-                    val elapsedMinutes = (now - entry.timestamp) / 60_000.0
-                    entry.amount * CarbAbsorptionModel.remainingFraction(
-                        elapsedMinutes = elapsedMinutes,
-                        selectedFoodType = entry.foodType,
-                        delta = delta
-                    ) * currentScale
-                }
-            }
-            val dominantFoodType = remainingByType
-                .maxByOrNull { it.value }
-                ?.takeIf { forecastCob <= 0.0 || it.value >= forecastCob * 0.55 }
-                ?.key
-
-            val timeline = carbSensitivityMgdlPerGram
-                ?.takeIf { it.isFinite() && it > 0.0 }
-                ?.let { csf ->
-                    val steps = (horizonMinutes / 5).coerceAtLeast(1)
-                    DoubleArray(steps).also { impacts ->
-                        entries.forEach { entry ->
-                            val entryScale = if (entry.timestamp <= now) currentScale else 1.0
-                            if (entryScale <= 0.0) return@forEach
-                            for (index in impacts.indices) {
-                                val stepStart = now + T.mins((index * 5).toLong()).msecs()
-                                val stepEnd = now + T.mins(((index + 1) * 5).toLong()).msecs()
-                                val startElapsed = (stepStart - entry.timestamp) / 60_000.0
-                                val endElapsed = (stepEnd - entry.timestamp) / 60_000.0
-                                val absorbed = carbAbsorbedFractionBetween(startElapsed, endElapsed, entry.foodType, delta)
-                                if (absorbed > 0.0) impacts[index] += entry.amount * entryScale * csf * absorbed
-                            }
-                        }
-                    }.toList()
-                }
+            val forecast = DeclaredCarbForecast.calculate(entries, now, aapsCobG, delta, carbSensitivityMgdlPerGram, horizonMinutes)
+            val forecastCob = forecast.cobG
+            val dominantFoodType = forecast.dominantFoodType
 
             if (abs(forecastCob - aapsCobG) >= 0.5 || entries.size > 1) {
                 consoleLog.add(
                     "Parallel carb forecast: AAPS COB ${"%.1f".format(aapsCobG)} -> " +
-                        "phys ${"%.1f".format(physiologicalCob)} -> forecast ${"%.1f".format(forecastCob)}г; " +
+                        "phys ${"%.1f".format(forecast.physiologicalCobG)} -> forecast ${"%.1f".format(forecastCob)}г; " +
                         "entries=${entries.size}, type=${dominantFoodType ?: "mixed"}"
                 )
             }
 
-            ParallelCarbForecast(forecastCob, dominantFoodType, timeline)
+            ParallelCarbForecast(forecastCob, dominantFoodType, forecast.impactMgdlPer5m)
         } catch (e: Exception) {
             consoleLog.add("Parallel carb forecast unavailable: ${e.message}")
-            ParallelCarbForecast(fallbackCob, selectedFoodTypeForForecast(fallbackCob), null)
+            ParallelCarbForecast(fallbackCob, selectedFoodTypeForForecast(), null)
         }
     }
 
@@ -2977,85 +2876,6 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             "balanced", "normal", "ordinary" -> "balanced"
             else -> null
         }
-
-    private fun carbAbsorbedFractionBetween(
-        startElapsedMinutes: Double,
-        endElapsedMinutes: Double,
-        foodType: String,
-        delta: Double
-    ): Double {
-        if (endElapsedMinutes <= 0.0) return 0.0
-        val absorbedAtStart = 1.0 - CarbAbsorptionModel.remainingFraction(
-            elapsedMinutes = startElapsedMinutes,
-            selectedFoodType = foodType,
-            delta = delta
-        )
-        val absorbedAtEnd = 1.0 - CarbAbsorptionModel.remainingFraction(
-            elapsedMinutes = endElapsedMinutes,
-            selectedFoodType = foodType,
-            delta = delta
-        )
-        return (absorbedAtEnd - absorbedAtStart).coerceIn(0.0, 1.0)
-    }
-
-    private fun activityForecastCob(cobG: Double, activityEvents: List<TE>): Double {
-        if (!cobG.isFinite() || cobG <= 0.0) return cobG
-        val now = dateUtil.now()
-        return try {
-            val activityCarbs = persistenceLayer.getCarbsFromTimeToTimeExpanded(now - T.hours(3).msecs(), now + T.hours(1).msecs(), true)
-                .asSequence()
-                .filter { it.isValid && it.amount > 0.0 && it.notes?.contains("AIMI_ACTIVITY_V2_CARBS") == true }
-                .toList()
-            if (activityCarbs.isEmpty()) return cobG
-
-            val exerciseEvents = activityEvents
-                .asSequence()
-                .filter { it.isValid && it.type == TE.Type.EXERCISE && it.note?.contains("AIMI_ACTIVITY_V2") == true }
-                .toList()
-            if (exerciseEvents.isEmpty()) return cobG
-
-            val coveredByElapsedActivity = activityCarbs.sumOf { carb ->
-                val matchingEvent = exerciseEvents
-                    .map { event ->
-                        val durationMin = activityNoteToken(event.note, "duration")?.toLongOrNull()
-                            ?: (event.duration / T.mins(1).msecs())
-                        val tailMin = activityNoteToken(event.note, "tail")?.toLongOrNull() ?: 0L
-                        val start = event.timestamp
-                        val totalMin = (durationMin + tailMin).coerceAtLeast(5L)
-                        val end = start + T.mins(totalMin).msecs()
-                        Triple(event, start, end)
-                    }
-                    .filter { (_, start, end) ->
-                        carb.timestamp in (start - T.mins(10).msecs())..(end + T.mins(10).msecs())
-                    }
-                    .minByOrNull { (_, start, _) -> abs(carb.timestamp - start) }
-                    ?: return@sumOf 0.0
-
-                val start = matchingEvent.second
-                val end = matchingEvent.third
-                val elapsedFraction = when {
-                    now <= start -> 0.0
-                    now >= end   -> 1.0
-                    else         -> ((now - start).toDouble() / (end - start).toDouble()).coerceIn(0.0, 1.0)
-                }
-                carb.amount * elapsedFraction
-            }
-
-            val covered = coveredByElapsedActivity.coerceIn(0.0, cobG)
-            val adjustedCob = (cobG - covered).coerceAtLeast(0.0)
-            if (covered >= 0.5 && adjustedCob < cobG - 0.1) {
-                consoleLog.add(
-                    "Activity carb COB guard: forecast COB ${"%.1f".format(cobG)} -> " +
-                        "${"%.1f".format(adjustedCob)}г; " +
-                        "${"%.1f".format(covered)}г углеводов нагрузки уже покрыты прошедшей нагрузкой."
-                )
-            }
-            adjustedCob
-        } catch (e: Exception) {
-            consoleLog.add("Activity carb COB guard unavailable: ${e.message}")
-            cobG
-        }
-    }
 
     private fun activityNoteToken(note: String?, key: String): String? =
         note
@@ -3123,6 +2943,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         rT: RT,
         delta: Double,
         targetBg: Double,
+        carbImpact: ForecastCarbImpact,
         carbSensitivityMgdlPerGram: Double? = null,
         rescueFastActive: Boolean = false,
         selectedFoodTypeOverride: String? = null,
@@ -3130,12 +2951,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         activityContext: ActivityContext = ActivityContext()
     ): PredictionResult {
         consoleLog.add("Расчет прогноза PKPD: delta=$delta")
-        val selectedFoodType = selectedFoodTypeOverride ?: selectedFoodTypeForForecast(cobG)
-        val uamConfidence = unannouncedFoodConfidence(mealData, rescueFastActive)
+        val selectedFoodType = (selectedFoodTypeOverride ?: selectedFoodTypeForForecast()).takeIf { explicitCarbEntryActive(cobG) }
+        val uamConfidence = unannouncedFoodConfidence(mealData, rescueFastActive, cobG, selectedFoodType)
         val freshSmbPressure = freshSmbPressureUnits()
         selectedFoodType?.let { consoleLog.add("Тип углеводов, выбранный пользователем: $it. Введенные углеводы имеют приоритет.") }
         if (rescueFastActive) consoleLog.add("Распознано: быстрый спасательный отскок. Рост будет считаться коротким, без длинного хвоста обычной невведенной еды.")
-        if (explicitCarbEntryActive(mealData) && uamConfidence <= 0.0) {
+        if (explicitCarbEntryActive(cobG) && uamConfidence <= 0.0) {
             consoleLog.add(
                 "Невведенная еда не добавляется: активны введенные углеводы/тип еды | " +
                     "свежий SMB за 60 мин: ${"%.2f".format(freshSmbPressure)} U"
@@ -3156,9 +2977,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 selectedFoodType = selectedFoodType,
                 carbSensitivityMgdlPerGram = carbSensitivityMgdlPerGram,
                 delta = delta,
+                observedCarbImpactMgdlPer5m = carbImpact.observedMgdlPer5m,
+                remainingCiPeakMgdlPer5m = carbImpact.remainingPeakMgdlPer5m,
                 rescueFastActive = rescueFastActive,
                 uamConfidence = uamConfidence,
-                explicitCarbEntry = explicitCarbEntryActive(mealData),
+                explicitCarbEntry = explicitCarbEntryActive(cobG),
                 freshSmbPressureU = freshSmbPressure,
                 targetBG = targetBg,
                 carbImpactTimelineMgdlPer5m = carbImpactTimelineMgdlPer5m
@@ -3216,8 +3039,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         carbImpactTimelineMgdlPer5m: List<Double>? = null,
         activityContext: ActivityContext = ActivityContext()
     ): PredictionResult {
-        val selectedFoodType = selectedFoodTypeOverride ?: selectedFoodTypeForForecast(cobG)
-        val uamConfidence = unannouncedFoodConfidence(mealData, rescueFastActive)
+        val selectedFoodType = (selectedFoodTypeOverride ?: selectedFoodTypeForForecast()).takeIf { explicitCarbEntryActive(cobG) }
+        val uamConfidence = unannouncedFoodConfidence(mealData, rescueFastActive, cobG, selectedFoodType)
         val freshSmbPressure = freshSmbPressureUnits()
         val forecastMealFactorApplied = 1.0
         val advancedPredictions = try {
@@ -3233,6 +3056,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 plannedSmbU = plannedSmbU,
                 plannedRateUph = plannedRateUph,
                 profileBasalUph = profileBasalUph,
+                plannedDurationMin = rT.duration ?: 30,
                 mealFactorApplied = forecastMealFactorApplied,
                 mpcShare = mpcShare,
                 piShare = piShare,
@@ -3242,7 +3066,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 remainingCiPeakMgdlPer5m = remainingCiPeakMgdlPer5m,
                 rescueFastActive = rescueFastActive,
                 uamConfidence = uamConfidence,
-                explicitCarbEntry = explicitCarbEntryActive(mealData),
+                explicitCarbEntry = explicitCarbEntryActive(cobG),
                 freshSmbPressureU = freshSmbPressure,
                 targetBG = targetBg,
                 carbImpactTimelineMgdlPer5m = carbImpactTimelineMgdlPer5m
@@ -3268,7 +3092,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 "(SMB=${"%.2f".format(plannedSmbU)}U, базал=${"%.2f".format(plannedRateUph ?: profileBasalUph)}U/h, " +
                 "еда=${"%.2f".format(forecastMealFactorApplied)} (SMB factor ${"%.2f".format(mealFactorApplied)} не применяется повторно), " +
                 "MPC=${"%.0f".format(mpcShare * 100)}%, PI=${"%.0f".format(piShare * 100)}%, " +
-                "${if (explicitCarbEntryActive(mealData) && uamConfidence <= 0.0) "невведенная еда не добавлена" else "уверенность в невведенной еде=${"%.0f".format(uamConfidence * 100)}%"}, " +
+                "${if (explicitCarbEntryActive(cobG) && uamConfidence <= 0.0) "невведенная еда не добавлена" else "уверенность в невведенной еде=${"%.0f".format(uamConfidence * 100)}%"}, " +
                 "свежий SMB=${"%.2f".format(freshSmbPressure)}U)"
         )
         consoleLog.add(
@@ -3505,7 +3329,57 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         return notes
     }
 
-    @SuppressLint("NewApi", "DefaultLocale") fun determine_basal(
+    @Synchronized
+    fun determine_basal(
+        glucose_status: GlucoseStatusAIMI, currenttemp: CurrentTemp, iob_data_array: Array<IobTotal>, profile: OapsProfileAimi, autosens_data: AutosensResult, mealData: MealData,
+        microBolusAllowed: Boolean, currentTime: Long, flatBGsDetected: Boolean, dynIsfMode: Boolean, uiInteraction: UiInteraction
+    ): RT {
+        traceRunId = currentTime
+        DecisionTraceLive.history.begin(traceRunId)
+        decisionJournal.reset()
+        decisionJournal.enter(DecisionStage.INPUT, "Входные данные",
+            "Получены данные для этого расчёта. Разрешение микродоз: $microBolusAllowed.", listOf(
+                DecisionValue("Глюкоза", glucose_status.glucose.toString(), unit = "мг/дл"),
+                DecisionValue("Изменение за 5 минут", glucose_status.delta.toString(), unit = "мг/дл"),
+                DecisionValue("Цель", profile.target_bg.toString(), unit = "мг/дл")
+            ))
+        val normalizedMeal = MealDeviationInput.normalize(mealData)
+        if (normalizedMeal.slopeFromMinDeviation != mealData.slopeFromMinDeviation ||
+            normalizedMeal.slopeFromMaxDeviation != mealData.slopeFromMaxDeviation) {
+            decisionJournal.record("Недоступный наклон тренда",
+                "min=${mealData.slopeFromMinDeviation}; max=${mealData.slopeFromMaxDeviation}. Служебное значение не используется как рост или падение.")
+        }
+        val result = try {
+            calculateBasal(glucose_status, currenttemp, iob_data_array, profile, autosens_data, normalizedMeal,
+                microBolusAllowed, currentTime, flatBGsDetected, dynIsfMode, uiInteraction)
+        } catch (e: Exception) {
+            decisionJournal.enter(DecisionStage.FINAL, "Расчёт завершился ошибкой", e.javaClass.simpleName)
+            decisionJournal.branch("final", "error", "Ошибка расчёта", e.javaClass.simpleName)
+            DecisionTraceLive.history.finish(traceRunId, failed = true)
+            throw e
+        }
+        decisionJournal.enter(DecisionStage.FINAL, "Результат алгоритма, ещё не подача",
+            "Предложение передаётся на внешние ограничения. Подтверждения помпы здесь ещё нет.", listOf(
+                DecisionValue("Микродоза", (result.units ?: 0.0).toString(), unit = "Е", stage = DecisionStage.SMB),
+                DecisionValue("Временный базал", result.rate?.toString() ?: "не задан", unit = "Е/ч", stage = DecisionStage.BASAL),
+                DecisionValue("Углеводы", (result.carbsReq ?: 0).toString(), unit = "г", stage = DecisionStage.CARBS),
+                DecisionValue("Минимум прогноза", result.minGuardBG?.toString() ?: "нет данных", unit = "мг/дл")
+            ))
+        decisionJournal.record("Причина результата", result.reason.toString())
+        decisionJournal.branch("final", if ((result.units ?: 0.0) > 0.0) "insulin" else "basal",
+            "Итог алгоритма, не подтверждение подачи", values = listOf(
+                DecisionValue("SMB", (result.units ?: 0.0).toString(), unit = "Е"),
+                DecisionValue("Базал", result.rate?.toString() ?: "без изменения", unit = "Е/ч"),
+                DecisionValue("Длительность", result.duration?.toString() ?: "0", unit = "мин")))
+        result.decisionTrace = decisionJournal.snapshot()
+        // Do not retain mutable logging buffers in a completed result.
+        result.consoleLog = consoleLog.toMutableList()
+        result.consoleError = consoleError.toMutableList()
+        DecisionTraceLive.history.finish(traceRunId)
+        return result
+    }
+
+    @SuppressLint("NewApi", "DefaultLocale") private fun calculateBasal(
         glucose_status: GlucoseStatusAIMI, currenttemp: CurrentTemp, iob_data_array: Array<IobTotal>, profile: OapsProfileAimi, autosens_data: AutosensResult, mealData: MealData,
         microBolusAllowed: Boolean, currentTime: Long, flatBGsDetected: Boolean, dynIsfMode: Boolean, uiInteraction: UiInteraction
     ): RT {
@@ -3522,6 +3396,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         wCycleReasonLogged = false
         lastProfile = profile
         // ✅ ETAPE 1: Calculer le Profil d'Action de l'IOB
+        decisionJournal.enter(DecisionStage.INSULIN, "Уже введённый инсулин", "Записей кривой активности=${iob_data_array.size}")
         val iobActionProfile = InsulinActionProfiler.calculate(iob_data_array, profile)
 
 // Stocker les résultats dans des variables locales pour plus de clarté
@@ -3529,6 +3404,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val iobPeakMinutes = iobActionProfile.peakMinutes
         val iobActivityNow = iobActionProfile.activityNow
         val iobActivityIn30Min = iobActionProfile.activityIn30Min
+        decisionJournal.change("Что уже действует", "Это ранее введённый инсулин, не новая доза.",
+            DecisionValue("Активный инсулин", iobTotal.toString(), unit = "Е"),
+            DecisionValue("Время до пика активности", iobPeakMinutes.toString(), unit = "мин"))
 
         // ✅ DEBUG: compare profiler output vs raw iob_data_array[0]
         val i0 = iob_data_array.firstOrNull()
@@ -3777,6 +3655,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val reason = StringBuilder()
         val recentBGs = getRecentBGs()
         val rescueFastRebound = isRescueFastRebound(mealData)
+        decisionJournal.branch("meal_mode", if (noActiveMealMode()) "normal" else "active", "Режим еды",
+            "Завтрак=$bfastTime; обед=$lunchTime; ужин=$dinnerTime; еда=$mealTime; перекус=$snackTime; много углеводов=$highCarbTime")
+        decisionJournal.branch("rescue", if (rescueFastRebound) "protect" else "normal", "Модель после низкой глюкозы",
+            "Сейчас BG=$bg; COB=${mealData.mealCOB}; низкие за последний час=$lastHourTIRLow%; тип=${aimiMealAssist.activeEpisode()?.selectedFoodType ?: "не указан"}")
         if (rescueFastRebound) {
             consoleLog.add("Распознано: быстрый спасательный отскок. Включена короткая модель быстрых углеводов.")
             rT.reason.append(" | Быстрый спасательный отскок")
@@ -3784,12 +3666,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val bgTrend = calculateBgTrend(recentBGs, reason)
         val autodriveCondition = adjustAutodriveCondition(bgTrend, predictedBg, combinedDelta.toFloat(),reason)
         if (bg > 100 && predictedBg > 140 && !nightbis && !hasReceivedPbolusMInLastHour(pbolusAS) && autodrive && detectMealOnset(delta, predicted.toFloat(), bgAcceleration.toFloat(), predictedBg, targetBg) && modesCondition) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Ранний предболюс Autodrive")
             rT.units = pbolusAS
             //rT.reason.append("Autodrive early meal detection/snack: Microbolusing ${pbolusAS}U, CombinedDelta : ${combinedDelta}, Predicted : ${predicted}, Acceleration : ${bgAcceleration}.")
             rT.reason.append(context.getString(R.string.reason_autodrive_early_meal, pbolusAS, combinedDelta, predicted, bgAcceleration.toDouble()))
             return rT
         }
         if (isMealModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Предболюс режима еды")
             val pbolusM: Double = preferences.get(DoubleKey.OApsAIMIMealPrebolus)
             rT.units = pbolusM
             //rT.reason.append(" Microbolusing Meal Mode ${pbolusM}U.")
@@ -3797,6 +3681,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rT
         }
         if (!nightbis && isAutodriveModeCondition(delta, autodrive, mealData.slopeFromMinDeviation, bg.toFloat(), predictedBg, reason) && modesCondition) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Предболюс Autodrive")
             val pbolusA: Double = preferences.get(DoubleKey.OApsAIMIautodrivePrebolus)
             rT.units = pbolusA
             //reason.append("→ Microbolusing Autodrive Mode ${pbolusA}U\n")
@@ -3813,6 +3698,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             // return rT
         }
         if (isbfastModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Предболюс завтрака")
             val pbolusbfast: Double = preferences.get(DoubleKey.OApsAIMIBFPrebolus)
             rT.units = pbolusbfast
             //rT.reason.append(" Microbolusing 1/2 Breakfast Mode ${pbolusbfast}U.")
@@ -3820,6 +3706,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rT
         }
         if (isbfast2ModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Второй предболюс завтрака")
             val pbolusbfast2: Double = preferences.get(DoubleKey.OApsAIMIBFPrebolus2)
             this.maxSMB = pbolusbfast2
             rT.units = pbolusbfast2
@@ -3828,6 +3715,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rT
         }
         if (isLunchModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Предболюс обеда")
             val pbolusLunch: Double = preferences.get(DoubleKey.OApsAIMILunchPrebolus)
             rT.units = pbolusLunch
             //rT.reason.append(" Microbolusing 1/2 Lunch Mode ${pbolusLunch}U.")
@@ -3835,6 +3723,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rT
         }
         if (isLunch2ModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Второй предболюс обеда")
             val pbolusLunch2: Double = preferences.get(DoubleKey.OApsAIMILunchPrebolus2)
             this.maxSMB = pbolusLunch2
             rT.units = pbolusLunch2
@@ -3843,6 +3732,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rT
         }
         if (isDinnerModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Предболюс ужина")
             val pbolusDinner: Double = preferences.get(DoubleKey.OApsAIMIDinnerPrebolus)
             rT.units = pbolusDinner
             //rT.reason.append(" Microbolusing 1/2 Dinner Mode ${pbolusDinner}U.")
@@ -3850,6 +3740,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rT
         }
         if (isDinner2ModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Второй предболюс ужина")
             val pbolusDinner2: Double = preferences.get(DoubleKey.OApsAIMIDinnerPrebolus2)
             this.maxSMB = pbolusDinner2
             rT.units = pbolusDinner2
@@ -3858,6 +3749,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rT
         }
         if (isHighCarbModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Предболюс режима высоких углеводов")
             val pbolusHC: Double = preferences.get(DoubleKey.OApsAIMIHighCarbPrebolus)
             rT.units = pbolusHC
             //rT.reason.append(" Microbolusing High Carb Mode ${pbolusHC}U.")
@@ -3865,6 +3757,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rT
         }
         if (isHighCarb2ModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Второй предболюс высоких углеводов")
             val pbolusHC2: Double = preferences.get(DoubleKey.OApsAIMIHighCarbPrebolus2)
             rT.units = pbolusHC2
             //rT.reason.append(" Microbolusing High Carb Mode ${pbolusHC}U.")
@@ -3872,12 +3765,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             return rT
         }
         if (issnackModeCondition()) {
+            decisionJournal.branch("meal_prebolus", "prebolus", "Предболюс перекуса")
             val pbolussnack: Double = preferences.get(DoubleKey.OApsAIMISnackPrebolus)
             rT.units = pbolussnack
             //rT.reason.append(" Microbolusing snack Mode ${pbolussnack}U.")
             rT.reason.append(context.getString(R.string.reason_prebolus_snack, pbolussnack))
             return rT
         }
+        decisionJournal.branch("meal_prebolus", "pass", "Предболюс режима не запрошен")
         //rT.reason.append(", MaxSMB: $maxSMB")
         rT.reason.append(context.getString(R.string.reason_maxsmb, maxSMB))
         var nowMinutes = calendarInstance[Calendar.HOUR_OF_DAY] + calendarInstance[Calendar.MINUTE] / 60.0 + calendarInstance[Calendar.SECOND] / 3600.0
@@ -3982,6 +3877,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         //this.bg = bg.toFloat()
         // TODO eliminate
         val noise = glucoseStatus.noise
+        decisionJournal.branch("input_quality",
+            if (bg <= 10 || bg == 38.0 || noise >= 3 || minAgo > 12 || minAgo < -5 || (bg > 60 && flatBGsDetected)) "warning" else "pass",
+            "Качество входных данных", "Возраст=$minAgo мин; шум=$noise; неподвижные данные=$flatBGsDetected")
         // 38 is an xDrip error state that usually indicates sensor failure
         // all other BG values between 11 and 37 mg/dL reflect non-error-code BG values, so we should zero temp for those
         if (bg <= 10 || bg == 38.0 || noise >= 3) {  //Dexcom is in ??? mode or calibrating, or xDrip reports high noise
@@ -4007,6 +3905,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         var min_bg = profile.min_bg
         var max_bg = profile.max_bg
 
+        decisionJournal.enter(DecisionStage.SENSITIVITY, "Чувствительность решения и автосенс")
         var sensitivityRatio: Double
         val high_temptarget_raises_sensitivity = profile.exercise_mode || profile.high_temptarget_raises_sensitivity
         val normalTarget = if (honeymoon) 130 else 100
@@ -4054,6 +3953,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         basal = profile.current_basal * sensitivityRatio
         basal = roundBasal(basal)
+        decisionJournal.change("Автосенс и базовый базал",
+            if (high_temptarget_raises_sensitivity && profile.temptargetSet && target_bg > normalTarget ||
+                profile.low_temptarget_lowers_sensitivity && profile.temptargetSet && target_bg < normalTarget)
+                "Коэффициент получен из временной цели." else "Использован коэффициент автосенса.",
+            DecisionValue("Коэффициент", sensitivityRatio.toString()),
+            DecisionValue("Базал", basal.toString(), profile.current_basal.toString(), "Е/ч", DecisionStage.BASAL))
         if (basal != profile_current_basal)
         //consoleLog.add("Adjusting basal from $profile_current_basal to $basal; ")
             consoleLog.add(context.getString(R.string.console_adjust_basal, profile_current_basal, basal))
@@ -4123,6 +4028,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         if (sens <= 0.0) sens = baseSensitivity
         this.variableSensitivity = sens.toFloat()
+        decisionJournal.branch("isf", when { fusedSensitivity == null -> "dynamic"; dynSensitivity <= 0.0 -> "fused"; else -> "minimum" },
+            "Источник ISF решения", values = listOf(DecisionValue("ISF решения", sens.toString(), profile.sens.toString(), "мг/дл/Е")))
+        decisionJournal.change("Выбор чувствительности решения",
+            if (fusedSensitivity == null) "Объединённая оценка отсутствует: используется динамическая оценка или профиль."
+            else "Из объединённой и динамической оценок выбран меньший положительный ISF.",
+            DecisionValue("Динамическая оценка", dynSensitivity.toString(), unit = "мг/дл/Е"),
+            DecisionValue("Объединённая оценка", fusedSensitivity?.toString() ?: "нет данных", unit = "мг/дл/Е"),
+            DecisionValue("ISF решения", sens.toString(), profile.sens.toString(), "мг/дл/Е"))
 
         if (fusedSensitivity != null) {
             // --- LOG ---
@@ -4231,12 +4144,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         this.basalaimi = basalDecisionEngine.smoothBasalRate(tdd7P.toFloat(), tdd7Days.toFloat(), basalaimi)
         if (tdd7Days.toFloat() != 0.0f) {
-            this.ci = (450 / tdd7Days).toFloat()
+            this.estimatedCarbRatio = (450 / tdd7Days).toFloat()
         }
 
         val choKey: Double = preferences.get(DoubleKey.OApsAIMICHO)
-        if (ci != 0.0f && ci != Float.POSITIVE_INFINITY && ci != Float.NEGATIVE_INFINITY) {
-            this.aimilimit = (choKey / ci).toFloat()
+        if (estimatedCarbRatio != 0.0f && estimatedCarbRatio.isFinite()) {
+            this.aimilimit = (choKey / estimatedCarbRatio).toFloat()
         } else {
             this.aimilimit = (choKey / profile.carb_ratio).toFloat()
         }
@@ -4403,6 +4316,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // 3. Apply Multiplier to Sensitivity (ISF)
         // Note: activityContext.isfMultiplier is >= 1.0 (Boosts ISF aka lowers resistance)
         this.variableSensitivity *= activityContext.isfMultiplier.toFloat()
+        decisionJournal.change("Влияние физической нагрузки", activityContext.description,
+            DecisionValue("ISF решения", variableSensitivity.toString(), sensitivityBeforeActivity.toString(), "мг/дл/Е"),
+            DecisionValue("Множитель нагрузки", activityContext.isfMultiplier.toString()))
         
         // 4. Handle Recovery / Protection
         if (activityContext.protectionMode) {
@@ -4431,11 +4347,16 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // -> All handled by activityManager.process() now.
 
         // 🔹 Sécurisation des bornes minimales et maximales
+        val sensitivityBeforeBounds = this.variableSensitivity
         this.variableSensitivity = this.variableSensitivity.coerceIn(5.0f, 300.0f)
+        decisionJournal.change("Границы чувствительности", "Применены существующие границы 5–300 мг/дл/Е.",
+            DecisionValue("ISF решения", variableSensitivity.toString(), sensitivityBeforeBounds.toString(), "мг/дл/Е"))
 
 
         val sensitivityBeforeProfile = variableSensitivity.toDouble()
         sens = forecastSensitivityWithActiveProfile(sensitivityBeforeProfile, profile)
+        decisionJournal.change("Учёт активного профиля", "Процент профиля: ${profile.profile_percentage}%.",
+            DecisionValue("ISF решения", sens.toString(), sensitivityBeforeProfile.toString(), "мг/дл/Е"))
         if (sens > sensitivityBeforeProfile + 0.05) {
             consoleLog.add(
                 "Профиль ${profile.profile_percentage}% сделал прогноз менее агрессивным: " +
@@ -4459,11 +4380,30 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         val carbForecast = parallelCarbForecast(
             aapsCobG = mealData.mealCOB,
-            activityEvents = activityEvents,
             delta = delta.toDouble(),
             carbSensitivityMgdlPerGram = carbSensitivityForForecast
         )
+        decisionJournal.enter(DecisionStage.CARBS, "Углеводы для прогноза", "Осталось усвоить=${carbForecast.cobG} г; эффект грамма=$carbSensitivityForForecast mg/dL")
+        decisionJournal.change("Входы модели еды", "Чувствительность еды берётся до усиления от нагрузки; коэффициент еды взят из профиля.",
+            DecisionValue("ISF еды в этом прогнозе", forecastSensitivityWithActiveProfile(sensitivityBeforeActivity, profile).toString(), unit = "мг/дл/Е"),
+            DecisionValue("Углеводный коэффициент", profile.carb_ratio.toString(), unit = "г/Е"),
+            DecisionValue("Осталось усвоить", carbForecast.cobG.toString(), mealData.mealCOB.toString(), "г"))
         val forecastCobG = carbForecast.cobG
+        decisionJournal.branch("food", if (forecastCobG > 0.0) "declared" else "empty", "Остаток введённой еды",
+            "Тип=${carbForecast.dominantFoodType ?: "не определён"}", listOf(DecisionValue("Остаток", forecastCobG.toString(), unit = "г")))
+        val forecastCarbImpact = ForecastCarbImpact.calculate(
+            minDelta = minDelta,
+            insulinActivity = iob_data.activity,
+            decisionIsf = sens,
+            csf = carbSensitivityForForecast ?: Double.NaN,
+            cobG = forecastCobG,
+            sensitivityRatio = sensitivityRatio,
+            remainingCarbsCap = profile.remainingCarbsCap
+        )
+        consoleLog.add("Вход прогноза: ISF решения=$sens; COB=$forecastCobG г; " +
+            "влияние еды=${forecastCarbImpact.observedMgdlPer5m} мг/дл за 5 мин; " +
+            "остаточный пик=${forecastCarbImpact.remainingPeakMgdlPer5m}. Эти входы сохраняются после решения.")
+        decisionJournal.enter(DecisionStage.FORECAST, "Прогноз до нового решения", "ISF решения=$sens; углеводы=$forecastCobG г")
         val pkpdPredictions = computePkpdPredictions(
             currentBg = bg,
             iobArray = iob_data_array,
@@ -4475,6 +4415,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             rT = rT,
             delta = delta.toDouble(),
             targetBg = target_bg,
+            carbImpact = forecastCarbImpact,
             carbSensitivityMgdlPerGram = carbSensitivityForForecast,
             rescueFastActive = rescueFastRebound,
             selectedFoodTypeOverride = carbForecast.dominantFoodType,
@@ -4486,18 +4427,28 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         rT.eventualBG = pkpdPredictions.eventual
         rT.predictedBG = predictedBg.toDouble()
         rT.minGuardBG = minOf(bg, pkpdPredictions.minGuard)
-        val earlyOverdeliverySmbCap = earlyOverdeliverySmbCap(mealData)
-        val earlyOverdeliveryRisk = earlyOverdeliverySmbCap != null
-        if (earlyOverdeliveryRisk) {
+        decisionJournal.change("Прогноз без нового решения", "Учтены уже введённый инсулин и остаток еды.",
+            DecisionValue("Минимум", rT.minGuardBG.toString(), unit = "мг/дл"),
+            DecisionValue("Конец прогноза", pkpdPredictions.eventual.toString(), unit = "мг/дл"))
+        val earlyOverdelivery = earlyOverdeliveryDecision(mealData)
+        val earlyOverdeliverySmbCap = earlyOverdelivery.maxSmbUnits
+        decisionJournal.branch("early", when { earlyOverdelivery.requiresBasalHold -> "block"; earlyOverdeliverySmbCap != null -> "cap"; else -> "pass" },
+            "Защита раннего перелива", "Предел=${earlyOverdeliverySmbCap ?: "нет"}; BG=$bg; COB=${mealData.mealCOB}; IOB=$iob")
+        if (earlyOverdeliverySmbCap != null) {
             consoleLog.add(
                 "Защита от раннего перелива активна: BG=${"%.0f".format(bg)}, " +
                     "delta=${"%.1f".format(delta)}, short=${"%.1f".format(shortAvgDelta)}, " +
                     "IOB=${"%.2f".format(iob)}, свежий SMB=${"%.2f".format(lastBolusSMBUnit)}U/${lastsmbtime}м, " +
                     "COB=${"%.1f".format(mealData.mealCOB)}, " +
-                    "лимит SMB=${"%.2f".format(earlyOverdeliverySmbCap ?: 0.0)}U, " +
+                    "лимит SMB=${"%.2f".format(earlyOverdeliverySmbCap)}U, " +
                     "прогноз=${"%.0f".format(predictedBg)}, итог=${"%.0f".format(eventualBG)}"
             )
-            rT.reason.append(" | Защита от раннего перелива")
+            rT.reason.append(if (earlyOverdelivery.requiresBasalHold) " | Защита от раннего перелива: запрет SMB"
+                else " | Ранний перелив: только лимит SMB ${"%.2f".format(earlyOverdeliverySmbCap)}U")
+            decisionJournal.change("Защита от раннего перелива",
+                if (earlyOverdelivery.requiresBasalHold) "Микродоза запрещена; базал проверяется на снижение."
+                else "Ограничена только микродоза. Базал и окончательная доза проходят обычную проверку прогноза.",
+                DecisionValue("Предел SMB", earlyOverdeliverySmbCap.toString(), unit = "Е"))
         }
         //calculate BG impact: the amount BG "should" be rising or falling based on insulin activity alone
         val bgi = round((-iob_data.activity * sens * 5), 2)
@@ -4605,6 +4556,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             }
         }
 
+        decisionJournal.branch("hypo_proposal", when { !isHypoBlocked -> "pass"; fallbackActive -> "fallback"; else -> "block" },
+            "Допуск первичного запроса", "Глюкоза=$bg; прогноз=$predictedBg; итоговый прогноз=$eventualBG; порог=$threshold")
+
         if (isHypoBlocked && !fallbackActive) {
             rT.safetyMechanism = "Hypo guard + safety margin"
             //rT.reason.appendLine(
@@ -4644,6 +4598,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         if (calculationLimitActive) {
             this.predictedSMB = min(this.predictedSMB.toDouble(), executionMaxSmb).toFloat()
         }
+        decisionJournal.branch("calculation_limit", when { !calculationLimitActive -> "pass"; executionMaxSmb <= 0.0 -> "block"; else -> "cap" },
+            "Предел запроса без еды", correctionLimit.reason,
+            listOf(DecisionValue("SMB", this.predictedSMB.toString(), beforeCalculationLimitPredicted.toString(), "Е"),
+                DecisionValue("Потолок", executionMaxSmb.toString(), unit = "Е")))
         if (calculationLimitActive && (executionMaxSmb < maxSMB || this.predictedSMB < beforeCalculationLimitPredicted || executionModelValue < beforeCalculationLimitModel)) {
             val limitReason = correctionLimit.reason
             consoleLog.add(
@@ -4666,6 +4624,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         )
         val pkpdDiaMinutesOverride: Double? = pkpdRuntime?.params?.diaHrs?.let { it * 60.0 } // PKPD donne des heures → on passe en minutes
         val useLegacyDynamicsdia = pkpdDiaMinutesOverride == null
+        decisionJournal.enter(DecisionStage.SMB, "Расчёт микродозы и её ограничений", "Предложено=$predictedSMB Е")
+        decisionJournal.branch("proposal", if (predictedSMB > 0f) "positive" else "zero", "Первичный запрос",
+            values = listOf(DecisionValue("SMB до ограничений", predictedSMB.toString(), unit = "Е")))
         val smbExecution = SmbInstructionExecutor.execute(
             SmbInstructionExecutor.Input(
                 context = context,
@@ -4761,7 +4722,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 logDataMl = { predicted, given -> logDataMLToCsv(predicted, given) },
                 logData = { predicted, given -> logDataToCsv(predicted, given) },
                 roundBasal = { value -> roundBasal(value) },
-                roundDouble = { value, digits -> round(value, digits) }
+                roundDouble = { value, digits -> round(value, digits) },
+                traceChange = { title, before, after, reason ->
+                    decisionJournal.change(title, reason, DecisionValue("Запрос микродозы", after.toString(), before.toString(), "Е", DecisionStage.SMB))
+                    decisionJournal.branch("smb_adjustment", when { after > before -> "up"; after < before -> "down"; else -> "same" },
+                        title, reason, listOf(DecisionValue("SMB", after.toString(), before.toString(), "Е")))
+                }
             )
         )
 
@@ -4776,6 +4742,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         if (preferences.get(BooleanKey.OApsAIMIUnifiedReactivityEnabled)) {
             val beforeReactivity = smbToGive
             smbToGive = (smbToGive * unifiedReactivityLearner.globalFactor).toFloat()
+            decisionJournal.change("Поправка по накопленной статистике", "Коэффициент обучаемой реакции: ${unifiedReactivityLearner.globalFactor}.",
+                DecisionValue("Запрос микродозы", smbToGive.toString(), beforeReactivity.toString(), "Е", DecisionStage.SMB))
             
             if (unifiedReactivityLearner.globalFactor != 1.0 || smbToGive != beforeReactivity) {
                 // 📊 Enriched log with evolution and metrics
@@ -4817,54 +4785,56 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val finalRecentSmb15 = recentSmbUnits(15)
         val finalRecentSmb30 = recentSmbUnits(30)
         val finalRecentManualBolus15 = recentManualBolusUnits(15)
-        val finalSmbCaps = mutableListOf(rescueAdjustedMaxSmb)
-        val finalSmbCapReasons = mutableListOf<String>()
+        val finalSmbCaps = mutableListOf(SmbCapAttribution(currentMaxSmb, "максимальная микродоза"))
+        fun recordCap(id: String, cap: Double?, reason: String) {
+            decisionJournal.branch(id, when { cap == null -> "pass"; cap <= 0.0 -> "block"; else -> "cap" }, reason,
+                "Предел=${cap ?: "нет"}; предложение=${smbToGive}. Наличие предела не означает, что он изменил дозу.")
+        }
+        recordCap("rescue_cap", if (rescueFastRebound) rescueFastSmbCap().toDouble() else null, "Предел после низкой глюкозы")
+        if (rescueFastRebound) finalSmbCaps.add(SmbCapAttribution(rescueFastSmbCap().toDouble(), "рост после низкой глюкозы"))
         earlyOverdeliverySmbCap?.let {
-            finalSmbCaps.add(it)
-            finalSmbCapReasons.add("ранний перелив: лимит ${"%.2f".format(it)}U")
+            finalSmbCaps.add(SmbCapAttribution(it, "ранний перелив: лимит ${"%.2f".format(it)}U"))
         }
         finalCumulativeSmbCap(
             mealData = mealData,
             proposedSmb = smbToGive.toDouble(),
             recentSmb15 = finalRecentSmb15,
             recentSmb30 = finalRecentSmb30,
-            targetBg = target_bg
+            targetBg = target_bg,
+            minGuardBg = rT.minGuardBG ?: Double.NaN
         ).let { (cap, capReason) ->
-            cap?.let { finalSmbCaps.add(it) }
-            capReason?.let { finalSmbCapReasons.add(it) }
+            recordCap("cumulative", cap, capReason ?: "Накопленные микродозы")
+            cap?.let { finalSmbCaps.add(SmbCapAttribution(it, capReason ?: "накопленные микродозы")) }
         }
         nightNoMealSmbCap(mealData, finalRecentSmb30, target_bg).let { (cap, capReason) ->
-            cap?.let { finalSmbCaps.add(it) }
-            capReason?.let { finalSmbCapReasons.add(it) }
+            recordCap("night", cap, capReason ?: "Ночной предел")
+            cap?.let { finalSmbCaps.add(SmbCapAttribution(it, capReason ?: "ночное ограничение микродозы")) }
         }
         manualBolusStackingCap(mealData, finalRecentManualBolus15).let { (cap, capReason) ->
-            cap?.let { finalSmbCaps.add(it) }
-            capReason?.let { finalSmbCapReasons.add(it) }
+            recordCap("manual", cap, capReason ?: "Недавний обычный болюс")
+            cap?.let { finalSmbCaps.add(SmbCapAttribution(it, capReason ?: "недавний ручной болюс")) }
         }
-        val safetyAdjustedMaxSmb = finalSmbCaps.minOrNull() ?: rescueAdjustedMaxSmb
+        val safetyAdjustedMaxSmb = min(rescueAdjustedMaxSmb, finalSmbCaps.minOf { it.units })
+        val maxIobForSmb = preferences.get(DoubleKey.ApsSmbMaxIob)
         val beforeCap = smbToGive
         smbToGive = capSmbDose(
             proposedSmb = smbToGive,
             bg = bg,
             maxSmbConfig = safetyAdjustedMaxSmb,
             iob = iob.toDouble(),
-            maxIob = preferences.get(DoubleKey.ApsSmbMaxIob)
+            maxIob = maxIobForSmb
         )
-        if (earlyOverdeliveryRisk && smbToGive < beforeCap) {
-            rT.reason.append(
-                " | SMB ограничен защитой от раннего перелива: " +
-                    "${"%.2f".format(beforeCap)} -> ${"%.2f".format(smbToGive)} " +
-                    "(лимит ${"%.2f".format(earlyOverdeliverySmbCap ?: 0.0)}U)"
-            )
-        }
-        if (rescueFastRebound && smbToGive < beforeCap) {
-            rT.reason.append(" | SMB ограничен быстрым спасательным отскоком: ${"%.2f".format(beforeCap)} -> ${"%.2f".format(smbToGive)}")
-        }
+        finalSmbCaps.add(SmbCapAttribution(max(0.0, maxIobForSmb - iob), "предел активного инсулина"))
+        decisionJournal.branch("dose_limits", if (smbToGive <= 0f && beforeCap > 0f) "block" else if (smbToGive < beforeCap) "cap" else "pass",
+            "Результат применения пределов", values = listOf(DecisionValue("SMB", smbToGive.toString(), beforeCap.toString(), "Е")))
+        val finalSmbCapReasons = SmbCapAttribution.bindingReasons(finalSmbCaps, beforeCap.toDouble(), smbToGive.toDouble())
         if (finalSmbCapReasons.isNotEmpty() && smbToGive < beforeCap) {
-            val message = "Финальный SMB cap: ${finalSmbCapReasons.joinToString("; ")}; " +
+            val message = "Микродозу фактически ограничивает: ${finalSmbCapReasons.joinToString("; ")}; " +
                 "${"%.2f".format(beforeCap)} -> ${"%.2f".format(smbToGive)}U"
             rT.reason.append(" | $message")
             consoleLog.add(message)
+            decisionJournal.change("Ограничение микродозы", message,
+                DecisionValue("Микродоза", smbToGive.toString(), beforeCap.toString(), "Е"))
         }
         if (smbToGive < beforeCap) {
             rT.reason.append(" | 🛡️ Cap: ${"%.2f".format(beforeCap)} → ${"%.2f".format(smbToGive)}")
@@ -4890,7 +4860,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             insulinReq = 0.0,
             deliverAt = deliverAt, // The time at which the microbolus should be delivered
             //sensitivityRatio = sensitivityRatio, // autosens ratio (fraction of normal basal)
-            sensitivityRatio = "%.0f".format(sensitivityRatio).toDouble(),
+            sensitivityRatio = round(sensitivityRatio, 2),
             consoleLog = consoleLog,
             consoleError = consoleError,
             safetyMechanism = savedSafetyMechanism,
@@ -4926,20 +4896,6 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 }
             }
             val firstBelowMinute = window.firstOrNull { it.second.toDouble() < target_bg }?.first?.let { it * 5 }
-            val insulinDeficit = if (sens > 0.0 && belowTargetRun == 0 && minValue.toDouble() > target_bg + 10.0) {
-                round((minValue.toDouble() - target_bg) / sens, 2).coerceAtLeast(0.0)
-            } else {
-                0.0
-            }
-            result.finalForecastInsulinDeficit = insulinDeficit
-            result.finalForecastInsulinDeficitMinutes = if (insulinDeficit > 0.01) minIndex * 5 else null
-            if (insulinDeficit > 0.01) {
-                consoleLog.add(
-                    "Недостаток инсулина по финальному прогнозу: ${"%.2f".format(insulinDeficit)}U " +
-                        "на +${minIndex * 5}м, min=${"%.0f".format(minValue.toDouble())}, " +
-                        "цель=${"%.0f".format(target_bg)}, ISF=${"%.1f".format(sens)}"
-                )
-            }
             val summary = "рабочая зона +20..+120: " +
                 "min=${"%.0f".format(minValue.toDouble())} на +${minIndex * 5}m, " +
                 "ниже цели подряд=$belowTargetRun" +
@@ -4975,7 +4931,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             consoleLog.add("AIMI FINAL: $summary")
         }
 
-        if (earlyOverdeliveryRisk) {
+        decisionJournal.branch("early_return", if (earlyOverdelivery.requiresBasalHold) "hold" else "continue",
+            "Путь после раннего ограничения", "Положительный предел не запускает защитный ранний возврат.")
+        if (earlyOverdelivery.requiresBasalHold) {
             val guardRate = earlyOverdeliveryBasalRate(profile_current_basal)
             rT.rate = guardRate
             rT.deliverAt = deliverAt
@@ -4999,8 +4957,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 mpcShare = smbExecution.mpcShare,
                 piShare = smbExecution.piShare,
                 highBgOverrideUsed = smbExecution.highBgOverrideUsed,
-                observedCarbImpactMgdlPer5m = ci.toDouble(),
-                remainingCiPeakMgdlPer5m = 0.0,
+                observedCarbImpactMgdlPer5m = forecastCarbImpact.observedMgdlPer5m,
+                remainingCiPeakMgdlPer5m = forecastCarbImpact.remainingPeakMgdlPer5m,
                 targetBg = target_bg,
                 rescueFastActive = rescueFastRebound,
                 carbSensitivityMgdlPerGram = carbSensitivityForForecast,
@@ -5140,37 +5098,15 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         //consoleError.add("profile.sens: ${profile.sens}, sens: $sens, CSF: $csf")
         consoleError.add(context.getString(R.string.console_profile_sens, baseSensitivity, sens, csf))
 
-        val maxCarbAbsorptionRate = 30 // g/h; maximum rate to assume carbs will absorb if no CI observed
-        // limit Carb Impact to maxCarbAbsorptionRate * csf in mg/dL per 5m
-        val maxCI = round(maxCarbAbsorptionRate * csf * 5 / 60, 1)
-        if (ci > maxCI) {
-            //consoleError.add("Limiting carb impact from $ci to $maxCI mg/dL/5m ( $maxCarbAbsorptionRate g/h )")
-            consoleError.add(context.getString(R.string.console_limiting_carb_impact, ci, maxCI, maxCarbAbsorptionRate))
-            ci = maxCI.toFloat()
-        }
-        var remainingCATimeMin = 2.0
-        remainingCATimeMin = remainingCATimeMin / sensitivityRatio
-        var remainingCATime = remainingCATimeMin
-        val totalCI = max(0.0, ci / 5 * 60 * remainingCATime / 2)
-        // totalCI (mg/dL) / CSF (mg/dL/g) = total carbs absorbed (g)
-        val totalCA = if (csf > 0.0) totalCI / csf else 0.0
-        val remainingCarbsCap: Int // default to 90
-        remainingCarbsCap = min(90, profile.remainingCarbsCap)
-        var remainingCarbs = max(0.0, mealData.mealCOB - totalCA)
-        remainingCarbs = min(remainingCarbsCap.toDouble(), remainingCarbs)
-        val remainingCIpeak = if (csf > 0.0 && remainingCATime > 0.0) {
-            remainingCarbs * csf * 5 / 60 / (remainingCATime / 2)
-        } else {
-            0.0
-        }
+        val remainingCATime = forecastCarbImpact.absorptionHours
+        val remainingCIpeak = forecastCarbImpact.remainingPeakMgdlPer5m
         val slopeFromMaxDeviation = mealData.slopeFromMaxDeviation
         val slopeFromMinDeviation = mealData.slopeFromMinDeviation
         val slopeFromDeviations = Math.min(slopeFromMaxDeviation, -slopeFromMinDeviation / 3)
-        var ci: Double
+        val ci = forecastCarbImpact.observedMgdlPer5m
         val cid: Double
         // calculate current carb absorption rate, and how long to absorb all carbs
         // CI = current carb impact on BG in mg/dL/5m
-        ci = round((minDelta - bgi), 1)
         if (ci == 0.0 || csf <= 0.0) {
             // avoid divide by zero
             cid = 0.0
@@ -5258,6 +5194,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         )
 
         mealModeSmbReason?.let { reason(rT, it) }
+        decisionJournal.branch("smb_permission", if (enableSMB) "pass" else "block", "Разрешение микродоз",
+            "Внешнее разрешение=$microBolusAllowed; разрешение AIMI=$enableSMB; временная цель=${profile.temptargetSet}")
 
         rT.COB = forecastCobG
         rT.IOB = iob_data.iob
@@ -5279,6 +5217,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
         val tdd24h = tddCalculator.averageTDD(tddCalculator.calculate(1, allowMissingDays = false))?.data?.totalAmount ?: 0.0
         val tirInHypo = tirCalculator.averageTIR(tirCalculator.calculate(1, 65.0, 180.0))?.belowPct() ?: 0.0
+        decisionJournal.enter(DecisionStage.SAFETY, "Проверка риска снижения")
         val safetyDecision = safetyAdjustment(
             currentBG = glucoseStatus.glucose.toFloat(),
             predictedBG = eventualBG.toFloat(),
@@ -5313,6 +5252,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
 
         fun finalizeDecisionAwareForecast(result: RT): RT {
+            decisionJournal.enter(DecisionStage.FORECAST, "Прогноз с предложенным решением",
+                "Микродоза=${result.units ?: 0.0} Е; базал=${result.rate} Е/ч на ${result.duration} мин")
             fun recomputeForCurrentDecision(): PredictionResult =
                 recomputeDecisionAwarePredictions(
                     currentBg = bg,
@@ -5450,34 +5391,6 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 )
             }
 
-            fun applyFinalForecastInsulinDeficit(summary: FinalForecastSummary) {
-                val peakValue = listOfNotNull(summary.forecastPeak, predictedBg.toDouble(), eventualBG)
-                    .filter { it.isFinite() }
-                    .maxOrNull()
-                val forecastAlreadyNeedsCarbs = (summary.carbsRequirement?.first ?: 0) > 0 ||
-                    summary.forecastFloor < target_bg
-                val deficit = if (
-                    sens > 0.0 &&
-                    peakValue != null &&
-                    peakValue > target_bg + 10.0 &&
-                    !forecastAlreadyNeedsCarbs
-                ) {
-                    round((peakValue - target_bg) / sens, 2).coerceAtLeast(0.0)
-                } else {
-                    0.0
-                }
-                result.finalForecastInsulinDeficit = deficit
-                result.finalForecastInsulinDeficitMinutes = if (deficit > 0.01) summary.forecastPeakMinute else null
-                if (deficit > 0.01) {
-                    consoleLog.add(
-                        "Недостаток инсулина по финальному прогнозу: ${"%.2f".format(deficit)}U " +
-                            "на +${summary.forecastPeakMinute ?: 0}м, peak=${"%.0f".format(peakValue ?: 0.0)}, " +
-                            "цель=${"%.0f".format(target_bg)}, ISF=${"%.1f".format(sens)}; " +
-                            (if (summary.belowTargetRun > 0) "ранний участок ниже цели блокирует подачу, но не скрывает будущую потребность; " else "") +
-                            "это потребность по прогнозу, а не разрешение на немедленную подачу"
-                    )
-                }
-            }
 
             fun formatMgdl(value: Double?): String =
                 value?.takeIf { it.isFinite() }?.let { String.format(Locale.US, "%.0f", it) } ?: "н/д"
@@ -5526,7 +5439,6 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     insulinReq <= 0.0 &&
                         currentHypoGuardBlocksInsulin &&
                         maxOf(eventualBG, predictedBg.toDouble()) > target_bg + 20.0
-                val finalForecastInsulinDeficit = result.finalForecastInsulinDeficit ?: 0.0
                 val basalText = if (finalRate != null && finalDuration > 0) {
                     "ставлю базал ${formatUnits(finalRate)} Е/ч на ${finalDuration} мин"
                 } else {
@@ -5557,14 +5469,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     finalForecastBlockedSmb ->
                         "Инсулин сейчас не добавляю: расчет сначала хотел ${formatUnits(plannedSmbBeforeGuard)} Е, но после проверки итогового прогноза это выглядело опасно низко. Главное место для проверки: почему расчет хотел инсулин до финальной проверки."
 
-                    finalForecastInsulinDeficit > 0.01 ->
-                        "По финальному графику сахар остается выше цели, не хватает примерно ${formatUnits(finalForecastInsulinDeficit)} Е, но автоматическая микродоза сейчас не дана из-за защитных ограничений; $basalText. Главное место для проверки: почему защита видит риск перелива, а итоговый график после решения все еще высокий."
 
                     futureHighButCurrentLow ->
                         "Инсулин сейчас не добавляю не потому, что будущий высокий прогноз нормальный, а потому что текущий сахар ниже безопасного порога и защита от гипо сильнее прогноза отскока; $basalText. Главное место для проверки: не наложились ли лишние или неверно типизированные углеводы в COB."
 
                     insulinReq <= 0.0 ->
-                        "Инсулин сейчас не добавляю, потому что уже активного инсулина по расчету достаточно; $basalText. Если сахар все равно ожидаемо уйдет выше цели, главное место для проверки: активный инсулин или чувствительность могли быть оценены слишком оптимистично."
+                        "Расчет сейчас не запрашивает дополнительную микродозу; $basalText. Высокий пик прогноза сам по себе не является дозой для ручного введения."
 
                     forecastWouldBeLow ->
                         "Инсулин сейчас не добавляю, потому что итоговый прогноз может уйти слишком низко; $basalText. Главное место для проверки: почему прогноз видит риск низкого сахара."
@@ -5594,11 +5504,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 0.0
             }
             val plannedFreshInsulinBeforeFinalForecast = plannedSmbBeforeFinalForecast + plannedBasalExtraBeforeFinalForecast
-            val projectedFloorAfterFreshInsulin = if (sens > 0.0 && plannedFreshInsulinBeforeFinalForecast > 0.0) {
-                finalForecastSummary.forecastFloor - plannedFreshInsulinBeforeFinalForecast * sens
-            } else {
-                finalForecastSummary.forecastFloor
-            }
+            // This forecast already includes the proposed SMB and temporary basal.
+            val projectedFloorAfterFreshInsulin = finalForecastSummary.forecastFloor
             val finalForecastBlocksSmb = plannedFreshInsulinBeforeFinalForecast > 0.0 &&
                 (
                     finalForecastSummary.forecastFloor <= finalForecastHypoFloor ||
@@ -5606,32 +5513,45 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                         projectedFloorAfterFreshInsulin <= finalForecastSafeFloor
                     )
 
+            decisionJournal.branch("final_forecast", if (finalForecastBlocksSmb) "reduce" else "pass",
+                "Финальная проверка дозы прогнозом", "Минимум=${finalForecastSummary.forecastFloor}; безопасный порог=$finalForecastSafeFloor",
+                listOf(DecisionValue("SMB до проверки", plannedSmbBeforeFinalForecast.toString(), unit = "Е")))
             if (finalForecastBlocksSmb) {
-                val allowedFreshInsulin = if (sens > 0.0) {
-                    ((finalForecastSummary.forecastFloor - finalForecastSafeFloor) / sens).coerceIn(0.0, plannedFreshInsulinBeforeFinalForecast)
-                } else {
-                    0.0
-                }
-                val allowedSmb = min(plannedSmbBeforeFinalForecast, allowedFreshInsulin)
-                val remainingAllowance = (allowedFreshInsulin - allowedSmb).coerceAtLeast(0.0)
-                val allowedRate = if (plannedBasalExtraBeforeFinalForecast > 0.0 && plannedDurationBeforeFinalForecast > 0) {
-                    profile_current_basal + remainingAllowance * 60.0 / plannedDurationBeforeFinalForecast.toDouble()
-                } else {
-                    plannedRateBeforeFinalForecast
-                }
-                result.units = 0.0
-                result.insulinReq = 0.0
-                if (allowedSmb > 0.01) {
-                    result.units = round(allowedSmb, 3)
+                decisionJournal.enter(DecisionStage.SAFETY, "Проверка вариантов по итоговому прогнозу",
+                    "Минимум=${finalForecastSummary.forecastFloor}; порог=$finalForecastSafeFloor; варианты ниже не являются подачей")
+                fun applyCandidate(fraction: Double) {
+                    result.units = ForecastDecisionSearch.candidateBolus(plannedSmbBeforeFinalForecast, fraction, profile.bolus_increment)
                     result.insulinReq = result.units
+                    if (plannedBasalExtraBeforeFinalForecast > 0.0) {
+                        result.rate = roundBasal(profile_current_basal +
+                            (plannedRateBeforeFinalForecast - profile_current_basal) * fraction)
+                            .coerceAtMost(plannedRateBeforeFinalForecast)
+                    }
+                    applyDecisionAwarePredictions(recomputeForCurrentDecision())
                 }
-                if (plannedBasalExtraBeforeFinalForecast > 0.0) {
-                    result.rate = roundBasal(allowedRate.coerceIn(0.0, plannedRateBeforeFinalForecast))
+                val fraction = ForecastDecisionSearch.safeFraction { candidate ->
+                    applyCandidate(candidate)
+                    val trial = summarizeFinalForecast()
+                    val safe = trial.forecastFloor > finalForecastSafeFloor &&
+                        !((trial.carbsRequirement?.first ?: 0) > 0 && trial.forecastFloor <= target_bg)
+                    decisionJournal.change("Проверка варианта: ${if (safe) "допустим" else "отклонён"}",
+                        "Проверяется вариант расчёта. Команда помпе не отправляется.",
+                        DecisionValue("Доля исходного предложения", candidate.toString()),
+                        DecisionValue("Микродоза-кандидат", result.units.toString(), unit = "Е", stage = DecisionStage.SMB),
+                        DecisionValue("Минимум прогноза", trial.forecastFloor.toString(), unit = "мг/дл"),
+                        DecisionValue("Допустимый минимум", finalForecastSafeFloor.toString(), unit = "мг/дл"))
+                    consoleLog.add("Проверка варианта, не подача: доля=$candidate, " +
+                        "SMB=${result.units}, базал=${result.rate}, минимум=${trial.forecastFloor}, допустим=$safe")
+                    safe
                 }
+                applyCandidate(fraction)
+                decisionJournal.change("Выбран вариант по прогнозу", "Ниже только изменение предложения, не факт подачи.",
+                    DecisionValue("Микродоза", result.units.toString(), plannedSmbBeforeFinalForecast.toString(), "Е", DecisionStage.SMB),
+                    DecisionValue("Временный базал", result.rate.toString(), plannedRateBeforeFinalForecast.toString(), "Е/ч", DecisionStage.BASAL))
                 predictedSMB = (result.units ?: 0.0).toFloat()
                 val guardReason = "Свежий инсулин приведён к финальному прогнозу: " +
                     "min=${"%.0f".format(finalForecastSummary.forecastFloor)}, " +
-                    "после свежего инсулина≈${"%.0f".format(projectedFloorAfterFreshInsulin)}, " +
+                    "это минимум уже с учётом предложенного инсулина (без повторного вычитания), " +
                     "безопасный пол=${"%.0f".format(finalForecastSafeFloor)}, " +
                     "углеводы=${finalForecastCarbsBeforeGuard}г, " +
                     "SMB ${"%.2f".format(plannedSmbBeforeFinalForecast)}→${"%.2f".format(result.units ?: 0.0)}U, " +
@@ -5655,7 +5575,6 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     )
                 }
             }
-            applyFinalForecastInsulinDeficit(finalForecastSummary)
             consoleLog.add("AIMI FINAL: ${finalForecastSummary.workingZoneSummary}")
             val sanitizedReason = result.reason.toString()
                 .replace(Regex("""\d+\s+add'l carbs req w/in \d+min;\s*"""), "")
@@ -5681,6 +5600,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 
 // -------- 1) sécurité hypo dure, avant tout
         if (safetyDecision.stopBasal) {
+            decisionJournal.branch("basal_route", "stop", "Остановка базала по безопасности")
             val finalResult = setTempBasal(0.0, 30, profile, rT, currenttemp)
             return finalizeDecisionAwareForecast(finalResult)
         }
@@ -5700,6 +5620,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             val forced = forcedBasalmealmodes.coerceAtLeast(0.05) // anti-0
             val alreadyForced = abs(currenttemp.rate - forced) < 0.05 && currenttemp.duration >= 25
             if (!alreadyForced) {
+                decisionJournal.branch("basal_route", "meal", "Базал в начале режима еды", "$runtimeMinLabel; $runtimeMinValue мин")
                 rT.reason.append(
                     context.getString(
                         R.string.meal_mode_first_30,
@@ -5800,8 +5721,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         )
         val allowMealHighIob = mealHighIobDecision.relax
         val mealHighIobDamping = mealHighIobDecision.damping
+        decisionJournal.branch("iob_limit", if (iob_data.iob <= maxIobLimit) "pass" else if (allowMealHighIob) "meal" else "block",
+            "Предел активного инсулина", "IOB=${iob_data.iob}; предел=$maxIobLimit")
 
         if (iob_data.iob > maxIobLimit && !allowMealHighIob) {
+            decisionJournal.branch("basal_route", "iob", "Базал при превышении IOB", "IOB=${iob_data.iob}; предел=$maxIobLimit")
             //rT.reason.append("IOB ${round(iob_data.iob, 2)} > maxIobLimit maxIobLimit")
             rT.reason.append(context.getString(R.string.reason_iob_max, round(iob_data.iob, 2), round(maxIobLimit, 2)))
             val finalResult = if (delta < 0) {
@@ -5871,6 +5795,13 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 
             insulinReq = insulinReq * safetyDecision.bolusFactor
             insulinReq = round(insulinReq, 3)
+            val beforeEarlyLimit = insulinReq
+            insulinReq = earlyOverdelivery.limitSmb(insulinReq)
+            if (insulinReq < beforeEarlyLimit) {
+                decisionJournal.change("Сохранение предела микродозы",
+                    "Последующие усиления не могут превысить ранее выбранный предел SMB.",
+                    DecisionValue("Микродоза", insulinReq.toString(), beforeEarlyLimit.toString(), "Е"))
+            }
             rT.insulinReq = insulinReq
             //console.error(iob_data.lastBolusTime);
             // minutes since last bolus
@@ -5908,6 +5839,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 
                 val nextBolusMins = round(smbInterval - lastBolusAge, 0)
                 val nextBolusSeconds = round((smbInterval - lastBolusAge) * 60, 0) % 60
+                decisionJournal.branch("smb_interval", if (microBolus <= 0.0) "none" else if (lastBolusAge > smbInterval) "pass" else "wait",
+                    "Интервал микродозы", "После болюса=$lastBolusAge мин; интервал=$smbInterval мин; запрос=$microBolus Е")
                 if (lastBolusAge > smbInterval) {
                     if (microBolus > 0) {
                         rT.units = microBolus
@@ -5995,7 +5928,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 },
                 round = { value, digits -> round(value, digits) }
             )
-            val basalDecision = basalDecisionEngine.decide(basalInput, rT, helpers)
+            decisionJournal.branch("basal_route", "engine", "Передача в планировщик базала")
+            val basalDecision = basalDecisionEngine.decide(basalInput, rT, helpers) { id, outcome, title, detail, rate ->
+                decisionJournal.branch(id, outcome, title, detail,
+                    rate?.let { listOf(DecisionValue("Базал", it.toString(), unit = "Е/ч")) }.orEmpty())
+            }
             val finalResult = setTempBasal(
                 _rate = basalDecision.rate,
                 duration = basalDecision.duration,
@@ -6020,17 +5957,28 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             )
 
             // --- Update Learners ---
-            val currentHour = LocalTime.now().hour
-            val anyMealActive = mealTime || bfastTime || lunchTime || dinnerTime || highCarbTime
+            val currentHour = Calendar.getInstance().apply { timeInMillis = currentTime }.get(Calendar.HOUR_OF_DAY)
+            val anyMealActive = !noActiveMealMode() || explicitFoodTypeActive()
             val isNight = currentHour >= 22 || currentHour <= 6
-            
-            basalLearner.process(
+            val learningSkip = app.aaps.plugins.aps.openAPSAIMI.learning.BasalLearningEligibility.skipReason(
+                now = currentTime, sampleTime = glucose_status.date,
+                bg = bg, delta = delta.toDouble(), noise = glucose_status.noise, flat = flatBGsDetected,
+                cob = mealData.mealCOB, mealActive = anyMealActive, exercise = sportTime,
+                lastCarbTime = mealData.lastCarbTime, insulinHorizonHours = profile.dia,
+                bolusIob = iob_data.iob - iob_data.basaliob, basalIob = iob_data.basaliob,
+                tempBasalActive = currenttemp.duration > 0 && abs(currenttemp.rate - profile.current_basal) > 1e-6
+            )
+            val learningMessage = basalLearner.process(
                 currentBg = bg,
                 currentDelta = delta.toDouble(),
                 tdd7Days = tdd7Days,
-                tdd30Days = tdd7Days, // Placeholder as tdd30Days is not readily available in this scope yet
-                isFastingTime = isNight && !anyMealActive
+                tdd30Days = Double.NaN,
+                isFastingTime = isNight && !anyMealActive,
+                observationTime = glucose_status.date,
+                now = currentTime,
+                skipReason = learningSkip
             )
+            consoleLog.add(learningMessage)
 
             // 🎯 Process UnifiedReactivityLearner (old learner removed)
             unifiedReactivityLearner.processIfNeeded()  // Analyze & adjust every 6h

@@ -6,7 +6,7 @@ import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 class AdvancedPredictionEngineTest {
 
@@ -51,6 +51,7 @@ class AdvancedPredictionEngineTest {
 
         val iobEntry = mockk<IobTotal>()
         every { iobEntry.iob } returns 1.0
+        every { iobEntry.activity } returns 0.005
         every { iobEntry.time } returns System.currentTimeMillis()
 
         val result = AdvancedPredictionEngine.predict(
@@ -145,22 +146,25 @@ class AdvancedPredictionEngineTest {
             currentBG = 107.0,
             iobArray = emptyArray(),
             finalSensitivity = 43.0,
-            cobG = 15.0,
+            cobG = 8.0,
             profile = profile,
             selectedFoodType = "fast",
             delta = 14.0,
             explicitCarbEntry = true,
+            // Same measured absorption in both cases isolates the typed momentum.
+            carbImpactTimelineMgdlPer5m = List(12) { 0.5 },
             horizonMinutes = 60
         )
         val slow = AdvancedPredictionEngine.predict(
             currentBG = 107.0,
             iobArray = emptyArray(),
             finalSensitivity = 43.0,
-            cobG = 15.0,
+            cobG = 8.0,
             profile = profile,
             selectedFoodType = "slow",
             delta = 14.0,
             explicitCarbEntry = true,
+            carbImpactTimelineMgdlPer5m = List(12) { 0.5 },
             horizonMinutes = 60
         )
 
@@ -264,7 +268,7 @@ class AdvancedPredictionEngineTest {
             )
         }
 
-        val forecast = AdvancedPredictionEngine.predict(
+        fun predict(observed: Double) = AdvancedPredictionEngine.predict(
             currentBG = 104.0,
             iobArray = freshMealBolus,
             finalSensitivity = 70.0,
@@ -277,15 +281,17 @@ class AdvancedPredictionEngineTest {
             plannedRateUph = 0.80,
             profileBasalUph = 0.80,
             plannedDurationMin = 30,
-            observedCarbImpactMgdlPer5m = 35.0,
-            remainingCiPeakMgdlPer5m = 35.0,
+            observedCarbImpactMgdlPer5m = observed,
+            remainingCiPeakMgdlPer5m = observed,
             explicitCarbEntry = true,
             targetBG = 117.0,
             horizonMinutes = 120
         )
 
+        val forecast = predict(35.0)
         assertTrue(forecast[1] < 125.0)
-        assertTrue((forecast.maxOrNull() ?: 401.0) < 220.0)
+        // The typed food curve, not another extrapolation of the same rise, supplies the grams.
+        assertEquals(predict(0.0), forecast)
     }
 
     @Test

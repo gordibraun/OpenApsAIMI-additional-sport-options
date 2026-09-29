@@ -1,0 +1,6 @@
+<resources>
+    <string name="bench_title">Combo: стенд %1$s</string>
+    <string name="no_insulin_delivery">Подача инсулина недоступна</string>
+    <string name="manual_pairing_title">Сопряжение Combo</string>
+    <string name="manual_pairing_phone_confirmation">AAPS на телефоне отключён, а не просто закрыт. Старую привязку можно заменить</string>
+</resources>

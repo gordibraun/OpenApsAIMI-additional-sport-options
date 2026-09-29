@@ -14,7 +14,7 @@ import app.aaps.plugins.aps.openAPSAIMI.pkpd.PkPdRuntime
 // import io.mockk.mockk
 // import io.mockk.verify
 import org.junit.Assert.assertEquals
-import org.junit.Test
+import org.junit.jupiter.api.Test
 import java.io.File
 
 /*

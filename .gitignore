@@ -38,3 +38,6 @@ aaps-effectiveness-monitor/
 tmp-current-check/
 scripts/__pycache__/
 *.pyc
+
+# Local engineering notes: contain device identifiers and personal therapy details
+_docs/2026-*-RU.md

@@ -2,7 +2,8 @@ package app.aaps.plugins.aps.openAPSAIMI
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.jupiter.api.Test
+import kotlin.random.Random
 
 class aimiNeuralNetworkTest {
 
@@ -24,8 +25,11 @@ class aimiNeuralNetworkTest {
             config = TrainingConfig(
                 epochs = 100,
                 learningRate = 0.01,
-                batchSize = 1
-            )
+                batchSize = 1,
+                useBatchNorm = false,
+                useDropout = false
+            ),
+            random = Random(42)
         )
 
         val inputs = listOf(

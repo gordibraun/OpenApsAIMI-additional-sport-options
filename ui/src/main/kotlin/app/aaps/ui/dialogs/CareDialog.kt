@@ -1,5 +1,7 @@
 package app.aaps.ui.dialogs
 
+import app.aaps.core.objects.activity.ActivityPlanCalculator
+
 import android.content.Context
 import android.os.Bundle
 import android.text.Editable
@@ -482,33 +484,6 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         _binding = null
     }
 
-    private data class ActivityPlan(
-        val mode: String,
-        val effectPercent: Int,
-        val startOffsetMinutes: Int,
-        val durationMinutes: Int,
-        val tailMinutes: Int,
-        val activityWindowEndMinutes: Int,
-        val requiredCarbs: Int,
-        val baseRequiredCarbs: Int,
-        val activityRequiredCarbs: Int,
-        val carbsWithinMinutes: Int,
-        val carbType: String?,
-        val forecastMin: Double,
-        val forecastMinMinute: Int,
-        val lateForecastMin: Double?,
-        val lateForecastMinMinute: Int?,
-        val glucoseUseMgdlPer5m: Double,
-        val carbSensitivityMgdlPerGram: Double,
-        val activityEquivalentCarbs: Double,
-        val activityCarbFloorMgdl: Double,
-        val baseDeficitMgdl: Double,
-        val activityDeficitMgdl: Double,
-        val totalDeficitMgdl: Double,
-        val firstRiskMinute: Int?,
-        val firstActivityImpactMinute: Int?,
-        val carbLeadMinutes: Int
-    )
 
     private data class ActivityWatchSnapshot(
         val steps5min: Int?,
@@ -583,22 +558,10 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
             else                                  -> null
         }
 
-    private fun activityEffectPercent(mode: String): Int =
-        if (mode == "SPORT") 30 else 20
+    private fun activityEffectPercent(mode: String): Int = ActivityPlanCalculator.effectPercent(mode)
 
     private fun activityTailMinutes(mode: String, durationMinutes: Int): Int =
-        when (mode) {
-            "SPORT" -> when {
-                durationMinutes >= 90 -> 180
-                durationMinutes >= 50 -> 120
-                else                  -> 60
-            }
-
-            else -> when {
-                durationMinutes >= 90 -> 30
-                else                  -> 0
-            }
-        }
+        ActivityPlanCalculator.tailMinutes(mode, durationMinutes)
 
     private fun qualifiedActivityDuration(durationMinutes: Int): Int =
         when {
@@ -625,10 +588,8 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         tailMinutes: Int,
         requiredCarbs: Int,
         carbType: String?
-    ): String =
-        "AIMI_ACTIVITY_V2 mode=$mode effect=$effectPercent startOffset=$startOffsetMinutes " +
-            "duration=$durationMinutes tail=$tailMinutes requiredCarbs=$requiredCarbs " +
-            "carbType=${carbType ?: "none"}"
+    ): String = ActivityPlanCalculator.note(mode, effectPercent, startOffsetMinutes,
+        durationMinutes, tailMinutes, requiredCarbs, carbType)
 
     private fun parseActiveActivity(event: TE): ActiveActivity? {
         if (!event.isValid || event.type != TE.Type.EXERCISE || event.note?.contains("AIMI_ACTIVITY_V2") != true) return null
@@ -681,237 +642,20 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
         return "Текущая нагрузка: ${activity.mode}, $phase. Хвост: ${activity.tailMinutes} мин."
     }
 
-    private fun activityGlucoseUseMgdlPer5m(mode: String, effectPercent: Int): Double {
+    private fun buildActivityPlan(): ActivityPlanCalculator.Plan {
         val profile = profileFunction.getProfile()
-        val basal = profile?.getBasal() ?: 0.0
-        val isf = profile?.getIsfMgdl("Activity v2") ?: 0.0
-        val insulinEquivalent = if (basal > 0.0 && isf > 0.0) basal * isf * (effectPercent / 100.0) / 12.0 else 0.0
-        val movementUse = if (mode == "SPORT") 1.2 else 0.8
-        val cap = if (mode == "SPORT") 5.0 else 3.5
-        return (insulinEquivalent + movementUse).coerceIn(0.5, cap)
-    }
-
-    private fun activityPhaseAtMinute(minute: Int, startOffset: Int, duration: Int, tail: Int): Double =
-        when {
-            minute < startOffset -> 0.0
-            minute <= startOffset + duration -> 1.0
-            tail > 0 && minute <= startOffset + duration + tail ->
-                (1.0 - (minute - startOffset - duration).toDouble() / tail.toDouble()).coerceIn(0.0, 1.0)
-            else -> 0.0
-        }
-
-    private fun activityTotalUseMgdl(startOffset: Int, duration: Int, tail: Int, glucoseUseMgdlPer5m: Double): Double {
-        val windowEnd = startOffset + duration + tail
-        var total = 0.0
-        var minute = 5
-        while (minute <= windowEnd) {
-            total += glucoseUseMgdlPer5m * activityPhaseAtMinute(minute, startOffset, duration, tail)
-            minute += 5
-        }
-        return total
-    }
-
-    private fun buildActivityPlan(): ActivityPlan {
-        val mode = selectedActivityMode()
-        val effectPercent = activityEffectPercent(mode)
-        val startOffset = selectedActivityStartOffset()
-        val duration = selectedActivityDuration()
-        val tail = activityTailMinutes(mode, duration)
-        val windowEnd = startOffset + duration + tail
-        val glucoseUse = activityGlucoseUseMgdlPer5m(mode, effectPercent)
-        val baseForecast = activityBaseForecast(minSteps = (windowEnd / 5).coerceAtLeast(48))
-        val adjustedForecast = activityAdjustedForecast(baseForecast, startOffset, duration, tail, glucoseUse)
-        val forecastPoints = adjustedForecast.mapIndexed { index, value -> ((index + 1) * 5) to value }
-        val minPoint = forecastPoints
-            .filter { (minute, _) -> minute in max(5, startOffset)..windowEnd }
-            .minByOrNull { (_, value) -> value }
-        val lateMinPoint = forecastPoints
-            .filter { (minute, _) -> minute > windowEnd }
-            .minByOrNull { (_, value) -> value }
-        val forecastMin = minPoint?.second ?: (glucoseStatusProvider.glucoseStatusData?.glucose ?: 0.0)
-        val forecastMinMinute = minPoint?.first ?: 0
-        val profile = profileFunction.getProfile()
-        val target = profile?.getTargetMgdl() ?: forecastMin
-        val overviewLowMark = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), profileFunction.getUnits())
-        val profileLowTarget = profile?.getTargetLowMgdl()?.takeIf { it.isFinite() && it > 0.0 } ?: overviewLowMark
-        val activityCarbFloor = max(overviewLowMark + 10.0, profileLowTarget)
-            .coerceAtMost(target)
-        val isf = profile?.getIsfMgdl("Activity v2 carbs") ?: 0.0
-        val ic = profile?.getIc() ?: 0.0
-        val csf = if (isf > 0.0 && ic > 0.0) isf / ic else 0.0
-        val baseDeficit = activityBaseDeficitMgdl(
-            baseForecast = baseForecast,
-            windowEnd = windowEnd,
-            target = activityCarbFloor
-        )
-        val activityDeficit = activityAddedDeficitMgdl(
-            baseForecast = baseForecast,
-            adjustedForecast = adjustedForecast,
-            startOffset = startOffset,
-            windowEnd = windowEnd,
-            target = activityCarbFloor
-        )
-        val totalDeficit = (baseDeficit + activityDeficit).coerceAtLeast(
-            activityTotalDeficitMgdl(
-                adjustedForecast = adjustedForecast,
-                windowEnd = windowEnd,
-                target = activityCarbFloor
-            )
-        )
-        val baseRequiredCarbs = carbsForDeficitMgdl(baseDeficit, csf)
-        val requiredCarbs = carbsForDeficitMgdl(totalDeficit, csf)
-        val activityRequiredCarbs = (requiredCarbs - baseRequiredCarbs).coerceAtLeast(0)
-        val firstBaseRiskMinute = firstDeficitMinute(
-            baseForecast = baseForecast,
-            windowEnd = windowEnd,
-            target = activityCarbFloor
-        )
-        val firstActivityImpactMinute = firstActivityImpactMinute(
-            baseForecast = baseForecast,
-            adjustedForecast = adjustedForecast,
-            startOffset = startOffset,
-            windowEnd = windowEnd,
-            target = activityCarbFloor
-        )
-        val firstRiskMinute = listOfNotNull(
-            firstBaseRiskMinute.takeIf { baseRequiredCarbs > 0 },
-            firstActivityImpactMinute.takeIf { activityRequiredCarbs > 0 }
-        ).minOrNull()
-        val carbType = selectedActivityCarbType()
-        val carbLead = when (carbType) {
-            "fast" -> 10
-            "balanced" -> 25
-            else -> 15
-        }
-        val within = if (requiredCarbs > 0) ((firstRiskMinute ?: forecastMinMinute) - carbLead).coerceIn(0, windowEnd) else 0
-        val activityEquivalentCarbs = if (csf > 0.0) activityTotalUseMgdl(startOffset, duration, tail, glucoseUse) / csf else 0.0
-
-        return ActivityPlan(
-            mode = mode,
-            effectPercent = effectPercent,
-            startOffsetMinutes = startOffset,
-            durationMinutes = duration,
-            tailMinutes = tail,
-            activityWindowEndMinutes = windowEnd,
-            requiredCarbs = requiredCarbs,
-            baseRequiredCarbs = baseRequiredCarbs,
-            activityRequiredCarbs = activityRequiredCarbs,
-            carbsWithinMinutes = within,
-            carbType = carbType,
-            forecastMin = forecastMin,
-            forecastMinMinute = forecastMinMinute,
-            lateForecastMin = lateMinPoint?.second,
-            lateForecastMinMinute = lateMinPoint?.first,
-            glucoseUseMgdlPer5m = glucoseUse,
-            carbSensitivityMgdlPerGram = csf,
-            activityEquivalentCarbs = activityEquivalentCarbs,
-            activityCarbFloorMgdl = activityCarbFloor,
-            baseDeficitMgdl = baseDeficit,
-            activityDeficitMgdl = activityDeficit,
-            totalDeficitMgdl = totalDeficit,
-            firstRiskMinute = firstRiskMinute,
-            firstActivityImpactMinute = firstActivityImpactMinute,
-            carbLeadMinutes = carbLead
+        return ActivityPlanCalculator.build(
+            mode = selectedActivityMode(), duration = selectedActivityDuration(),
+            startOffset = selectedActivityStartOffset(), carbType = selectedActivityCarbType(),
+            basal = profile?.getBasal() ?: 0.0, isf = profile?.getIsfMgdl("Activity v2") ?: 0.0,
+            ic = profile?.getIc() ?: 0.0, target = profile?.getTargetMgdl() ?: Double.NaN,
+            lowTarget = profile?.getTargetLowMgdl() ?: 0.0,
+            overviewLowMark = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), profileFunction.getUnits()),
+            currentBg = glucoseStatusProvider.glucoseStatusData?.glucose ?: 0.0,
+            forecast = loop.lastRun?.constraintsProcessed?.predictions()?.AIMI_FINAL?.map { it.toDouble() }.orEmpty(),
+            carbIsf = profile?.getIsfMgdl("Activity v2 carbs") ?: 0.0
         )
     }
-
-    private fun activityBaseForecast(minSteps: Int): List<Double> {
-        val currentBg = glucoseStatusProvider.glucoseStatusData?.glucose ?: 0.0
-        val base = loop.lastRun?.constraintsProcessed?.predictions()?.AIMI_FINAL
-            ?.takeIf { it.isNotEmpty() }
-            ?.map { it.toDouble() }
-            ?: List(48) { currentBg }
-        if (base.size >= minSteps) return base
-        val lastValue = base.lastOrNull() ?: currentBg
-        return base + List(minSteps - base.size) { lastValue }
-    }
-
-    private fun activityAdjustedForecast(base: List<Double>, startOffset: Int, duration: Int, tail: Int, glucoseUseMgdlPer5m: Double): List<Double> {
-        var accumulatedUse = 0.0
-        return base.mapIndexed { index, predicted ->
-            val minute = (index + 1) * 5
-            val phase = activityPhaseAtMinute(minute, startOffset, duration, tail)
-            accumulatedUse += glucoseUseMgdlPer5m * phase
-            predicted - accumulatedUse
-        }
-    }
-
-    private fun activityBaseDeficitMgdl(
-        baseForecast: List<Double>,
-        windowEnd: Int,
-        target: Double
-    ): Double =
-        baseForecast
-            .mapIndexedNotNull { index, base ->
-                val minute = (index + 1) * 5
-                if (minute !in 5..windowEnd) null else (target - base).coerceAtLeast(0.0)
-            }
-            .maxOrNull()
-            ?: 0.0
-
-    private fun activityTotalDeficitMgdl(
-        adjustedForecast: List<Double>,
-        windowEnd: Int,
-        target: Double
-    ): Double =
-        adjustedForecast
-            .mapIndexedNotNull { index, adjusted ->
-                val minute = (index + 1) * 5
-                if (minute !in 5..windowEnd) null else (target - adjusted).coerceAtLeast(0.0)
-            }
-            .maxOrNull()
-            ?: 0.0
-
-    private fun activityAddedDeficitMgdl(
-        baseForecast: List<Double>,
-        adjustedForecast: List<Double>,
-        startOffset: Int,
-        windowEnd: Int,
-        target: Double
-    ): Double =
-        baseForecast
-            .zip(adjustedForecast)
-            .mapIndexedNotNull { index, (base, adjusted) ->
-                val minute = (index + 1) * 5
-                if (minute !in max(5, startOffset)..windowEnd) {
-                    null
-                } else {
-                    val baseDeficit = (target - base).coerceAtLeast(0.0)
-                    val adjustedDeficit = (target - adjusted).coerceAtLeast(0.0)
-                    (adjustedDeficit - baseDeficit).coerceAtLeast(0.0)
-                }
-            }
-            .maxOrNull()
-            ?: 0.0
-
-    private fun carbsForDeficitMgdl(deficitMgdl: Double, csf: Double): Int =
-        if (csf > 0.0 && deficitMgdl >= 3.0) ceil(deficitMgdl / csf).toInt().coerceAtMost(60) else 0
-
-    private fun firstDeficitMinute(baseForecast: List<Double>, windowEnd: Int, target: Double): Int? =
-        baseForecast
-            .mapIndexedNotNull { index, base ->
-                val minute = (index + 1) * 5
-                if (minute in 5..windowEnd && target - base >= 3.0) minute else null
-            }
-            .minOrNull()
-
-    private fun firstActivityImpactMinute(
-        baseForecast: List<Double>,
-        adjustedForecast: List<Double>,
-        startOffset: Int,
-        windowEnd: Int,
-        target: Double
-    ): Int? =
-        baseForecast
-            .zip(adjustedForecast)
-            .mapIndexedNotNull { index, (base, adjusted) ->
-                val minute = (index + 1) * 5
-                val activeWindow = minute in max(5, startOffset)..windowEnd
-                val addedDrop = base - adjusted
-                val addedDeficit = (target - adjusted).coerceAtLeast(0.0) - (target - base).coerceAtLeast(0.0)
-                if (activeWindow && (addedDeficit >= 3.0 || addedDrop >= 3.0)) minute else null
-            }
-            .minOrNull()
 
     private fun activityWatchSnapshot(): ActivityWatchSnapshot {
         val now = System.currentTimeMillis()
@@ -1020,7 +764,7 @@ class CareDialog(val fm: FragmentManager) : DialogFragmentWithDate() {
                 }
     }
 
-    private fun activityNote(plan: ActivityPlan): String =
+    private fun activityNote(plan: ActivityPlanCalculator.Plan): String =
         activityNote(
             mode = plan.mode,
             effectPercent = plan.effectPercent,

@@ -4,59 +4,43 @@ import app.aaps.core.interfaces.aps.AimiMealAssist
 import app.aaps.core.interfaces.aps.AimiMealDecision
 import app.aaps.core.interfaces.aps.AimiMealEpisode
 import app.aaps.core.interfaces.aps.AimiMealInput
+import app.aaps.core.interfaces.aps.IobTotal
+import app.aaps.core.interfaces.aps.MealData
+import app.aaps.core.interfaces.aps.PendingWizardTreatment
+import app.aaps.core.interfaces.sharedPreferences.SP
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.encodeToString
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
-import app.aaps.core.keys.DoubleKey
-import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.CarbAbsorptionModel
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
-import java.time.Instant
-import java.time.ZoneId
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 @Singleton
 class AimiMealAssistImpl @Inject constructor(
     private val logger: AAPSLogger,
-    private val preferences: Preferences
+    private val sp: SP
 ) : AimiMealAssist {
 
     private data class FoodTypeModifier(
         val carbFactor: Double,
-        val prebolusFactor: Double,
         val label: String
     )
 
     private val activeEpisodesRef = AtomicReference<List<AimiMealEpisode>>(emptyList())
     private val lastAcceptedTreatmentAtRef = AtomicLong(0L)
+    private val pendingKey = "aimi_pending_wizard_treatment_v1"
 
     override fun evaluate(input: AimiMealInput): AimiMealDecision {
         val targetBg = (input.targetBgLow + input.targetBgHigh) / 2.0
-        val mealMode = detectMealMode(input)
-        val baseModeFactor = when (mealMode) {
-            "highcarb"  -> preferences.get(DoubleKey.OApsAIMIHCFactor) / 100.0
-            "meal"      -> preferences.get(DoubleKey.OApsAIMIMealFactor) / 100.0
-            "breakfast" -> preferences.get(DoubleKey.OApsAIMIBFFactor) / 100.0
-            "lunch"     -> preferences.get(DoubleKey.OApsAIMILunchFactor) / 100.0
-            "dinner"    -> preferences.get(DoubleKey.OApsAIMIDinnerFactor) / 100.0
-            "snack"     -> preferences.get(DoubleKey.OApsAIMISnackFactor) / 100.0
-            else        -> 1.0
-        }
-        val basePrebolusBonus = when (mealMode) {
-            "highcarb"  -> preferences.get(DoubleKey.OApsAIMIHighCarbPrebolus)
-            "meal"      -> preferences.get(DoubleKey.OApsAIMIMealPrebolus)
-            "breakfast" -> preferences.get(DoubleKey.OApsAIMIBFPrebolus)
-            "lunch"     -> preferences.get(DoubleKey.OApsAIMILunchPrebolus)
-            "dinner"    -> preferences.get(DoubleKey.OApsAIMIDinnerPrebolus)
-            "snack"     -> preferences.get(DoubleKey.OApsAIMISnackPrebolus)
-            else        -> 0.0
-        }
+        // Manual-mode SMB factors and fixed preboluses belong to automation, not the wizard.
+        val mealMode = if (input.carbs > 0) "meal" else "correction"
         val foodTypeModifier = foodTypeModifier(input.selectedFoodType)
-        val modeFactor = baseModeFactor * foodTypeModifier.carbFactor
-        val prebolusBonus = basePrebolusBonus * foodTypeModifier.prebolusFactor
+        val foodFactor = foodTypeModifier.carbFactor
         val activityNewInsulinFactor = input.activityNewInsulinFactor.coerceIn(0.55, 1.0)
 
         val protectiveCarbs = input.requiredCarbs.coerceAtLeast(0)
@@ -77,12 +61,11 @@ class AimiMealAssistImpl @Inject constructor(
         }
         val adjustedCarbComponent = when {
             netCarbs <= 0 -> 0.0
-            else             -> carbComponent * modeFactor
+            else             -> carbComponent * foodFactor
         }
-        val prebolusApplied = if (protectiveCarbs == 0 && netCarbs > 0 && input.carbTimeMinutes >= 0) prebolusBonus else 0.0
         val baseRecommendationBeforeForecast = when {
-            protectiveCarbs > 0 && input.carbs < protectiveCarbs -> 0.0
-            else -> max(0.0, effectiveBaseWithoutCarbs + adjustedCarbComponent + prebolusApplied)
+            protectiveCarbs > 0 && input.carbs <= protectiveCarbs -> 0.0
+            else -> max(0.0, effectiveBaseWithoutCarbs + adjustedCarbComponent)
         }
         val recommendationBeforeActivity = baseRecommendationBeforeForecast
         val recommendationBeforeManualCorrection =
@@ -103,25 +86,22 @@ class AimiMealAssistImpl @Inject constructor(
             expectedEventualBg = expectedEventualBg,
             confidence = 0.35,
             mealMode = mealMode,
-            modeFactor = modeFactor,
-            prebolusBonus = prebolusApplied,
+            modeFactor = foodFactor,
+            prebolusBonus = 0.0,
             source = "AIMI meal wizard",
             explanation = buildString {
-                append("AIMI mode=$mealMode. ")
+                append("Ручной расчёт; коэффициенты и предболюсы режимов не применяются. ")
                 append("Food type=${foodTypeModifier.label}. ")
                 if (protectiveCarbs > 0) {
                     append("Protective carbs=${protectiveCarbs}g, net carbs=${netCarbs}g. ")
                 }
-                if (protectiveCarbs > 0 && input.carbs < protectiveCarbs) {
-                    append("Entered carbs below required carbs, bolus forced to 0U. ")
+                if (protectiveCarbs > 0 && input.carbs <= protectiveCarbs) {
+                    append("Введено не больше требуемых углеводов: автоматическая прибавка инсулина 0 Е. ")
                 } else if (protectiveCarbs > 0 && netCarbs > 0) {
                     append("Protective carbs covered, dosing only excess carbs above requirement. ")
                 }
                 append("Base(without carbs)=${"%.2f".format(baseWithoutCarbsAndManualCorrection)}U, ")
-                append("carbs ${"%.2f".format(carbComponent)}U x ${"%.2f".format(modeFactor)} = ${"%.2f".format(adjustedCarbComponent)}U")
-                if (prebolusApplied > 0.0) {
-                    append(", prebolus +${"%.2f".format(prebolusApplied)}U")
-                }
+                append("carbs ${"%.2f".format(carbComponent)}U x ${"%.2f".format(foodFactor)} = ${"%.2f".format(adjustedCarbComponent)}U")
                 if (activityNewInsulinFactor < 0.999) {
                     append(", нагрузка новый инсулин x${"%.2f".format(activityNewInsulinFactor)}")
                     input.activityDescription?.let { append(" ($it)") }
@@ -186,18 +166,61 @@ class AimiMealAssistImpl @Inject constructor(
 
     override fun lastTreatmentAcceptedAt(): Long = lastAcceptedTreatmentAtRef.get()
 
-    private fun detectMealMode(input: AimiMealInput): String {
-        if (input.carbs <= 0) return "correction"
-        if (input.carbs >= 40) return "highcarb"
-        if (input.carbs <= 15) return "snack"
-
-        val hour = Instant.ofEpochMilli(input.timestamp).atZone(ZoneId.systemDefault()).hour
-        return when (hour) {
-            in 4..10  -> "breakfast"
-            in 11..15 -> "lunch"
-            in 17..22 -> "dinner"
-            else      -> "meal"
+    @Synchronized
+    override fun pendingTreatment(): PendingWizardTreatment? {
+        val saved = sp.getString(pendingKey, "")
+        if (saved.isEmpty()) return null
+        return try {
+            Json.decodeFromString<PendingWizardTreatment>(saved)
+        } catch (e: Exception) {
+            logger.error("Cannot read pending wizard delivery", e)
+            // Corrupt or unknown persisted delivery must not silently authorize another dose.
+            PendingWizardTreatment(0L, 0L, 0.0, 0L, 0.0)
         }
+    }
+
+    @Synchronized
+    override fun beginTreatment(treatment: PendingWizardTreatment): Boolean {
+        if (pendingTreatment() != null) return false
+        sp.edit(commit = true) { putString(pendingKey, Json.encodeToString(treatment)) }
+        markTreatmentAccepted(treatment.acceptedAt)
+        return true
+    }
+
+    @Synchronized
+    override fun completeTreatment(acceptedAt: Long, bolusTimestamp: Long, deliveredInsulin: Double, success: Boolean) {
+        val pending = pendingTreatment()?.takeIf { it.acceptedAt == acceptedAt } ?: return
+        // A positive partial delivery still has to reach the IOB input, even when the command failed.
+        if (!deliveredInsulin.isFinite() || deliveredInsulin < 0.0 || (!success && deliveredInsulin == 0.0)) return
+        val confirmed = pending.copy(
+            bolusTimestamp = bolusTimestamp, insulin = deliveredInsulin, deliveryConfirmed = true
+        )
+        sp.edit(commit = true) { putString(pendingKey, Json.encodeToString(confirmed)) }
+    }
+
+    @Synchronized
+    override fun rejectTreatment(acceptedAt: Long) {
+        // Only used when the command queue reports that the request was not queued at all.
+        if (pendingTreatment()?.acceptedAt == acceptedAt) sp.edit(commit = true) { remove(pendingKey) }
+    }
+
+    @Synchronized
+    override fun acknowledgeTreatment(iob: IobTotal?, meal: MealData?) {
+        if (pendingTreatment()?.includedIn(iob, meal) == true) sp.edit(commit = true) { remove(pendingKey) }
+    }
+
+    @Synchronized
+    override fun confirmManualTreatmentReview(acceptedAt: Long, reviewedAt: Long): Boolean {
+        val pending = pendingTreatment()?.takeIf { it.acceptedAt == acceptedAt } ?: return false
+        if (reviewedAt <= acceptedAt || reviewedAt - acceptedAt < 5 * 60_000L) return false
+        val reviewed = pending.copy(manuallyReviewedAt = reviewedAt)
+        sp.edit(commit = true) {
+            putString(pendingKey, Json.encodeToString(reviewed))
+            putString("aimi_last_manual_delivery_review_v1", Json.encodeToString(reviewed))
+        }
+        markTreatmentAccepted(reviewedAt)
+        logger.info(LTag.APS, "Wizard treatment explicitly reconciled by user: accepted=$acceptedAt reviewed=$reviewedAt; waiting for fresh calculation")
+        return true
     }
 
     private fun recentMealTopUpBolusCredit(input: AimiMealInput): Double {
@@ -222,17 +245,14 @@ class AimiMealAssistImpl @Inject constructor(
         when (selectedFoodType?.lowercase()) {
             "fast" -> FoodTypeModifier(
                 carbFactor = 0.80,
-                prebolusFactor = 0.0,
                 label = "быстрые углеводы: раннее всасывание, bolus осторожнее"
             )
             "slow" -> FoodTypeModifier(
                 carbFactor = 0.92,
-                prebolusFactor = 0.35,
                 label = "медленная еда"
             )
             else -> FoodTypeModifier(
                 carbFactor = 1.0,
-                prebolusFactor = 1.0,
                 label = "обычная еда"
             )
         }

@@ -4,7 +4,7 @@ import android.content.Context
 // import io.mockk.every
 // import io.mockk.mockk
 import org.junit.Assert.assertEquals
-import org.junit.Test
+import org.junit.jupiter.api.Test
 import java.io.File
 
 /*

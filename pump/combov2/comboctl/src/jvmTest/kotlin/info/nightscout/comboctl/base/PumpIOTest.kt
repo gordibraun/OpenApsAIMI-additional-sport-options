@@ -8,6 +8,8 @@ import info.nightscout.comboctl.base.testUtils.TestRefPacketItem
 import info.nightscout.comboctl.base.testUtils.checkTestPacketSequence
 import info.nightscout.comboctl.base.testUtils.produceTpLayerPacket
 import info.nightscout.comboctl.base.testUtils.runBlockingWithWatchdog
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.UtcOffset
@@ -173,6 +175,57 @@ class PumpIOTest : TestBase() {
             val appLayerPacket = ApplicationLayer.Packet(packetData.toTransportLayerPacket())
             assertEquals(ApplicationLayer.Command.CTRL_DISCONNECT, appLayerPacket.command, "Application layer packet command mismatch")
         }
+    }
+
+    @Test
+    fun disconnectReleasesLongPressBeforeClosingTransport() = runBlockingWithWatchdog(12000) {
+        val state = startLongPressWaitingForDisplay()
+        state.pumpIO.disconnect()
+
+        state.checkAndRemoveInitialSentPackets()
+        assertEquals(3, state.testIO.sentPacketData.size)
+        state.checkRTButtonStatusPacketData(state.testIO.sentPacketData[0], ApplicationLayer.RTButton.UP, true)
+        state.checkRTButtonStatusPacketData(state.testIO.sentPacketData[1], ApplicationLayer.RTButton.NO_BUTTON, true)
+        state.checkDisconnectPacketData(state.testIO.sentPacketData[2])
+    }
+
+    @Test
+    fun reconnectAfterInterruptedLongPressCanUseButtons() = runBlockingWithWatchdog(12000) {
+        val state = startLongPressWaitingForDisplay()
+        state.pumpIO.disconnect()
+        state.testIO.resetIncomingPacketDataChannel()
+        state.testIO.resetSentPacketData()
+        state.feedInitialPackets()
+        state.pumpIO.connect(runHeartbeat = false)
+        try {
+            state.pumpIO.sendShortRTButtonPress(ApplicationLayer.RTButton.DOWN)
+        } finally {
+            state.pumpIO.disconnect()
+        }
+
+        state.checkAndRemoveInitialSentPackets()
+        assertEquals(3, state.testIO.sentPacketData.size)
+        state.checkRTButtonStatusPacketData(state.testIO.sentPacketData[0], ApplicationLayer.RTButton.DOWN, true)
+        state.checkRTButtonStatusPacketData(state.testIO.sentPacketData[1], ApplicationLayer.RTButton.NO_BUTTON, true)
+        state.checkDisconnectPacketData(state.testIO.sentPacketData[2])
+    }
+
+    private suspend fun startLongPressWaitingForDisplay(): TestStates {
+        val state = TestStates(true)
+        state.feedInitialPackets()
+        state.pumpIO.connect(runHeartbeat = false)
+        val waitingForDisplay = CompletableDeferred<Unit>()
+        var checks = 0
+        state.pumpIO.startLongRTButtonPress(ApplicationLayer.RTButton.UP) {
+            if (checks++ == 0) true
+            else {
+                // One press was confirmed; now emulate waiting for the next display frame.
+                waitingForDisplay.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        waitingForDisplay.await()
+        return state
     }
 
     @Test

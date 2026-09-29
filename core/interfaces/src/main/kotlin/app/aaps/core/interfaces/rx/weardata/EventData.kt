@@ -86,6 +86,25 @@ sealed class EventData : Event() {
     data class ActionBolusPreCheck(val insulin: Double, val carbs: Int) : EventData()
 
     @Serializable
+    data class WatchControlRequest(
+        val requestId: String,
+        val createdAt: Long,
+        val kind: String,
+        val insulin: Double = 0.0,
+        val carbs: Int = 0,
+        val mode: String = "WALK",
+        val duration: Int = 30,
+        val startOffset: Int = 0,
+        val carbType: String = "fast"
+    ) : EventData()
+
+    @Serializable
+    data class WatchControlConfirmed(val token: String) : EventData()
+
+    @Serializable
+    data class WatchControlCapabilities(val protocol: Int = 1) : EventData()
+
+    @Serializable
     data class ActionFillPreCheck(val insulin: Double) : EventData()
 
     @Serializable

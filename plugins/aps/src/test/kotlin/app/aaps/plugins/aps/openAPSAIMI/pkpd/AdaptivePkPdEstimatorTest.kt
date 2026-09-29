@@ -2,7 +2,7 @@ package app.aaps.plugins.aps.openAPSAIMI.pkpd
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 class AdaptivePkPdEstimatorTest {
 
@@ -27,8 +27,8 @@ class AdaptivePkPdEstimatorTest {
         estimator.update(1000, 100.0, -5.0, 0.1, 0.0, 60, false)
         assertEquals(initialParams, estimator.params())
 
-        // Carbs active
-        estimator.update(1000, 100.0, -5.0, 1.0, 10.0, 60, false)
+        // Current estimator permits up to 15 g; test the excluded side of that boundary.
+        estimator.update(1000, 100.0, -5.0, 1.0, 16.0, 60, false)
         assertEquals(initialParams, estimator.params())
 
         // Exercise

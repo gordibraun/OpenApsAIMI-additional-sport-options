@@ -59,6 +59,9 @@ class DataHandlerWear @Inject constructor(
     }
 
     private fun setupBus() {
+        disposable += rxBus.toObservable(EventData.WatchControlCapabilities::class.java)
+            .observeOn(aapsSchedulers.io)
+            .subscribe { sp.putInt("watch_control_api_version", it.protocol) }
         disposable += rxBus
             .toObservable(EventData.ActionPing::class.java)
             .observeOn(aapsSchedulers.io)

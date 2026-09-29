@@ -76,7 +76,7 @@ class DataLayerListenerServiceMobile : WearableListenerService() {
         disposable += rxBus
             .toObservable(EventMobileToWear::class.java)
             .observeOn(aapsSchedulers.io)
-            .subscribe { sendMessage(rxPath, it.payload.serialize()) }
+            .subscribe { sendMessage(rxPath, it.payload.serialize(), it.payload.sourceNodeId.takeIf(String::isNotBlank)) }
         disposable += rxBus
             .toObservable(EventMobileToWearWatchface::class.java)
             .observeOn(aapsSchedulers.io)
@@ -106,6 +106,10 @@ class DataLayerListenerServiceMobile : WearableListenerService() {
                 rxPath          -> {
                     aapsLogger.debug(LTag.WEAR, "onMessageReceived rxPath: ${String(messageEvent.data)}")
                     val command = EventData.deserialize(String(messageEvent.data))
+                    if (command is EventData.ActionPing) {
+                        sendMessage(rxPath, EventData.ActionPong(command.timeStamp, android.os.Build.VERSION.SDK_INT).serialize(), messageEvent.sourceNodeId)
+                        return
+                    }
                     rxBus.send(command.also { it.sourceNodeId = messageEvent.sourceNodeId })
                 }
 
@@ -166,9 +170,9 @@ class DataLayerListenerServiceMobile : WearableListenerService() {
         }
     }
 
-    private fun sendMessage(path: String, data: String?) {
+    private fun sendMessage(path: String, data: String?, destination: String? = null) {
         aapsLogger.debug(LTag.WEAR, "sendMessage: $path $data")
-        transcriptionNodeId?.also { nodeId ->
+        (destination ?: transcriptionNodeId)?.also { nodeId ->
             messageClient
                 .sendMessage(nodeId, path, data?.toByteArray() ?: byteArrayOf()).apply {
                     addOnSuccessListener { }

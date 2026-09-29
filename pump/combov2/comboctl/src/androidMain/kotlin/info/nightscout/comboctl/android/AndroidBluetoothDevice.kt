@@ -32,8 +32,11 @@ private val logger = Logger.get("AndroidBluetoothDevice")
 class AndroidBluetoothDevice(
     private val androidContext: Context,
     private val systemBluetoothAdapter: SystemBluetoothAdapter,
-    override val address: BluetoothAddress
+    override val address: BluetoothAddress,
+    private val watchdogTimeoutMs: Long = 20_000L
 ) : BluetoothDevice(Dispatchers.IO) {
+
+    init { require(watchdogTimeoutMs > 0) }
 
     private var systemBluetoothSocket: SystemBluetoothSocket? = null
     private var inputStream: InputStream? = null
@@ -45,7 +48,6 @@ class AndroidBluetoothDevice(
     @Volatile
     private var lastTrafficTime: Long = 0
     private var watchdogThread: Thread? = null
-    private val watchdogTimeoutMs = 20000L // 20 seconds
 
     // Use toUpperCase() since Android expects the A-F hex digits in the
     // Bluetooth address string to be uppercase (lowercase ones are considered

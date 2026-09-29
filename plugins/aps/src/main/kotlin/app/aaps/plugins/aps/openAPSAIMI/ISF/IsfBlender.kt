@@ -13,6 +13,14 @@ class IsfBlender(
     private var lastIsf: Double? = null
     private var lastTsMs: Long? = null
 
+    fun snapshot(): RateLimitedIsfState? = lastIsf?.let { RateLimitedIsfState(it, lastTsMs ?: return null) }
+
+    fun restore(state: RateLimitedIsfState?) {
+        val valid = state?.takeIf { it.isValid() }
+        lastIsf = valid?.isf
+        lastTsMs = valid?.timestamp
+    }
+
     /**
      * @param fusedIsf    socle lent (PkPdIntegration.fusedIsf)
      * @param kalmanIsf   candidat rapide (KalmanISFCalculator)

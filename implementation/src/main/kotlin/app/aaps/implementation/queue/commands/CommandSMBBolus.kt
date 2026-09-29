@@ -40,6 +40,12 @@ class CommandSMBBolus(
     override val commandType: Command.CommandType = Command.CommandType.SMB_BOLUS
 
     override fun execute() {
+        callback?.validationErrorBeforeDelivery()?.let { reason ->
+            aapsLogger.debug(LTag.PUMPQUEUE, reason)
+            callback.result(pumpEnactResultProvider.get().enacted(false).success(false).comment(reason)).run()
+            BolusProgressData.bolusEnded = true
+            return
+        }
         val r: PumpEnactResult
         val lastBolusTime = persistenceLayer.getNewestBolus()?.timestamp ?: 0L
         aapsLogger.debug(LTag.PUMPQUEUE, "Last bolus: $lastBolusTime ${dateUtil.dateAndTimeAndSecondsString(lastBolusTime)}")

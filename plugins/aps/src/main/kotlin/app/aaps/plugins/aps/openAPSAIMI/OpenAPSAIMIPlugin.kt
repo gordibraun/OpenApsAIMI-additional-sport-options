@@ -6,8 +6,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.util.LongSparseArray
-import androidx.core.util.forEach
 import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.PreferenceManager
@@ -82,6 +80,10 @@ import app.aaps.plugins.aps.events.EventOpenAPSUpdateGui
 import app.aaps.plugins.aps.events.EventResetOpenAPSGui
 import app.aaps.plugins.aps.openAPS.TddStatus
 import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfAdjustmentEngine
+import app.aaps.plugins.aps.openAPSAIMI.ISF.AdaptiveIsfState
+import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfHistory
+import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfSample
+import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfStateStore
 import dagger.android.HasAndroidInjector
 import org.json.JSONObject
 import java.util.Calendar
@@ -121,7 +123,8 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     private val determineBasalaimiSMB2: DetermineBasalaimiSMB2,
     private val profiler: Profiler,
     private val context: Context,
-    private val apsResultProvider: Provider<APSResult>
+    private val apsResultProvider: Provider<APSResult>,
+    private val isfStateStore: IsfStateStore
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.APS)
@@ -194,17 +197,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
             // retourne null si tu veux "laisser la main" au runtime
             preferences.get(DoubleKey.AimiUamConfidence)
         }
-        var count = 0
-        val apsResults = persistenceLayer.getApsResults(dateUtil.now() - T.days(1).msecs(), dateUtil.now())
-        apsResults.forEach {
-            val glucose = it.glucoseStatus?.glucose ?: return@forEach
-            val variableSens = it.variableSens ?: return@forEach
-            val timestamp = it.date
-            val key = timestamp - timestamp % T.mins(30).msecs() + glucose.toLong()
-            if (variableSens > 0) dynIsfCache.put(key, variableSens)
-            count++
-        }
-        aapsLogger.debug(LTag.APS, "Loaded $count variable sensitivity values from database")
+        ensureIsfHistory(dateUtil.now())
     }
     override fun getGlucoseStatusData(allowOldData: Boolean): GlucoseStatus? =
         glucoseStatusCalculatorAimi.getGlucoseStatusData(allowOldData)
@@ -217,7 +210,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     override val algorithm = APSResult.Algorithm.AIMI
     override var lastAPSResult: APSResult? = null
     override fun supportsDynamicIsf(): Boolean = preferences.get(BooleanKey.ApsUseDynamicSensitivity)
-    private val pkpdIntegration = PkPdIntegration(preferences)
+    private val pkpdIntegration = PkPdIntegration(preferences, isfStateStore, "plugin")
     private var lastPkpdScale: Double = 1.0
     // Dans votre classe principale (ou plugin), vous pouvez déclarer :
     private val kalmanISFCalculator = KalmanISFCalculator(tddCalculator, preferences, aapsLogger)
@@ -226,7 +219,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     // top-level (à côté de isfBlender / pkpdIntegration)
     private val isfAdjEngine = IsfAdjustmentEngine()
 
-    // état EMA persistant (clé Prefs à créer si tu veux le garder entre runs)
+    private var adaptiveIsfContext: String? = null
     private var tddEma: Double? = null
     private val TDD_EMA_ALPHA = 0.2 // ou pref
 
@@ -261,23 +254,34 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         return finalIsf
     }
 
+    @Synchronized
     override fun getAverageIsfMgdl(timestamp: Long, caller: String): Double? {
-        if (dynIsfCache == null || dynIsfCache.size() == 0) {
-            aapsLogger.warn(LTag.APS, "dynIsfCache is null or empty. Unable to calculate average ISF.")
-            return profileFunction.getProfile()?.getProfileIsfMgdl() ?: 20.0
-        }
-        var count = 0
-        var sum = 0.0
-        val start = timestamp - T.hours(8).msecs()
-        dynIsfCache.forEach { key, value ->
-            if (key in start..timestamp) {
-                count++
-                sum += value
-            }
-        }
-        val sensitivity = if (count == 0) null else sum / count
-        aapsLogger.debug(LTag.APS, "getAverageIsfMgdl() $sensitivity from $count values ${dateUtil.dateAndTimeAndSecondsString(timestamp)} $caller")
+        ensureIsfHistory(dateUtil.now())
+        val sensitivity = isfHistory.average(timestamp)
+        aapsLogger.debug(LTag.APS, "getAverageIsfMgdl() $sensitivity ${dateUtil.dateAndTimeAndSecondsString(timestamp)} $caller")
         return sensitivity
+    }
+
+    @Synchronized
+    private fun ensureIsfHistory(now: Long) {
+        if (isfHistoryLoaded) return
+        isfHistory.restore(isfStateStore.history(), now)
+        try {
+            persistenceLayer.getApsResults(now - T.hours(8).msecs(), now)
+                .filter { it.algorithm == APSResult.Algorithm.AIMI }
+                .sortedBy { it.date }
+                .forEach { result ->
+                    val isf = result.variableSens ?: return@forEach
+                    val glucose = result.glucoseStatus?.glucose ?: return@forEach
+                    isfHistory.add(IsfSample(result.date, glucose, isf), now)
+                }
+            isfHistoryLoaded = true
+        } catch (e: Exception) {
+            aapsLogger.warn(LTag.APS, "Cannot restore ISF history from database: ${e.javaClass.simpleName}")
+        }
+        val saved = isfHistory.snapshot(now)
+        isfStateStore.save(saved)
+        aapsLogger.debug(LTag.APS, "Restored food ISF history: ${saved.samples.size} samples, average=${isfHistory.average(now)}")
     }
 
     override fun specialEnableCondition(): Boolean {
@@ -316,7 +320,8 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         preferenceFragment.findPreference<AdaptiveIntPreference>(IntKey.ApsUamMaxMinutesOfBasalToLimitSmb.key)?.isVisible = smbEnabled && uamEnabled
     }
 
-    private val dynIsfCache = LongSparseArray<Double>()
+    private val isfHistory = IsfHistory()
+    private var isfHistoryLoaded = false
 
     // Exemple de fonction pour prédire le delta futur à partir d'un historique récent
     private fun predictedDelta(deltaHistory: List<Double>): Double {
@@ -384,13 +389,50 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         val profileIsf = profileFunction.getProfile()?.getProfileIsfMgdl() ?: 20.0
         val blended = computeFreshVariableIsf(glucose, currentDelta, predictedDelta, profileIsf, timestamp)
 
-        val key = timestamp - timestamp % T.mins(30).msecs() + glucose.toLong()
-        if (dynIsfCache.size() > 1000) dynIsfCache.clear()
-        dynIsfCache.put(key, blended)
-
         return "CALC" to blended
     }
 
+    private fun currentIsfContext(): String? {
+        val profile = profileFunction.getProfile() ?: return null
+        return listOf(
+            profileFunction.getOriginalProfileName(), profile.percentage, profile.timeshift,
+            profile.getIsfsMgdlValues().joinToString { "${it.timeAsSeconds}:${it.value}" },
+            preferences.get(BooleanKey.ApsUseDynamicSensitivity),
+            preferences.get(BooleanKey.OApsAIMIPkpdEnabled),
+            preferences.get(DoubleKey.OApsAIMITDD7),
+            preferences.get(DoubleKey.OApsAIMIIsfFusionMinFactor),
+            preferences.get(DoubleKey.OApsAIMIIsfFusionMaxFactor),
+            preferences.get(DoubleKey.OApsAIMIIsfFusionMaxChangePerTick)
+        ).joinToString("|")
+    }
+
+    private fun restoreAdaptiveIsf(now: Long) {
+        val context = currentIsfContext() ?: return
+        if (adaptiveIsfContext == context) return
+        val saved = isfStateStore.adaptive(context, now)
+        kalmanISFCalculator.restore(saved?.kalman)
+        isfBlender.restore(saved?.blender)
+        isfAdjEngine.restore(saved?.adjustment)
+        tddEma = saved?.tddEma
+        lastPkpdScale = saved?.pkpdScale ?: 1.0
+        adaptiveIsfContext = context
+        aapsLogger.debug(LTag.APS, "Adaptive ISF state: ${if (saved == null) "fresh initialization" else "restored from ${saved.timestamp}"}")
+    }
+
+    private fun persistAdaptiveIsf() {
+        val context = adaptiveIsfContext ?: return
+        val kalman = kalmanISFCalculator.snapshot() ?: return
+        val blender = isfBlender.snapshot() ?: return
+        val adjustment = isfAdjEngine.snapshot() ?: return
+        val tdd = tddEma ?: return
+        val saved = AdaptiveIsfState(
+            timestamp = blender.timestamp, context = context, kalman = kalman,
+            blender = blender, adjustment = adjustment, tddEma = tdd, pkpdScale = lastPkpdScale
+        )
+        if (saved.isUsable(context, blender.timestamp)) isfStateStore.save(saved)
+    }
+
+    @Synchronized
     private fun computeFreshVariableIsf(
         glucose: Double,
         currentDelta: Double?,
@@ -398,6 +440,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         profileIsf: Double,
         nowMs: Long
     ): Double {
+        restoreAdaptiveIsf(nowMs)
         val kalmanFastIsf = kalmanISFCalculator.calculateISF(glucose, currentDelta, predictedDelta)
         aapsLogger.debug(LTag.APS, "Adaptive ISF via Kalman: $kalmanFastIsf for BG: $glucose")
 
@@ -439,10 +482,12 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
             LTag.APS,
             "DynISF inputs: fusedSlowIsf=$fusedSlowIsf, kalmanFastIsf=$kalmanFastIsf, isfAdj=$isfAdj, trustFast=$kalmanTrustProxy, pkpdScale=$lastPkpdScale"
         )
+        persistAdaptiveIsf()
         return blended
     }
 
 
+    @Synchronized
     override fun invoke(initiator: String, tempBasalFallback: Boolean) {
         aapsLogger.debug(LTag.APS, "invoke from $initiator tempBasalFallback: $tempBasalFallback")
         val forecastOnly = initiator == "EventAppInitialized" || initiator.startsWith("ForecastOnly")
@@ -701,14 +746,16 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 bg = bgNow,
                 deltaMgDlPer5 = deltaNow,
                 iobU = iobNow,
-                carbsActiveG = 0.0,          // branche tes carbs actifs réels si tu les as ici
-                windowMin = 240,             // fenêtre standard (4h) – ajuste si besoin
+                carbsActiveG = mealData.mealCOB,
+                windowMin = iobArray.firstOrNull()?.lastBolusTime?.takeIf { it > 0 && it <= nowMs }
+                    ?.let { ((nowMs - it) / 60_000L).toInt() } ?: 0,
                 exerciseFlag = false,        // remplace par ton flag 'sportTime' si dispo ICI
                 profileIsf = profileIsfRaw,  // ← **PROFIL BRUT, PAS getIsfMgdl()**
                 tdd24h = tdd24ForPk
             )
 
             lastPkpdScale = pkpdRuntimeNow?.pkpdScale ?: 1.0
+            persistAdaptiveIsf()
             aapsLogger.debug(LTag.APS, "PK/PD: pkpdScale=$lastPkpdScale (bg=$bgNow, delta=$deltaNow, iob=$iobNow, tdd24=$tdd24ForPk, isfRaw=$profileIsfRaw)")
             aapsLogger.info(
                 LTag.APS,
@@ -808,6 +855,13 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 normalizeFinalReason(it)
                 lastAPSResult = determineBasalResult
                 lastAPSRun = now
+                if (dynIsfMode) {
+                    ensureIsfHistory(now)
+                    determineBasalResult.variableSens?.let { isf ->
+                        isfHistory.add(IsfSample(now, glucoseStatus.glucose, isf), now)
+                        isfStateStore.save(isfHistory.snapshot(now))
+                    }
+                }
                 aapsLogger.debug(LTag.APS, "Result: $it")
                 rxBus.send(EventAPSCalculationFinished())
             }

@@ -11,6 +11,10 @@ class IsfFusion(
 ) {
     private var lastIsf: Double? = null
 
+    fun restore(isf: Double?) {
+        lastIsf = isf?.takeIf { it.isFinite() && it > 0 }
+    }
+
     fun fused(profileIsf: Double, tddIsf: Double, pkpdScale: Double): Double {
         val pkpdIsf = (tddIsf * pkpdScale).coerceAtLeast(1.0)
         val candidates = listOf(profileIsf, tddIsf, pkpdIsf).sorted()
