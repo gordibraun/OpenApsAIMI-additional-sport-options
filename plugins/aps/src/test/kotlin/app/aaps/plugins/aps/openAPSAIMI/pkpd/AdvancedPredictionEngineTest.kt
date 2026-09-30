@@ -18,7 +18,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 50.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             horizonMinutes = 0
         )
         assertEquals(1, result.size)
@@ -36,7 +36,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 50.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             horizonMinutes = 60
         )
         // Should remain flat at 100
@@ -59,7 +59,7 @@ class AdvancedPredictionEngineTest {
             iobArray = arrayOf(iobEntry),
             finalSensitivity = 50.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             horizonMinutes = 60
         )
         // Should drop
@@ -77,7 +77,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 50.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             delta = 5.0,
             observedCarbImpactMgdlPer5m = 10.0,
             remainingCiPeakMgdlPer5m = 10.0,
@@ -88,7 +88,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 50.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             delta = 5.0,
             observedCarbImpactMgdlPer5m = 10.0,
             remainingCiPeakMgdlPer5m = 10.0,
@@ -110,7 +110,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 43.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             delta = 4.0,
             observedCarbImpactMgdlPer5m = 8.0,
             remainingCiPeakMgdlPer5m = 8.0,
@@ -123,7 +123,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 43.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             delta = 4.0,
             observedCarbImpactMgdlPer5m = 8.0,
             remainingCiPeakMgdlPer5m = 8.0,
@@ -147,7 +147,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 43.0,
             cobG = 8.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             selectedFoodType = "fast",
             delta = 14.0,
             explicitCarbEntry = true,
@@ -160,7 +160,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 43.0,
             cobG = 8.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             selectedFoodType = "slow",
             delta = 14.0,
             explicitCarbEntry = true,
@@ -191,7 +191,7 @@ class AdvancedPredictionEngineTest {
             iobArray = activeInsulin,
             finalSensitivity = 40.0,
             cobG = 57.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             selectedFoodType = "fast",
             delta = 9.0,
             plannedSmbU = 0.0,
@@ -231,7 +231,7 @@ class AdvancedPredictionEngineTest {
             iobArray = activeInsulin,
             finalSensitivity = 70.0,
             cobG = 36.3,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             selectedFoodType = "fast",
             carbSensitivityMgdlPerGram = 11.6,
             delta = 3.3,
@@ -273,7 +273,7 @@ class AdvancedPredictionEngineTest {
             iobArray = freshMealBolus,
             finalSensitivity = 70.0,
             cobG = 29.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             selectedFoodType = "balanced",
             carbSensitivityMgdlPerGram = 70.0 / 7.5,
             delta = 1.0,
@@ -305,7 +305,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 60.0,
             cobG = 30.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             selectedFoodType = "balanced",
             horizonMinutes = 180
         )
@@ -315,7 +315,7 @@ class AdvancedPredictionEngineTest {
             finalSensitivity = 60.0,
             carbSensitivityMgdlPerGram = 3.0,
             cobG = 30.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             selectedFoodType = "balanced",
             horizonMinutes = 180
         )
@@ -343,7 +343,7 @@ class AdvancedPredictionEngineTest {
             iobArray = iob,
             finalSensitivity = 35.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             delta = -6.0,
             horizonMinutes = 120
         )
@@ -352,7 +352,7 @@ class AdvancedPredictionEngineTest {
             iobArray = iob,
             finalSensitivity = 35.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             delta = -6.0,
             plannedSmbU = 0.0,
             plannedRateUph = 0.0,
@@ -378,7 +378,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 39.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             selectedFoodType = "balanced",
             delta = 0.3,
             observedCarbImpactMgdlPer5m = 1.0,
@@ -390,7 +390,7 @@ class AdvancedPredictionEngineTest {
             iobArray = emptyArray(),
             finalSensitivity = 39.0,
             cobG = 0.0,
-            profile = profile,
+            profile = profile, plannedInsulinAction = testInsulinAction(),
             selectedFoodType = "balanced",
             delta = 0.3,
             plannedSmbU = 0.55,

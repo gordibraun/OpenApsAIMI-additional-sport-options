@@ -18,7 +18,7 @@ class ForecastAccountingTest {
         AdvancedPredictionEngine.predict(
             currentBG = 220.0,
             iobArray = Array(49) { IobTotal(time = it * 300_000L, iob = 2.0, activity = 0.002) },
-            finalSensitivity = 50.0, cobG = 0.0, profile = profile,
+            finalSensitivity = 50.0, cobG = 0.0, profile = profile, plannedInsulinAction = testInsulinAction(),
             freshSmbPressureU = fresh, plannedSmbU = smb, safetyMechanism = safety,
             profileBasalUph = 1.0, plannedRateUph = rate, plannedDurationMin = duration
         )
@@ -46,18 +46,23 @@ class ForecastAccountingTest {
         val curve = AdvancedPredictionEngine.predict(
             currentBG = 150.0,
             iobArray = Array(49) { IobTotal(time = it * 300_000L, activity = -0.002) },
-            finalSensitivity = 50.0, cobG = 0.0, profile = profile,
+            finalSensitivity = 50.0, cobG = 0.0, profile = profile, plannedInsulinAction = testInsulinAction(),
             profileBasalUph = 1.0, plannedRateUph = 0.0, plannedDurationMin = 30
         )
-        assertEquals(150.0 + 24.0 + 25.0, curve.last(), 1e-9)
+        val omittedEffect = -testInsulinAction().effectsPer5Minutes(0.0, -1.0, 30, 48).sum() * 50.0
+        assertEquals(150.0 + 24.0 + omittedEffect, curve.last(), 1e-9)
     }
 
     @Test fun proposedInsulinIsIncludedExactlyOnce() {
-        assertEquals(25.0, forecast().last() - forecast(smb = 0.5).last(), 0.001)
+        val effectWithinHorizon = testInsulinAction().effectsPer5Minutes(0.5, 0.0, 30, 48).sum() * 50.0
+        assertEquals(effectWithinHorizon, forecast().last() - forecast(smb = 0.5).last(), 0.001)
     }
 
     @Test fun basalDurationIsPartOfTheDecision() {
-        assertEquals(25.0, forecast(duration = 30, rate = 2.0).last() - forecast(duration = 60, rate = 2.0).last(), 0.001)
+        val action = testInsulinAction()
+        val additionalEffect = (action.effectsPer5Minutes(0.0, 1.0, 60, 48).sum() -
+            action.effectsPer5Minutes(0.0, 1.0, 30, 48).sum()) * 50.0
+        assertEquals(additionalEffect, forecast(duration = 30, rate = 2.0).last() - forecast(duration = 60, rate = 2.0).last(), 0.001)
     }
 
     @Test fun observedCarbImpactUsesGlucoseAndActivityUnits() {
@@ -100,7 +105,7 @@ class ForecastAccountingTest {
     @Test fun declaredCarbsCannotCreateMoreGlucoseThanTheirRemainingMass() {
         val curve = AdvancedPredictionEngine.predict(
             currentBG = 100.0, iobArray = emptyArray(), finalSensitivity = 50.0,
-            cobG = 10.0, profile = profile, selectedFoodType = "balanced", explicitCarbEntry = true,
+            cobG = 10.0, profile = profile, plannedInsulinAction = testInsulinAction(), selectedFoodType = "balanced", explicitCarbEntry = true,
             observedCarbImpactMgdlPer5m = 35.0, remainingCiPeakMgdlPer5m = 35.0,
             carbImpactTimelineMgdlPer5m = List(48) { 15.0 }
         )

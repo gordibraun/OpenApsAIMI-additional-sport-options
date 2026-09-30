@@ -20,7 +20,8 @@ class ExpiredCarbContextTest {
             finalSensitivity = 44.0, cobG = cob, profile = profile,
             selectedFoodType = type, explicitCarbEntry = explicit, delta = 4.67,
             observedCarbImpactMgdlPer5m = 3.0, uamConfidence = 1.0,
-            rescueFastActive = rescue, targetBG = 117.0, plannedSmbU = smb
+            rescueFastActive = rescue, targetBG = 117.0, plannedSmbU = smb,
+            plannedInsulinAction = testInsulinAction()
         )
 
     @Test fun expiredFoodTypeCannotHideObservedRiseWhenCobIsZero() {

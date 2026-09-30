@@ -45,7 +45,8 @@ object AdvancedPredictionEngine {
         freshSmbPressureU: Double = 0.0,
         targetBG: Double? = null,
         carbImpactTimelineMgdlPer5m: List<Double>? = null,
-        horizonMinutes: Int = 240
+        horizonMinutes: Int = 240,
+        plannedInsulinAction: PlannedInsulinAction? = null
     ): List<Double> {
         val predictions = mutableListOf(currentBG)
         if (horizonMinutes <= 0) return predictions
@@ -99,11 +100,6 @@ object AdvancedPredictionEngine {
             peakMinutes = carbParameters.peakMinutes,
             absorptionMinutes = carbParameters.absorptionMinutes
         )
-        val decisionWeights = CarbAbsorptionModel.buildWeights(
-            steps = steps,
-            peakMinutes = (carbParameters.peakMinutes * 0.8).coerceAtLeast(15.0),
-            absorptionMinutes = (carbParameters.absorptionMinutes * 0.75).coerceAtLeast(45.0)
-        )
 
         val normalizedMealFactor = mealFactorApplied.coerceIn(0.7, 1.5)
         val mealCurveBoost = 1.0 + (normalizedMealFactor - 1.0) * 0.8
@@ -140,15 +136,13 @@ object AdvancedPredictionEngine {
 
         val effectivePlannedRate = plannedRateUph ?: profileBasalUph ?: 0.0
         val effectiveProfileBasal = profileBasalUph ?: 0.0
-        val effectiveDurationHours = (plannedDurationMin.coerceAtLeast(0) / 60.0)
         val rateDeltaUph = effectivePlannedRate - effectiveProfileBasal
-        val plannedBasalUnits = rateDeltaUph * effectiveDurationHours
-        val additionalInsulinUnits = plannedSmbU.coerceAtLeast(0.0) + plannedBasalUnits.coerceAtLeast(0.0)
-        val reducedInsulinUnits = (-plannedBasalUnits).coerceAtLeast(0.0)
         // Delivered SMBs are already in iobArray. Only the proposed, not-yet-delivered
         // dose is added here; a safety label must not change the action of that dose.
-        val decisionDropTotalMgDl = additionalInsulinUnits * finalSensitivity
-        val decisionLiftTotalMgDl = reducedInsulinUnits * finalSensitivity
+        val decisionEffects = if (plannedSmbU != 0.0 || (rateDeltaUph != 0.0 && plannedDurationMin > 0)) {
+            requireNotNull(plannedInsulinAction) { "Active insulin model required for a planned dose" }
+                .effectsPer5Minutes(plannedSmbU, rateDeltaUph, plannedDurationMin.coerceAtLeast(0), steps)
+        } else DoubleArray(steps)
 
         var remainingDeclaredCarbEffect = effectiveCarbEffectMgDl
         var lastBg = currentBG
@@ -209,12 +203,11 @@ object AdvancedPredictionEngine {
             } else {
                 maxOf(baseCarbImpactPer5Min, liveCarbImpactPer5Min, residualCarbImpactPer5Min)
             }
-            val decisionLiftPer5Min = decisionLiftTotalMgDl * decisionWeights[stepIndex]
-            val decisionDropPer5Min = decisionDropTotalMgDl * decisionWeights[stepIndex]
+            val decisionDropPer5Min = decisionEffects[stepIndex] * finalSensitivity
 
             // Apply Momentum
             // We add the current 'inertia' to the BG change, then decay it.
-            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min + decisionLiftPer5Min - decisionDropPer5Min + momentum).coerceIn(39.0, 401.0)
+            val nextBg = (lastBg - insulinImpactPer5min + carbImpactPer5Min - decisionDropPer5Min + momentum).coerceIn(39.0, 401.0)
 
             // Linear/Exp decay of momentum
             momentum *= momentumDecay(

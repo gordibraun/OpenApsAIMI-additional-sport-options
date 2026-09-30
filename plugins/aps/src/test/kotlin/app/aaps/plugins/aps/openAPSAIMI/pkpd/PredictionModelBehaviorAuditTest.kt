@@ -23,7 +23,7 @@ class PredictionModelBehaviorAuditTest {
             finalSensitivity = 50.0, cobG = cob, profile = profile,
             selectedFoodType = type, explicitCarbEntry = cob > 0.0,
             delta = delta, plannedSmbU = smb, uamConfidence = 1.0,
-            targetBG = 117.0
+            targetBG = 117.0, plannedInsulinAction = testInsulinAction()
         )
 
     @Test fun typedFoodForecastCannotDistinguishModerateAndRapidFallingDelta() {
@@ -43,16 +43,18 @@ class PredictionModelBehaviorAuditTest {
         println("MODEL AUDIT same ISF=50: first-5min insulin drop flat=$flatInsulinEffect, rising=$risingInsulinEffect; relative=${risingInsulinEffect / flatInsulinEffect}")
     }
 
-    @Test fun foodTypeChangesTheActionTimingOfTheSameProposedBolus() {
+    @Test fun foodTypeNoLongerChangesTheActionTimingOfTheSameProposedBolus() {
         fun insulinDrop(type: String, index: Int): Double =
             predict(delta = 0.0, cob = 10.0, type = type, activity = 0.0)[index] -
                 predict(delta = 0.0, cob = 10.0, type = type, activity = 0.0, smb = 0.3)[index]
 
         val fast30 = insulinDrop("fast", 6)
         val slow30 = insulinDrop("slow", 6)
-        assertTrue(fast30 > slow30)
-        assertEquals(15.0, insulinDrop("fast", 48), 1e-8)
-        assertEquals(15.0, insulinDrop("slow", 48), 1e-8)
-        println("MODEL AUDIT same proposed bolus, ISF and insulin profile: drop at +30 fast=$fast30, slow=$slow30; full-horizon drop=15 for both")
+        assertEquals(fast30, slow30, 1e-8)
+        val withinHorizon = testInsulinAction().effectsPer5Minutes(0.3, 0.0, 0, 48).sum() * 50.0
+        assertEquals(withinHorizon, insulinDrop("fast", 48), 1e-8)
+        assertEquals(withinHorizon, insulinDrop("slow", 48), 1e-8)
+        assertTrue(withinHorizon < 15.0)
+        println("MODEL REGRESSION same proposed bolus: drop at +30 fast=$fast30, slow=$slow30; +240=$withinHorizon, remaining tail preserved")
     }
 }

@@ -45,14 +45,14 @@ class OverviewPluginTest : TestBaseWithProfile() {
 
     @Test fun localVersionUsesReleaseTitleAndCanBeOpened() {
         whenever(config.APS).thenReturn(true)
-        whenever(rh.gs(R.string.overview_release_title)).thenReturn("1.2 - Food and basal")
+        whenever(rh.gs(R.string.overview_release_title)).thenReturn("1.3 - Insulin forecast")
         whenever(rh.gs(R.string.overview_release_open_changes)).thenReturn("%1\$s. Show changes")
         val view = mock<TextView>()
         overviewPlugin.setVersionView(view)
-        verify(view).text = "1.2 - Food and basal"
+        verify(view).text = "1.3 - Insulin forecast"
         verify(view).isClickable = true
         verify(view).isFocusable = true
-        verify(view).contentDescription = "1.2 - Food and basal. Show changes"
+        verify(view).contentDescription = "1.3 - Insulin forecast. Show changes"
     }
 
     @Test fun clientDoesNotShowLocalAlgorithmReleaseDetails() {

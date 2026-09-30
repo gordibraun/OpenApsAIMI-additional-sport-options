@@ -3,6 +3,8 @@ package app.aaps.plugins.aps.openAPSAIMI.safety
 import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.aps.OapsProfileAimi
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.AdvancedPredictionEngine
+import app.aaps.plugins.aps.openAPSAIMI.pkpd.CarbAbsorptionModel
+import app.aaps.plugins.aps.openAPSAIMI.pkpd.testInsulinAction
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.*
@@ -35,7 +37,7 @@ class GuardedBasalReplayTest {
             currentBG = 152.0,
             iobArray = activity.mapIndexed { i, value -> IobTotal(i * 300_000L, activity = value) }.toTypedArray(),
             finalSensitivity = 55.21961212158203,
-            cobG = 0.0, profile = profile, delta = 5.0,
+            cobG = 0.0, profile = profile, plannedInsulinAction = testInsulinAction(), delta = 5.0,
             plannedSmbU = 0.0, plannedRateUph = rate, profileBasalUph = 0.94,
             plannedDurationMin = 30, observedCarbImpactMgdlPer5m = 8.3,
             remainingCiPeakMgdlPer5m = 0.0, rescueFastActive = false,
@@ -43,11 +45,17 @@ class GuardedBasalReplayTest {
         ).map { it.roundToInt() }
     }
 
-    @Test fun replayMatchesTheRecordedZeroBasalForecastBeforeComparingAlternatives() {
-        val replay = forecast(0.0)
+    @Test fun neutralBasalReplayMatchesRecordedInputsAfterRemovingTheOldFoodBasedBasalLift() {
+        val replay = forecast(0.94)
         assertEquals(recordedZeroBasal.size, replay.size)
-        // The recorded carbohydrate-impact log has one decimal of precision.
-        recordedZeroBasal.zip(replay).forEach { (recorded, actual) -> assertTrue(abs(recorded - actual) <= 1) }
+        // The old zero-basal forecast used a food curve for the omitted insulin.
+        // Remove that historical contribution; do not preserve the bug as a golden result.
+        val oldWeights = CarbAbsorptionModel.buildWeights(48, 36.0, 135.0)
+        var oldLift = 0.0
+        recordedZeroBasal.zip(replay).forEachIndexed { i, (recorded, actual) ->
+            if (i > 0) oldLift += oldWeights[i - 1] * 0.94 * 0.5 * 55.21961212158203
+            assertTrue(abs(recorded - oldLift - actual) <= 1.1)
+        }
     }
 
     @Test fun blockedSmbDoesNotRequireZeroBasalWithTheseFrozenInputs() {

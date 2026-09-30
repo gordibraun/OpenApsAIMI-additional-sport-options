@@ -404,7 +404,7 @@
     <string name="hypo_risk_notification_title">Hypo Risk</string>
     <string name="hypo_risk_notification_text">Hypo risk detected! Please check your BG.</string>
     <string name="graph_range_updated">Graph range: %1$d hours</string>
-    <string name="overview_release_title">1.2 - Food and basal</string>
+    <string name="overview_release_title">1.3 - Insulin forecast</string>
     <string name="overview_release_open_changes">%1$s. Show changes</string>
-    <string name="overview_release_changes">1. Food remaining\nThe minimum absorption fallback no longer erases balanced or slow food before its type-based schedule. Observed absorption can still be faster.\n\n2. Basal insulin\nBlocking a microbolus no longer automatically stops basal. Basal is checked against its own forecast, no higher than the profile after activity adjustments. Falling glucose protection is retained.\n\n3. Insulin sensitivity\nGaps in calculation history stop updates to the average daily dose used by adaptive ISF. Fixed a fallback that mixed insulin units with sensitivity.\n\nYour profile settings and food ratio were not changed. Illness is not detected automatically.\n\n4. Version details\nTap the version to open these changes.</string>
+    <string name="overview_release_changes">1.3: Insulin forecast\nFood type no longer changes the action timing of a proposed insulin dose. The forecast uses the active AAPS insulin model and profile duration.\n\nTemporary basal is spread over its delivery time. Insulin still active beyond the forecast horizon is not compressed into it.\n\nProfile settings and stored ISF states are retained. These changes affect the forecast and can change subsequent dosing decisions.\n\nIncluded from 1.2\nType-aware minimum absorption for balanced and slow food; separate basal checks when microboluses are blocked; history-quality checks for the adaptive ISF daily-dose input.\n\nIllness is not detected automatically.</string>
 </resources>

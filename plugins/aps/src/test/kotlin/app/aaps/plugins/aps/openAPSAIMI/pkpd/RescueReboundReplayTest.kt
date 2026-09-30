@@ -40,6 +40,7 @@ class RescueReboundReplayTest {
             carbSensitivityMgdlPerGram = s.isf / s.carbRatio, delta = s.delta,
             explicitCarbEntry = retainFoodLabel, uamConfidence = if (s.cob > 0.0) 0.0 else 0.35,
             targetBG = 117.0, plannedSmbU = smb, plannedRateUph = rate, profileBasalUph = s.profileBasal,
+            plannedInsulinAction = testInsulinAction(),
             carbImpactTimelineMgdlPer5m = if (legacy) null else carbs.impactMgdlPer5m
         )
     }

@@ -55,6 +55,7 @@ import app.aaps.plugins.aps.openAPSAIMI.safety.HypoTools
 import app.aaps.plugins.aps.openAPSAIMI.safety.RecentSmbOverdeliveryGuard
 import app.aaps.plugins.aps.openAPSAIMI.safety.EarlyOverdeliveryGuard
 import app.aaps.plugins.aps.openAPSAIMI.safety.GuardedBasalSelector
+import app.aaps.plugins.aps.openAPSAIMI.pkpd.PlannedInsulinAction
 import app.aaps.core.data.pump.defs.PumpDescription
 import app.aaps.plugins.aps.openAPSAIMI.safety.SmbCapAttribution
 import app.aaps.plugins.aps.openAPSAIMI.safety.SafetyDecision
@@ -2751,6 +2752,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         }
     }
 
+    private var plannedInsulinAction: PlannedInsulinAction? = null
+
     private data class PredictionResult(
         val eventual: Double,
         val series: List<Int>,
@@ -3051,6 +3054,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 plannedRateUph = plannedRateUph,
                 profileBasalUph = profileBasalUph,
                 plannedDurationMin = rT.duration ?: 30,
+                plannedInsulinAction = plannedInsulinAction,
                 mealFactorApplied = forecastMealFactorApplied,
                 mpcShare = mpcShare,
                 piShare = piShare,
@@ -3393,6 +3397,9 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         wCycleInfoForRun = null
         wCycleReasonLogged = false
         lastProfile = profile
+        plannedInsulinAction = null
+        plannedInsulinAction = PlannedInsulinAction.from(activePlugin.activeInsulin, profile.dia)
+        consoleLog.add("Новая доза: модель ${activePlugin.activeInsulin.friendlyName}, DIA=${profile.dia} ч. Тип еды не меняет кривую действия инсулина; базал учитывается постепенной подачей.")
         // ✅ ETAPE 1: Calculer le Profil d'Action de l'IOB
         decisionJournal.enter(DecisionStage.INSULIN, "Уже введённый инсулин", "Записей кривой активности=${iob_data_array.size}")
         val iobActionProfile = InsulinActionProfiler.calculate(iob_data_array, profile)
