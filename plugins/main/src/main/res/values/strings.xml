@@ -404,7 +404,7 @@
     <string name="hypo_risk_notification_title">Hypo Risk</string>
     <string name="hypo_risk_notification_text">Hypo risk detected! Please check your BG.</string>
     <string name="graph_range_updated">Graph range: %1$d hours</string>
-    <string name="overview_release_title">1.4 - Basal and safety threshold</string>
+    <string name="overview_release_title">1.4 - Basal safety</string>
     <string name="overview_release_open_changes">%1$s. Show changes</string>
     <string name="overview_release_changes">1.4: Basal and safety threshold\nThe low-glucose safety threshold is calculated from the lower target and LGS setting, not from current or predicted glucose. Rising glucose no longer raises this threshold. The final forecast safety margin is retained.\n\nA slight decline above target no longer automatically stops basal when microboluses are blocked. Basal is checked separately against the forecast, capped by the profile and activity setting. A trend reaching target within the temporary basal duration, an unsafe forecast, or missing forecast data still prevents restoration. Microbolus restrictions remain in place.\n\nISF, carbohydrate ratio, profile settings and stored ISF states are not reset or strengthened. These changes can change subsequent dosing decisions. Offline tests do not establish clinical outcomes.\n\nIncluded from 1.3\nThe selected AAPS insulin model and profile duration determine the effect of proposed insulin. Temporary basal is spread over its delivery time.\n\nIncluded from 1.2\nType-aware minimum carbohydrate absorption and history-quality checks for adaptive ISF. Illness is not detected automatically.</string>
 </resources>
