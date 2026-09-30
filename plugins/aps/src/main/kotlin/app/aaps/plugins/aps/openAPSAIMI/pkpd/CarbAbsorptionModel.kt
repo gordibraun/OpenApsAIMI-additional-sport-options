@@ -1,8 +1,7 @@
 package app.aaps.plugins.aps.openAPSAIMI.pkpd
 
-import kotlin.math.exp
+import app.aaps.core.objects.aps.MealAbsorptionSchedule
 import kotlin.math.ceil
-import kotlin.math.pow
 
 object CarbAbsorptionModel {
 
@@ -93,25 +92,7 @@ object CarbAbsorptionModel {
         peakMinutes: Double,
         absorptionMinutes: Double
     ): DoubleArray {
-        if (steps <= 0) return doubleArrayOf()
-        val peak = peakMinutes.coerceIn(15.0, absorptionMinutes.coerceAtLeast(30.0))
-        val sigma = (absorptionMinutes / 3.2).coerceAtLeast(20.0)
-        val weights = DoubleArray(steps)
-        var sum = 0.0
-        // Normalize over the absorption period, not the selected display horizon.
-        // A 30-minute forecast must not consume the entire meal (or planned-dose kernel).
-        val fullSteps = ceil(absorptionMinutes / 5.0).toInt().coerceAtLeast(1)
-        for (index in 0 until fullSteps) {
-            val minutes = (index + 1) * 5.0
-            if (minutes > absorptionMinutes) {
-                continue
-            }
-            val value = exp(-0.5 * ((minutes - peak) / sigma).pow(2.0))
-            if (index < steps) weights[index] = value
-            sum += value
-        }
-        if (sum <= 0.0) return DoubleArray(steps)
-        return DoubleArray(steps) { idx -> weights[idx] / sum }
+        return MealAbsorptionSchedule.weights(steps, peakMinutes, absorptionMinutes)
     }
 
     fun buildWeights(steps: Int, foodType: FoodType): DoubleArray =

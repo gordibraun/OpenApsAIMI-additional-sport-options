@@ -82,6 +82,7 @@ import app.aaps.plugins.aps.openAPS.TddStatus
 import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfAdjustmentEngine
 import app.aaps.plugins.aps.openAPSAIMI.ISF.AdaptiveIsfState
 import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfHistory
+import app.aaps.plugins.aps.openAPSAIMI.ISF.TddLearningInput
 import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfSample
 import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfStateStore
 import dagger.android.HasAndroidInjector
@@ -338,14 +339,19 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         return (0.8 - d * 0.065).coerceIn(0.15, 0.8)
     }
 
-    // ISF basé TDD (ancre 1800/TDD 24h) avec garde-fous
-    private fun tddIsf24hOr(profileIsf: Double): Double {
-        val tdd24 = tddCalculator
-            .averageTDD(tddCalculator.calculate(1, allowMissingDays = false))
-            ?.data?.totalAmount
-            ?: preferences.get(DoubleKey.OApsAIMITDD7) // fallback 7j
-        val anchored = if (tdd24 > 0.1) 1800.0 / tdd24 else profileIsf
-        return anchored.coerceIn(5.0, 400.0)
+    private var tddCoverage: Pair<Long, Boolean>? = null
+
+    private fun continuousTddHistory(now: Long): Boolean {
+        tddCoverage?.takeIf { now >= it.first && now - it.first < T.mins(5).msecs() }?.let { return it.second }
+        val start = now - T.hours(24).msecs()
+        val complete = try {
+            TddLearningInput.continuous(persistenceLayer.getApsResultTimestamps(start, now), start, now)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.APS, "TDD history coverage unavailable", e)
+            false
+        }
+        tddCoverage = now to complete
+        return complete
     }
     private fun getRecentDeltas(): List<Double> {
         val data = iobCobCalculator.ads.getBucketedDataTableCopy() ?: return emptyList()
@@ -444,23 +450,29 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         val kalmanFastIsf = kalmanISFCalculator.calculateISF(glucose, currentDelta, predictedDelta)
         aapsLogger.debug(LTag.APS, "Adaptive ISF via Kalman: $kalmanFastIsf for BG: $glucose")
 
-        val tddIsf = tddIsf24hOr(profileIsf)
+        val tddInput = TddLearningInput.select(
+            observedUnits = tddCalculator.calculateDaily(-24, 0)?.totalAmount,
+            previousUnits = tddEma,
+            configuredUnits = preferences.get(DoubleKey.OApsAIMITDD7),
+            continuous = continuousTddHistory(nowMs)
+        )
+        // Both the anchor and its EMA use units of insulin, never an ISF fallback.
+        val tdd24 = tddInput.units
+        val tddIsf = (if (tdd24 > 0.1) 1800.0 / tdd24 else profileIsf).coerceIn(5.0, 400.0)
         val fusedSlowIsf = isfFusion().fused(profileIsf, tddIsf, lastPkpdScale)
         aapsLogger.debug(LTag.APS, "Fused slow ISF: $fusedSlowIsf (profile=$profileIsf, tddIsf=$tddIsf, pkpdScale=$lastPkpdScale)")
 
-        val tdd24 = tddCalculator.calculateDaily(-24, 0)?.totalAmount ?: tddIsf /* fallback */
-        tddEma = when (val prev = tddEma) {
-            null -> tdd24
-            else -> prev + TDD_EMA_ALPHA * (tdd24 - prev)
-        }
+        tddEma = TddLearningInput.updatedEma(tddInput, tddEma, TDD_EMA_ALPHA)
+        aapsLogger.debug(LTag.APS, "Adaptive TDD: ${tddInput.source}; units=$tdd24; EMA=$tddEma")
 
         val kalmanTrustProxy = estimateKalmanTrustFromDelta(currentDelta)             // 0..1
         val kalmanVarProxy = (1.0 - kalmanTrustProxy).coerceIn(0.0, 1.0)             // 1-trust
         val sippConfidence = AimiUamHandler.confidenceOrZero().coerceIn(0.0, 1.0)
 
-        val isfAdj = isfAdjEngine.compute(
+        val usableTdd = tddEma?.takeIf { it.isFinite() && it > 0.1 }
+        val isfAdj = if (usableTdd == null) profileIsf else isfAdjEngine.compute(
             bgKalman = glucose,
-            tddEma   = (tddEma ?: tdd24),
+            tddEma   = usableTdd,
             profileIsf = profileIsf,
             sippConfidence = sippConfidence,
             kalmanVar = kalmanVarProxy,

@@ -100,8 +100,6 @@ class OverviewPlugin @Inject constructor(
 
     override val overviewBus = RxBusImpl(aapsSchedulers, aapsLogger)
 
-    private val aimiBuildLabel = "1.1 - Борьба с горками"
-
     override fun onStart() {
         super.onStart()
         registerLocalBroadcastReceiver()
@@ -213,8 +211,13 @@ class OverviewPlugin @Inject constructor(
 
     @SuppressLint("SetTextI18n")
     override fun setVersionView(view: TextView) {
-        if (config.APS || config.PUMPCONTROL) {
-            view.text = aimiBuildLabel
+        val showLocalRelease = config.APS || config.PUMPCONTROL
+        view.isClickable = showLocalRelease
+        view.isFocusable = showLocalRelease
+        if (showLocalRelease) {
+            val title = rh.gs(R.string.overview_release_title)
+            view.text = title
+            view.contentDescription = rh.gs(R.string.overview_release_open_changes, title)
             if (config.COMMITTED) {
                 view.setTextColor(rh.gac(context, app.aaps.core.ui.R.attr.omniGrayColor))
                 view.alpha = 1.0f
@@ -223,7 +226,10 @@ class OverviewPlugin @Inject constructor(
             } else {
                 view.setTextColor(rh.gac(context, app.aaps.core.ui.R.attr.urgentColor))
             }
-        } else view.text = ""
+        } else {
+            view.text = ""
+            view.contentDescription = null
+        }
     }
 
     override fun addPreferenceScreen(preferenceManager: PreferenceManager, parent: PreferenceScreen, context: Context, requiredKey: String?) {

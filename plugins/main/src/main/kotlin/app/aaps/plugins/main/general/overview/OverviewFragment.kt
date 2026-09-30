@@ -258,6 +258,11 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             binding.nsclientCard.setBackgroundColor(Color.argb(80, 0x0F, 0xBB, 0xE0))
 
         overview.setVersionView(binding.infoLayout.version)
+        if (config.APS || config.PUMPCONTROL) {
+            binding.infoLayout.version.setOnClickListener {
+                activity?.let { OKDialog.show(it, rh.gs(R.string.overview_release_title), rh.gs(R.string.overview_release_changes)) }
+            }
+        }
 
         skinProvider.activeSkin().preProcessLandscapeOverviewLayout(binding, landscape, rh.gb(app.aaps.core.ui.R.bool.isTablet), smallHeight)
         binding.nsclientCard.visibility = config.AAPSCLIENT.toVisibility()

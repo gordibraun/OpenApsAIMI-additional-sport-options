@@ -54,6 +54,8 @@ import app.aaps.plugins.aps.openAPSAIMI.ports.PkpdPort
 import app.aaps.plugins.aps.openAPSAIMI.safety.HypoTools
 import app.aaps.plugins.aps.openAPSAIMI.safety.RecentSmbOverdeliveryGuard
 import app.aaps.plugins.aps.openAPSAIMI.safety.EarlyOverdeliveryGuard
+import app.aaps.plugins.aps.openAPSAIMI.safety.GuardedBasalSelector
+import app.aaps.core.data.pump.defs.PumpDescription
 import app.aaps.plugins.aps.openAPSAIMI.safety.SmbCapAttribution
 import app.aaps.plugins.aps.openAPSAIMI.safety.SafetyDecision
 import app.aaps.plugins.aps.openAPSAIMI.smb.SmbDampingUsecase
@@ -1119,16 +1121,6 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             explicitlySlowCarbs = explicitFoodTypeRaw?.lowercase() == "slow",
             cumulativeSmbBlocked = cumulativeSmbGuard.blockSmb
         ))
-    }
-
-    private fun earlyOverdeliveryBasalRate(profileCurrentBasal: Double): Double {
-        val preliminaryLowForecast = minOf(predictedBg.toDouble(), eventualBG) < 120.0
-        val highAndNotFalling = bg >= 170.0 && delta >= 0.0f && shortAvgDelta >= -0.5f
-        return when {
-            delta < 0.0f -> 0.0
-            preliminaryLowForecast && !highAndNotFalling -> 0.0
-            else -> profileCurrentBasal
-        }
     }
 
     fun appendCompactLog(
@@ -2761,7 +2753,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 
     private data class PredictionResult(
         val eventual: Double,
-        val series: List<Int>
+        val series: List<Int>,
+        val valid: Boolean = true
     ) {
 
         val minGuard: Double
@@ -3043,6 +3036,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val uamConfidence = unannouncedFoodConfidence(mealData, rescueFastActive, cobG, selectedFoodType)
         val freshSmbPressure = freshSmbPressureUnits()
         val forecastMealFactorApplied = 1.0
+        var forecastValid = iobArray.isNotEmpty() && iobArray.all { it.activity.isFinite() && it.iob.isFinite() }
         val advancedPredictions = try {
             AdvancedPredictionEngine.predict(
                 currentBG = currentBg,
@@ -3073,6 +3067,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             )
         } catch (e: Exception) {
             consoleLog.add("Ошибка прогноза после SMB: ${e.message}")
+            forecastValid = false
             List(48) { currentBg }
         }
         val activityAdjustedPredictions = applyActivityEffectToPredictions(advancedPredictions, activityContext)
@@ -3102,7 +3097,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         consoleLog.add(
             "Честный график: одна линия AIMI; до решения она оранжевая, после финального решения AIMI_FINAL голубая."
         )
-        return PredictionResult(eventual, intsPredictions)
+        return PredictionResult(
+            eventual, intsPredictions,
+            forecastValid && advancedPredictions.all { it.isFinite() } && activityAdjustedPredictions.all { it.isFinite() }
+        )
     }
 
     private fun determineNoteBasedOnBg(bg: Double): String {
@@ -4432,7 +4430,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             DecisionValue("Конец прогноза", pkpdPredictions.eventual.toString(), unit = "мг/дл"))
         val earlyOverdelivery = earlyOverdeliveryDecision(mealData)
         val earlyOverdeliverySmbCap = earlyOverdelivery.maxSmbUnits
-        decisionJournal.branch("early", when { earlyOverdelivery.requiresBasalHold -> "block"; earlyOverdeliverySmbCap != null -> "cap"; else -> "pass" },
+        decisionJournal.branch("early", when { earlyOverdelivery.requiresBasalReview -> "block"; earlyOverdeliverySmbCap != null -> "cap"; else -> "pass" },
             "Защита раннего перелива", "Предел=${earlyOverdeliverySmbCap ?: "нет"}; BG=$bg; COB=${mealData.mealCOB}; IOB=$iob")
         if (earlyOverdeliverySmbCap != null) {
             consoleLog.add(
@@ -4443,10 +4441,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     "лимит SMB=${"%.2f".format(earlyOverdeliverySmbCap)}U, " +
                     "прогноз=${"%.0f".format(predictedBg)}, итог=${"%.0f".format(eventualBG)}"
             )
-            rT.reason.append(if (earlyOverdelivery.requiresBasalHold) " | Защита от раннего перелива: запрет SMB"
+            rT.reason.append(if (earlyOverdelivery.requiresBasalReview) " | Защита от раннего перелива: запрет SMB"
                 else " | Ранний перелив: только лимит SMB ${"%.2f".format(earlyOverdeliverySmbCap)}U")
             decisionJournal.change("Защита от раннего перелива",
-                if (earlyOverdelivery.requiresBasalHold) "Микродоза запрещена; базал проверяется на снижение."
+                if (earlyOverdelivery.requiresBasalReview) "Микродоза запрещена; базал проверяется на снижение."
                 else "Ограничена только микродоза. Базал и окончательная доза проходят обычную проверку прогноза.",
                 DecisionValue("Предел SMB", earlyOverdeliverySmbCap.toString(), unit = "Е"))
         }
@@ -4931,17 +4929,15 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             consoleLog.add("AIMI FINAL: $summary")
         }
 
-        decisionJournal.branch("early_return", if (earlyOverdelivery.requiresBasalHold) "hold" else "continue",
+        decisionJournal.branch("early_return", if (earlyOverdelivery.requiresBasalReview) "hold" else "continue",
             "Путь после раннего ограничения", "Положительный предел не запускает защитный ранний возврат.")
-        if (earlyOverdelivery.requiresBasalHold) {
-            val guardRate = earlyOverdeliveryBasalRate(profile_current_basal)
-            rT.rate = guardRate
+        if (earlyOverdelivery.requiresBasalReview) {
             rT.deliverAt = deliverAt
             rT.duration = 30
             rT.units = 0.0
             rT.insulinReq = 0.0
             rT.safetyMechanism = "Защита от раннего перелива"
-            val guardedPredictions = recomputeDecisionAwarePredictions(
+            fun forecastForBasal(rate: Double) = recomputeDecisionAwarePredictions(
                 currentBg = bg,
                 iobArray = iob_data_array,
                 finalSensitivity = sens,
@@ -4951,7 +4947,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 rT = rT,
                 delta = delta.toDouble(),
                 plannedSmbU = 0.0,
-                plannedRateUph = guardRate,
+                plannedRateUph = rate,
                 profileBasalUph = profile_basal_for_forecast,
                 mealFactorApplied = smbExecution.mealFactorApplied,
                 mpcShare = smbExecution.mpcShare,
@@ -4966,18 +4962,42 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 carbImpactTimelineMgdlPer5m = carbForecast.impactMgdlPer5m,
                 activityContext = activityContext
             )
+            val pumpDescription = activePlugin.activePump.pumpDescription
+            val basalStep = if (pumpDescription.tempBasalStyle == PumpDescription.PERCENT) {
+                profile_basal_for_forecast * pumpDescription.tempPercentStep / 100.0
+            } else pumpDescription.tempAbsoluteStep
+            val choice = GuardedBasalSelector.select(
+                maximumRate = minOf(profile_current_basal, profile_basal_for_forecast) * basalFactor,
+                basalStep = basalStep,
+                bg = bg, delta = delta.toDouble(), shortDelta = shortAvgDelta.toDouble(), target = target_bg
+            ) { rate ->
+                val prediction = forecastForBasal(rate)
+                if (prediction.valid) prediction.series else emptyList()
+            }
+            val guardRate = choice.rate
+            rT.rate = guardRate
+            val guardedPredictions = forecastForBasal(guardRate)
+            val basalReason = when (choice.reason) {
+                "invalid inputs" -> "не хватает корректных данных для выбора базала"
+                "low or falling" -> "сахар ниже цели или продолжает снижаться"
+                "below pump step" -> "допустимый базал меньше шага помпы"
+                "profile basal forecast safe" -> "при допустимом профильном базале прогноз не ниже цели"
+                "risk remains without basal" -> "даже без базала прогноз не подтверждает отсутствие снижения ниже цели"
+                else -> "выбран сниженный базал, при котором прогноз не ниже цели"
+            }
+            decisionJournal.change(
+                "Базал проверен отдельно от запрета микродоз",
+                "Микродоза запрещена; $basalReason. Базал не выше профиля с учётом нагрузки.",
+                DecisionValue("Базал", guardRate.toString(), unit = "Е/ч"),
+                DecisionValue("Минимум прогноза", guardedPredictions.minGuard.toString(), unit = "мг/дл")
+            )
             eventualBG = guardedPredictions.eventual
             predictedBg = guardedPredictions.eventual.toFloat()
             rT.eventualBG = eventualBG
             rT.predictedBG = predictedBg.toDouble()
             rT.minGuardBG = minOf(bg, guardedPredictions.minGuard)
             rT.reason.append(" | Базал ограничен защитой от раннего перелива: ${"%.2f".format(guardRate)} U/h")
-            if (guardRate > 0.0 && minOf(predictedBg.toDouble(), eventualBG) < 120.0 && bg >= 170.0 && delta >= 0.0f) {
-                consoleLog.add(
-                    "Защита раннего перелива: SMB заблокирован, но профильный базал сохранен, " +
-                        "потому что BG высокий и не падает (BG=${"%.0f".format(bg)}, delta=${"%.1f".format(delta)})."
-                )
-            }
+            consoleLog.add("SMB запрещён; независимый выбор базала: ${choice.reason}, rate=$guardRate")
             consoleLog.add(
                 "Прогноз пересчитан с защитой от раннего перелива: " +
                     "SMB=0.00U, базал=${"%.2f".format(guardRate)}U/h, " +

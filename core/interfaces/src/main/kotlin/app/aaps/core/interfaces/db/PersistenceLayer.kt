@@ -1461,6 +1461,7 @@ interface PersistenceLayer {
      * @return List of APSResult
      */
     fun getApsResults(start: Long, end: Long): List<APSResult>
+    fun getApsResultTimestamps(start: Long, end: Long): List<Long>
 
     /**
      * Insert or update ApsResult record

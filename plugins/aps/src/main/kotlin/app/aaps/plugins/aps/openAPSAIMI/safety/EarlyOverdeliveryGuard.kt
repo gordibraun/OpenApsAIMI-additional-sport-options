@@ -17,8 +17,8 @@ internal object EarlyOverdeliveryGuard {
     )
 
     data class Decision(val maxSmbUnits: Double?) {
-        // A positive cap only limits SMB; it does not request the zero-basal path.
-        val requiresBasalHold: Boolean get() = maxSmbUnits == 0.0
+        // Only a prohibited SMB requests independent basal review, not an automatic stop.
+        val requiresBasalReview: Boolean get() = maxSmbUnits == 0.0
         fun limitSmb(proposedUnits: Double): Double = maxSmbUnits?.let { minOf(proposedUnits, it) } ?: proposedUnits
     }
 

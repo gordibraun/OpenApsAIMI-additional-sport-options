@@ -48,6 +48,6 @@ interface AutosensData {
     /**
      * Deduct this 5 min absorption from the active carbs list from oldest to newest.
      */
-    fun deductAbsorbedCarbs()
+    fun deductAbsorbedCarbs(beforeTime: Long = time)
     fun removeOldCarbs(toTime: Long, isAAPSOrWeighted: Boolean)
 }

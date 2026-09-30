@@ -30,4 +30,7 @@ internal interface APSResultDao : TraceableDao<APSResult> {
 
     @Query("SELECT * FROM $TABLE_APS_RESULTS WHERE timestamp >= :start AND timestamp <= :end ORDER BY timestamp ASC")
     fun getApsResults(start: Long, end: Long): Single<List<APSResult>>
+
+    @Query("SELECT DISTINCT timestamp FROM $TABLE_APS_RESULTS WHERE isValid = 1 AND referenceId IS NULL AND timestamp >= :start AND timestamp <= :end ORDER BY timestamp ASC")
+    fun getApsResultTimestamps(start: Long, end: Long): Single<List<Long>>
 }

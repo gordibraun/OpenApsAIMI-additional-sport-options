@@ -7,6 +7,7 @@ import androidx.work.workDataOf
 import app.aaps.core.data.configuration.Constants
 import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.aps.AutosensData
+import app.aaps.core.interfaces.aps.APSResult
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.iob.IobCobCalculator
@@ -26,6 +27,7 @@ import app.aaps.core.interfaces.workflow.CalculationWorkflow
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.workflow.LoggingWorker
+import app.aaps.core.objects.aps.MealAbsorptionPolicy
 import app.aaps.core.utils.receivers.DataWorkerStorage
 import kotlinx.coroutines.Dispatchers
 import java.util.Calendar
@@ -204,15 +206,25 @@ class IobCobOref1Worker(
                     // calculate sum of min carb impact from all active treatments
                     val totalMinCarbsImpact = preferences.get(DoubleKey.ApsSmbMin5MinCarbsImpact)
 
-                    // figure out how many carbs that represents
-                    // but always assume at least 3mg/dL/5m (default) absorption per active treatment
-                    val ci = max(deviation, totalMinCarbsImpact)
-                    if (ci != deviation) autosensData.failOverToMinAbsorptionRate = true
-                    autosensData.this5MinAbsorption = ci * profile.getIc(bgTime) / sens
+                    // Separate observed absorption from the type-aware fallback for AIMI.
+                    val cobBeforeAbsorption = previous.cob
+                    val absorption = MealAbsorptionPolicy.calculate(
+                        now = bgTime, deviation = deviation, minimumImpact = totalMinCarbsImpact,
+                        ic = profile.getIc(bgTime), isf = sens, previousCob = previous.cob,
+                        entries = autosensData.activeCarbsList,
+                        useTypedFallback = config.APS && activePlugin.activeAPS.algorithm == APSResult.Algorithm.AIMI
+                    )
+                    autosensData.failOverToMinAbsorptionRate = absorption.fallbackG > 0.0
+                    autosensData.this5MinAbsorption = absorption.totalG
+                    aapsLogger.debug(LTag.AUTOSENS) {
+                        "COB absorption at $bgTime: observed=${absorption.observedG}g, " +
+                            "fallback=${absorption.fallbackG}g, typed=${absorption.typedFallback}, " +
+                            "ISF=$sens, before=${cobBeforeAbsorption}g"
+                    }
                     // and add that to the running total carbsAbsorbed
                     autosensData.cob = max(previous.cob - autosensData.this5MinAbsorption, 0.0)
                     autosensData.mealCarbs = previous.mealCarbs
-                    autosensData.deductAbsorbedCarbs()
+                    autosensData.deductAbsorbedCarbs(if (absorption.typedFallback) bgTime - T.mins(5).msecs() else bgTime)
                     autosensData.usedMinCarbsImpact = totalMinCarbsImpact
                     autosensData.absorbing = previous.absorbing
                     autosensData.mealStartCounter = previous.mealStartCounter

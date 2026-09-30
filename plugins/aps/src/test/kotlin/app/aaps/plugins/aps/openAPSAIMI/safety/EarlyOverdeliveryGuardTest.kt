@@ -14,7 +14,7 @@ class EarlyOverdeliveryGuardTest {
     @Test fun reboundSoftLimitDoesNotEnterTheZeroBasalReturn() {
         val decision = EarlyOverdeliveryGuard.evaluate(rebound)
         assertEquals(0.3, decision.maxSmbUnits)
-        assertFalse(decision.requiresBasalHold)
+        assertFalse(decision.requiresBasalReview)
     }
 
     @Test fun softLimitIsNotAnInstructionToGiveInsulin() {
@@ -26,7 +26,7 @@ class EarlyOverdeliveryGuardTest {
 
     @Test fun freshInsulinAndLowForecastStillHold() {
         val decision = EarlyOverdeliveryGuard.evaluate(rebound.copy(lastSmbMinutes = 5))
-        assertTrue(decision.requiresBasalHold)
+        assertTrue(decision.requiresBasalReview)
         assertEquals(0.0, decision.maxSmbUnits)
     }
 
@@ -39,16 +39,16 @@ class EarlyOverdeliveryGuardTest {
     }
 
     @Test fun fallingWithHighIobStillHolds() {
-        assertTrue(EarlyOverdeliveryGuard.evaluate(rebound.copy(iobU = 1.5, delta = -2.0)).requiresBasalHold)
+        assertTrue(EarlyOverdeliveryGuard.evaluate(rebound.copy(iobU = 1.5, delta = -2.0)).requiresBasalReview)
     }
 
     @Test fun cumulativeBlockWinsOverTheSoftLimit() {
-        assertTrue(EarlyOverdeliveryGuard.evaluate(rebound.copy(cumulativeSmbBlocked = true)).requiresBasalHold)
+        assertTrue(EarlyOverdeliveryGuard.evaluate(rebound.copy(cumulativeSmbBlocked = true)).requiresBasalReview)
     }
 
     @Test fun unrestrictedMealDoesNotRequestABasalHold() {
         val decision = EarlyOverdeliveryGuard.evaluate(rebound.copy(noActiveMealMode = false))
         assertNull(decision.maxSmbUnits)
-        assertFalse(decision.requiresBasalHold)
+        assertFalse(decision.requiresBasalReview)
     }
 }

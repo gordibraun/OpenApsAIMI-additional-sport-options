@@ -176,13 +176,15 @@
         android:layout_marginEnd="10sp"
         android:ellipsize="end"
         android:maxLines="1"
-                android:text="1.1 - Борьба с горками"
+        android:background="?attr/selectableItemBackground"
+        android:paddingVertical="2dp"
+        android:text="@string/overview_release_title"
         android:textAlignment="viewEnd"
         android:textSize="10sp"
         app:layout_constraintEnd_toStartOf="@+id/simple_mode"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
-        tools:ignore="HardcodedText,SmallSp" />
+        tools:ignore="SmallSp" />
 
     <ImageView
         android:id="@+id/simple_mode"

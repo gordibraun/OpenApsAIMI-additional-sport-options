@@ -821,6 +821,9 @@ class AppRepository @Inject internal constructor(
 
     fun getApsResults(start: Long, end: Long): Single<List<APSResult>> =
         database.apsResultDao.getApsResults(start, end)
+
+    fun getApsResultTimestamps(start: Long, end: Long): Single<List<Long>> =
+        database.apsResultDao.getApsResultTimestamps(start, end)
             .subscribeOn(Schedulers.io())
 
 }
