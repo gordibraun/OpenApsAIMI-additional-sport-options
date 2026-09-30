@@ -13,12 +13,17 @@ internal object GuardedBasalSelector {
         delta: Double,
         shortDelta: Double,
         target: Double,
+        durationMinutes: Int = 30,
         forecast: (Double) -> List<Int>
     ): Choice {
         if (listOf(maximumRate, basalStep, bg, delta, shortDelta, target).any { !it.isFinite() } ||
-            maximumRate <= 0 || basalStep <= 0 || target <= 0
+            maximumRate <= 0 || basalStep <= 0 || target <= 0 || durationMinutes <= 0
         ) return Choice(0.0, "invalid inputs")
-        if (bg < target || delta < 0 || shortDelta < -0.5) return Choice(0.0, "low or falling")
+        if (bg <= target) return Choice(0.0, "at or below target")
+        // A slight decline well above target still needs a forecast. Retain a separate
+        // stop when either observed trend reaches target within the proposed temp basal.
+        val trendFloor = bg + minOf(0.0, delta, shortDelta) * durationMinutes / 5.0
+        if (trendFloor <= target) return Choice(0.0, "trend reaches target")
         fun safe(rate: Double): Boolean {
             val values = forecast(rate)
             // Require the complete four-hour forecast, not a partial or flat fallback.

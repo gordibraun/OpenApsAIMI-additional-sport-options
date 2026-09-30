@@ -1225,7 +1225,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             (currentBg > safeFloor)
 
 // 2) Garde high TT : bypass si mode repas actif et pas de risque hypo
-        val hypoGuard = computeHypoThreshold(minBg = profile.min_bg, lgsThreshold = profile.lgsThreshold)
+        val hypoGuard = computeHypoThreshold(lowerTargetMgdl = profile.min_bg, lgsThreshold = profile.lgsThreshold)
         val mealBypassHighTT = mealModeActive && currentBg > hypoGuard
 
         if (!profile.allowSMB_with_high_temptarget &&
@@ -1295,7 +1295,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             "Запрошено=$_rate Е/ч на $duration мин; текущий=${currenttemp.rate}; обход обычных лимитов=$overrideSafetyLimits; точное значение=$forceExact")
         // 0) LGS kill-switch (sans récursion)
         val lgsPref = profile.lgsThreshold
-        val hypoGuard = computeHypoThreshold(minBg = profile.min_bg, lgsThreshold = lgsPref)
+        val hypoGuard = computeHypoThreshold(lowerTargetMgdl = profile.min_bg, lgsThreshold = lgsPref)
         val blockLgs = isBelowHypoThreshold(bg, predictedBg.toDouble(), eventualBG, hypoGuard, delta.toDouble())
         if (blockLgs) {
             rT.reason.append(context.getString(R.string.lgs_triggered, "%.0f".format(bg), "%.0f".format(hypoGuard)))
@@ -2252,11 +2252,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val highBG: Int
     )
     // Calcule le seuil "OpenAPS-like" et applique LGS si plus haut
-    private fun computeHypoThreshold(minBg: Double, lgsThreshold: Int?): Double {
-        var t = minBg - 0.5 * (minBg - 40.0) // 90→65, 100→70, 110→75, 130→85
-        if (lgsThreshold != null && lgsThreshold > t) t = lgsThreshold.toDouble()
-        return t
-    }
+    private fun computeHypoThreshold(lowerTargetMgdl: Double, lgsThreshold: Int?): Double =
+        HypoTools.thresholdFromTarget(lowerTargetMgdl, lgsThreshold)
 
     private fun isBelowHypoThreshold(
         bgNow: Double,
@@ -4526,9 +4523,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             safe(eventualBG),
             safe(predictionMinGuard ?: eventualBG)
         )
-        val threshold = computeHypoThreshold(minBg, profile.lgsThreshold)
+        val threshold = computeHypoThreshold(lowerTargetMgdl = min_bg, lgsThreshold = profile.lgsThreshold)
         rT.minGuardBG = minBg
         rT.hypoThreshold = threshold
+        decisionJournal.change("Порог защиты задан целью, а не высотой сахара",
+            "Минимум прогноза сравнивается с порогом; рост сахара не поднимает сам порог.",
+            DecisionValue("Нижняя цель", min_bg.toString(), unit = "мг/дл"),
+            DecisionValue("Порог гипо", threshold.toString(), unit = "мг/дл"),
+            DecisionValue("Минимум прогноза", minBg.toString(), unit = "мг/дл"))
         val plannedActivityForNewInsulin = activityContext.manualMode != null && activityContext.newInsulinFactor < 0.999
         val plannedActivityForecastFloor = minOf(predictedBg.toDouble(), eventualBG, rT.minGuardBG ?: bg)
         val plannedActivityAllowsHighBgInsulin =
@@ -4720,7 +4722,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     applySafetyPrecautions(meal, smb, guard as Double, reasonBuilder, runtime, exercise, suspected)
                 },
                 runtimeToMinutes = { runtimeToMinutes(it!!)},
-                computeHypoThreshold = { minBg, lgs -> computeHypoThreshold(minBg, lgs) },
+                computeHypoThreshold = { lowerTarget, lgs -> computeHypoThreshold(lowerTarget, lgs) },
                 isBelowHypo = { bgNow, predictedValue, eventualValue, hypo, deltaValue ->
                     isBelowHypoThreshold(bgNow, predictedValue, eventualValue, hypo, deltaValue)
                 },
@@ -4976,7 +4978,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             val choice = GuardedBasalSelector.select(
                 maximumRate = minOf(profile_current_basal, profile_basal_for_forecast) * basalFactor,
                 basalStep = basalStep,
-                bg = bg, delta = delta.toDouble(), shortDelta = shortAvgDelta.toDouble(), target = target_bg
+                bg = bg, delta = delta.toDouble(), shortDelta = shortAvgDelta.toDouble(), target = target_bg,
+                durationMinutes = rT.duration ?: 30
             ) { rate ->
                 val prediction = forecastForBasal(rate)
                 if (prediction.valid) prediction.series else emptyList()
@@ -4986,7 +4989,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             val guardedPredictions = forecastForBasal(guardRate)
             val basalReason = when (choice.reason) {
                 "invalid inputs" -> "не хватает корректных данных для выбора базала"
-                "low or falling" -> "сахар ниже цели или продолжает снижаться"
+                "at or below target" -> "сахар уже на цели или ниже"
+                "trend reaches target" -> "текущий темп снижения достигает цели за время временного базала"
                 "below pump step" -> "допустимый базал меньше шага помпы"
                 "profile basal forecast safe" -> "при допустимом профильном базале прогноз не ниже цели"
                 "risk remains without basal" -> "даже без базала прогноз не подтверждает отсутствие снижения ниже цели"
@@ -5518,8 +5522,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             val plannedRateBeforeFinalForecast = result.rate ?: profile_current_basal
             val plannedDurationBeforeFinalForecast = result.duration ?: 30
             val finalForecastCarbsBeforeGuard = finalForecastSummary.carbsRequirement?.first ?: 0
-            val finalForecastHypoFloor = result.hypoThreshold ?: computeHypoThreshold(minBg, profile.lgsThreshold)
-            val finalForecastSafeFloor = max(finalForecastHypoFloor + 15.0, target_bg - 10.0)
+            val finalForecastHypoFloor = threshold
+            val finalForecastSafeFloor = HypoTools.finalForecastFloor(finalForecastHypoFloor, target_bg)
             val plannedBasalExtraBeforeFinalForecast = if (
                 plannedRateBeforeFinalForecast.isFinite() &&
                 profile_current_basal.isFinite() &&

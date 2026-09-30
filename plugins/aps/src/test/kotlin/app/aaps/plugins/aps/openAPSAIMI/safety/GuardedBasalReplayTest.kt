@@ -64,7 +64,7 @@ class GuardedBasalReplayTest {
         )
         assertEquals(0.0, guard.limitSmb(1.8825))
         assertTrue(guard.requiresBasalReview)
-        val choice = GuardedBasalSelector.select(.94, .094, 152.0, 5.0, 6.65, 117.0, ::forecast)
+        val choice = GuardedBasalSelector.select(.94, .094, 152.0, 5.0, 6.65, 117.0, forecast = ::forecast)
         assertEquals(.94, choice.rate, 1e-9)
         assertTrue(forecast(choice.rate).all { it >= 117 })
         assertTrue(forecast(choice.rate).last() < forecast(0.0).last())

@@ -4,6 +4,13 @@ import kotlin.math.roundToInt
 
 object HypoTools {
 
+    // OpenAPS min_bg is the lower target, never the observed or predicted minimum.
+    fun thresholdFromTarget(lowerTargetMgdl: Double, lgsThreshold: Int?): Double =
+        maxOf(lowerTargetMgdl - 0.5 * (lowerTargetMgdl - 40.0), lgsThreshold?.toDouble() ?: 0.0)
+
+    fun finalForecastFloor(hypoThreshold: Double, targetMgdl: Double): Double =
+        maxOf(hypoThreshold + 15.0, targetMgdl - 10.0)
+
     fun calculateMinutesAboveThreshold(bg: Double, slope: Double, thresholdBG: Double): Int {
         val bgDiff = bg - thresholdBG
         if (slope >= 0) return Int.MAX_VALUE
