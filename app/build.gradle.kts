@@ -233,6 +233,7 @@ dependencies {
     implementation(project(":database:impl"))
     implementation(project(":database:persistence"))
     implementation(project(":pump:combov2"))
+    implementation(project(":pump:combowatch"))
     implementation(project(":pump:dana"))
     implementation(project(":pump:danars"))
     implementation(project(":pump:danar"))

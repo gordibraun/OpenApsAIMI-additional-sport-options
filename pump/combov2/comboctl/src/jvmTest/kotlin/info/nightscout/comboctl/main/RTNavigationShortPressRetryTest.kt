@@ -157,6 +157,14 @@ class RTNavigationShortPressRetryTest {
     }
 
     @Test
+    fun everyPressIsConfirmedBeforeTheNextOne() {
+        // Every press is confirmed on screen before the next one is sent.
+        val context = ScriptedRTNavigationContext(tbr(120)) { _, button, current -> step(current, button) }
+        adjust(context, 100)
+        assertEquals(listOf(RTNavigationButton.DOWN, RTNavigationButton.DOWN), context.pressed)
+    }
+
+    @Test
     fun aQuantityThatNeverMovesFailsInsteadOfPressingForever() {
         val context = ScriptedRTNavigationContext(tbr(110)) { _, _, current -> current }
         assertFailsWith<QuantityNotChangingException> { adjust(context, 100, timeoutMs = 60000) }

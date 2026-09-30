@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="combowatch_plugin_name">Combo через часы</string>
+    <string name="combowatch_plugin_shortname">Combo-Ч</string>
+    <string name="combowatch_plugin_description">Помпа Accu-Chek Combo, привязанная к часам: телефон считает, часы исполняют</string>
+    <string name="combowatch_watch_unreachable">Часы недоступны</string>
+    <string name="combowatch_not_supported">Через часы эта команда пока не передаётся</string>
+    <string name="combowatch_awaiting_reconciliation">Исход прошлой команды не выяснен</string>
+</resources>

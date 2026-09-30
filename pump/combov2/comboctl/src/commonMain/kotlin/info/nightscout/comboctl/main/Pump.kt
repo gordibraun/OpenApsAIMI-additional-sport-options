@@ -60,10 +60,10 @@ import kotlin.time.toDuration
 private val logger = Logger.get("Pump")
 
 private const val NUM_IDEMPOTENT_COMMAND_DISPATCH_ATTEMPTS = 10
-// The Combo applies each short press with a lag of a second or more and drops the setting screen
-// a few seconds after the last key it accepted, so a long run of taps does not fit in that window.
-// A long press moves the quantity quickly and keeps the screen alive; the taps that follow it are
-// only the fine-tuning, and adjustQuantityOnScreen() confirms each of those on screen.
+// Long-press for large steps. Short presses alone do not fit: this pump answers each one more
+// slowly as a run goes on (measured 1.5 s rising to 3.9 s), so ten of them overrun the few seconds
+// the pump keeps a setting screen open. A long press covers the distance in one go and keeps the
+// screen alive; adjustQuantityOnScreen() then confirms the fine-tuning presses on screen.
 private const val TBR_PERCENTAGE_LONG_PRESS_THRESHOLD = 50
 private const val DEFAULT_MAX_NUM_REGULAR_CONNECT_ATTEMPTS = 10
 private const val DELAY_IN_MS_BETWEEN_COMMAND_DISPATCH_ATTEMPTS = 2000L
@@ -3374,17 +3374,39 @@ class Pump(
         setTbrProgressReporter.setCurrentProgressStage(RTCommandProgressStage.SettingTBRPercentage(0))
 
         try {
+            // Cancelling is done on the duration screen, not by walking the percentage back to
+            // 100 %. Measured on pump 10392647: while a setting screen is open the pump streams
+            // blinking display frames continuously, which saturates the link - sending one button
+            // packet takes 0.55-0.88 s instead of the usual 0.23 s, and the pump applies each press
+            // 2-3 s later. A confirmed short press therefore costs ~4.5 s against a setting screen
+            // the pump closes after ~5 s, so the ten presses of 0 -> 100 lose that race at the
+            // fourth one. A long press is fast but runs 2-3 steps past the target, and this pump
+            // does not apply the short presses that would correct it.
+            //
+            // Cancelling through the duration screen does not work either: with a TBR running
+            // that screen reports the remaining minutes but ignores DOWN presses, measured down to
+            // 253 ms holds. So 100 % has to be reached on the percentage screen like any other
+            // value, with short presses that each keep the setting screen alive.
             var initialQuantityDistance: Int? = null
             // Duration the Combo proposes on the percentage screen (usually the last one used).
             var durationShownOnPercentageScreen: Int? = null
 
-            // Long-press the RT button only for very large percentage distances. The first
-            // short press that follows a long press is unreliable on at least one Combo: the
-            // pump applies it late, after it has already dropped the setting screen, so the
-            // TBR is never confirmed. Runs of short presses are reliable; a 100 % distance is
-            // ten short presses and takes a few seconds.
+            // Long-press the RT button only when running past the target cannot miss it.
+            //
+            // Measured on pump 10392647: the Combo keeps applying a held button for up to ~3 s
+            // after it is released, so a long press aimed at a value in the middle of the range
+            // sails past it - 0 -> 100 ended at 120-130 every time. That overshoot cannot be
+            // corrected, because this pump does not apply the short presses that follow a long
+            // press on a setting screen: a 170 ms DOWN press left the value unchanged, and the
+            // screen then timed out and discarded the edit.
+            //
+            // Decrementing to 0 is the one case where this does not matter, since the pump stops
+            // at 0 and the overshoot lands exactly on the target. That is why stopping delivery
+            // has always worked while returning to 100 % did not. Every other distance is covered
+            // with short presses, each one confirmed on screen by adjustQuantityOnScreen(), and
+            // each accepted press keeps the setting screen alive.
             val longRTButtonPressPercentagePredicate = fun(targetQuantity: Int, quantityOnScreen: Int): Boolean =
-                ((targetQuantity - quantityOnScreen).absoluteValue) >= TBR_PERCENTAGE_LONG_PRESS_THRESHOLD
+                (targetQuantity == 0) && ((quantityOnScreen - targetQuantity) >= TBR_PERCENTAGE_LONG_PRESS_THRESHOLD)
 
             // First, set the TBR percentage.
             navigateToRTScreen(rtNavigationContext, ParsedScreen.TemporaryBasalRatePercentageScreen::class, pumpSuspended)
@@ -3479,8 +3501,21 @@ class Pump(
 
             setTbrProgressReporter.setCurrentProgressStage(RTCommandProgressStage.SettingTBRDuration(100))
 
-            // TBR set. Press CHECK to confirm it and exit back to the main menu.
-            rtNavigationContext.shortPressButton(RTNavigationButton.CHECK)
+            // TBR set. Press CHECK to confirm it, repeating if the pump did not act on it.
+            //
+            // This press is what programs everything the navigation just set up, and it was the
+            // only one in the command with no retry behind it. Measured on pump 10392647: while a
+            // setting screen is open the link is saturated by the pump's own blinking frames and
+            // presses are dropped at random - a confirming CHECK of 0.89 s was lost while one of
+            // 1.22 s went through, so duration does not predict it. A lost CHECK leaves the pump
+            // to time the screen out and discard the edit, which reads back as a TBR that was
+            // never set. Pressing until the main screen appears turns that into a retry; if the
+            // first press did land, the pump is already there and none follows.
+            pressButtonUntilScreenAppears(
+                rtNavigationContext,
+                RTNavigationButton.CHECK,
+                ParsedScreen.MainScreen::class
+            )
 
             setTbrProgressReporter.setCurrentProgressStage(BasicProgressStage.Finished)
         } catch (e: CancellationException) {

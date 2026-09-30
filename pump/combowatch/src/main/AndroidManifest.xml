@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- Its own paths, so the companion's existing listener keeps handling the traffic it
+             always handled and needs no change. -->
+        <service
+            android:name="app.aaps.pump.combowatch.ComboWatchListenerService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/combowatch" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>
