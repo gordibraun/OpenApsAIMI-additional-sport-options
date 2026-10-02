@@ -13,10 +13,10 @@ import android.os.SystemClock
 import app.aaps.combobench.BenchFiles
 import app.aaps.combobench.BenchPairingStore
 import app.aaps.combobench.BluetoothLinkObservation
+import app.aaps.combobench.BuildConfig
 import app.aaps.combobench.ProbeBondGuard
 import app.aaps.combobench.ProbePreparation
 import app.aaps.combobench.TherapySessionPolicy
-import app.aaps.combobench.TherapySessionStore
 import app.aaps.pump.combowatch.executor.PumpSession
 import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.BolusReceipt
@@ -31,6 +31,7 @@ import info.nightscout.comboctl.base.BluetoothDevice
 import info.nightscout.comboctl.base.ComboIOException
 import info.nightscout.comboctl.base.CurrentTbrState
 import info.nightscout.comboctl.base.LogLevel
+import info.nightscout.comboctl.base.DriverProfile
 import info.nightscout.comboctl.base.Tbr
 import info.nightscout.comboctl.base.toBluetoothAddress
 import info.nightscout.comboctl.main.BasalProfile
@@ -71,8 +72,8 @@ import kotlin.time.ExperimentalTime
  *   at; the executor then holds further therapy until the pump has been read back.
  *
  * After each connection the driver's persisted TBR record is made to match what the pump shows.
- * The driver cancels a TBR it does not recognise the next time it connects, and over this slow
- * link that cancellation is a long walk that can fail, so it must never be left guessing.
+ * The driver cancels a TBR it does not recognise the next time it connects - a therapy action
+ * nobody asked for - so it must never be left guessing.
  */
 @OptIn(ExperimentalTime::class)
 internal class DriverPumpSession(
@@ -111,7 +112,7 @@ internal class DriverPumpSession(
 
     private class Connected(
         val pump: Pump,
-        val store: TherapySessionStore,
+        val store: ControllerPumpStore,
         val address: BluetoothAddress,
         val statusAtConnect: Pump.Status
     )
@@ -129,7 +130,13 @@ internal class DriverPumpSession(
     }
 
     override fun run(command: ComboCommand): PumpSession.SessionResult = runBlocking(Dispatchers.Default) {
+        // Which RT pacing the driver uses can be chosen in the limits file, so that the two can be
+        // compared on the pump instead of argued about.
+        DriverProfile.confirmedStepPacing = runCatching {
+            !files.exists(LIMITS_FILE) || files.read(LIMITS_FILE).optBoolean("confirmedStepPacing", true)
+        }.getOrDefault(true)
         val record = SessionRecord(files, command)
+        record.phase(if (DriverProfile.confirmedStepPacing) "PACING_CONFIRMED_STEPS" else "PACING_STANDARD")
         val result = try {
             when (command.kind) {
                 CommandKind.STATUS        -> status(record)
@@ -212,13 +219,13 @@ internal class DriverPumpSession(
     /**
      * Decide what this connection should set, given what the pump shows now.
      *
-     * Measured on pump 10392647 from the watch: within one connection the pump applies each
-     * confirmed press more slowly than the last (0.9 s growing to 4.8 s) and closes a setting
-     * screen about 5 s after the last key it accepted, so a walk of more than five to seven steps
-     * loses that race - while the latency starts over on a fresh connection. A long way is
-     * therefore covered in stages of at most [MAX_STEPS_PER_CONNECTION] steps, each one a real,
-     * confirmed TBR on the pump and each one closer to what was asked for. Going down to 0 is the
-     * exception: the button can be held there, because the pump stops at 0 by itself.
+     * Normally that is simply what was asked for. The staging below is a fallback for a walk
+     * longer than [maxStepsPerConnection]: it is then covered in several connections, each one a
+     * real, confirmed TBR on the pump and each one closer to the target. It was written when the
+     * controller could not complete a long walk in one connection, which turned out to be caused
+     * by the controller's own overhead (see DriverProfile in the driver) rather than by the pump;
+     * with that fixed a 20-step walk takes one connection, and the default limit is high enough
+     * that staging does not occur. It stays as a tested way to degrade if a walk ever does fail.
      */
     private fun plan(command: ComboCommand, status: Pump.Status): StagePlan {
         val current = if (status.tbrOngoing) status.tbrPercentage else 100
@@ -241,12 +248,12 @@ internal class DriverPumpSession(
         }
         val steps = (target - current).absoluteValue / 10
         if (cancel) {
-            if (steps <= MAX_STEPS_PER_CONNECTION)
+            if (steps <= maxStepsPerConnection())
                 return StagePlan(100, 0, Tbr.Type.NORMAL, force100, final = true)
-        } else if ((target == 0) || (steps <= MAX_STEPS_PER_CONNECTION))
+        } else if ((target == 0) || (steps <= maxStepsPerConnection()))
             return StagePlan(target, duration, type, force100 = false, final = true)
 
-        val stages = ceil(steps / MAX_STEPS_PER_CONNECTION.toDouble()).toInt()
+        val stages = ceil(steps / maxStepsPerConnection().toDouble()).toInt()
         val stepsNow = ceil(steps / stages.toDouble()).toInt()
         val direction = if (target > current) 1 else -1
         var intermediate = current + direction * stepsNow * 10
@@ -254,6 +261,12 @@ internal class DriverPumpSession(
         if (intermediate == 100) intermediate += direction * 10
         return StagePlan(intermediate, duration, Tbr.Type.NORMAL, force100 = false, final = false)
     }
+
+    /** From the controller's limits file when present, so the stage size can be tuned on the watch. */
+    private fun maxStepsPerConnection(): Int = runCatching {
+        if (files.exists(LIMITS_FILE)) files.read(LIMITS_FILE).optInt("maxStepsPerConnection", MAX_STEPS_PER_CONNECTION)
+        else MAX_STEPS_PER_CONNECTION
+    }.getOrDefault(MAX_STEPS_PER_CONNECTION).coerceIn(1, 50)
 
     private suspend fun tbr(command: ComboCommand, record: SessionRecord): PumpSession.SessionResult {
         var lastSnapshot: PumpSnapshot? = null
@@ -380,7 +393,7 @@ internal class DriverPumpSession(
         if (device.bondState != SystemDevice.BOND_BONDED) return Attempt.NotReached("the pump is not bonded to this watch")
         val guard = ProbeBondGuard(true)
         val btAddress = address.toBluetoothAddress()
-        val store = TherapySessionStore(BenchPairingStore(context, btAddress, pumpId), files)
+        val store = ControllerPumpStore(BenchPairingStore(context, btAddress, pumpId), files)
         if (!store.hasPumpState(btAddress)) return Attempt.NotReached("no pairing stored for the pump")
 
         val power = context.getSystemService(PowerManager::class.java)
@@ -466,7 +479,12 @@ internal class DriverPumpSession(
                 val session = Connected(pump, store, btAddress, status)
                 // What the pump showed, and what its history added, before this command touched it.
                 onPumpRead(snapshot(pump, session), boluses.toList())
-                block(session)
+                val sampler = if (BuildConfig.DEBUG && files.exists(PROFILE_SWITCH_FILE)) StackSampler().also { it.start() } else null
+                try {
+                    block(session)
+                } finally {
+                    sampler?.let { record.profile(it.stop()) }
+                }
             }
             value = runCatching { withTimeout(TherapySessionPolicy.TOTAL_TIMEOUT_MS) { job.await() } }
             if (!connected && value?.isFailure == true) {
@@ -499,7 +517,7 @@ internal class DriverPumpSession(
                     if (registered) runCatching { context.unregisterReceiver(receiver) }
                     runCatching { if (wake.isHeld) wake.release() }
                 }
-                record.phase("CONNECTION_CLOSED", JSONObject().put("nonceAdvances", store.advances))
+                record.phase("CONNECTION_CLOSED", JSONObject().put("packetsSent", store.advances).put("nonceWrites", store.markWrites))
             }
         }
         notReached?.let { return Attempt.NotReached(it) }
@@ -612,13 +630,16 @@ internal class DriverPumpSession(
         /** The same file the bench's own sessions use, so the 24-screen profile read happens once. */
         private const val BASAL_PROFILE_FILE = "manual-basal-profile.json"
         private const val BOLUS_TIMEOUT_MS = 4 * 60_000L
+        private const val LIMITS_FILE = "controller-limits.json"
+
+        /** Create this file in the app's files directory to profile sessions in a debug build. */
+        private const val PROFILE_SWITCH_FILE = "controller-profile-on.json"
 
         /**
-         * How many confirmed steps one connection is asked to make; see [plan]. Measured from the
-         * watch on pump 10392647: five steps got through every time and the sixth to eighth was
-         * where a walk failed, so four leaves a step of margin for the confirming press as well.
+         * How many steps one connection is asked to make before a walk is split; see [plan]. The
+         * Combo's whole TBR range is 50 steps, so by default nothing is split.
          */
-        private const val MAX_STEPS_PER_CONNECTION = 4
+        private const val MAX_STEPS_PER_CONNECTION = 50
         private const val MAX_STAGES = 8
     }
 }
@@ -647,6 +668,8 @@ internal class SessionRecord(private val files: BenchFiles, command: ComboComman
 
     /** One entry per connection, since a staged TBR opens several. */
     @Synchronized fun driverLog(log: JSONArray) { driverLogs.put(log) }
+
+    @Synchronized fun profile(profile: JSONObject) { json.put("profile", profile) }
 
     @Synchronized fun finish(result: PumpSession.SessionResult) {
         json.put("complete", true).put("durationMs", SystemClock.elapsedRealtime() - started)

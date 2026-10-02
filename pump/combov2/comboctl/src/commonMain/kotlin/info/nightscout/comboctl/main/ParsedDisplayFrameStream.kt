@@ -3,6 +3,7 @@ package info.nightscout.comboctl.main
 import info.nightscout.comboctl.base.DisplayFrame
 import info.nightscout.comboctl.base.LogLevel
 import info.nightscout.comboctl.base.Logger
+import info.nightscout.comboctl.base.DriverProfile
 import info.nightscout.comboctl.parser.AlertScreenException
 import info.nightscout.comboctl.parser.ParsedScreen
 import info.nightscout.comboctl.parser.parseDisplayFrame
@@ -60,6 +61,9 @@ class ParsedDisplayFrameStream {
     private var parsedDisplayFrameChannel = createChannel()
     private var lastRetrievedParsedDisplayFrame: ParsedDisplayFrame? = null
 
+    // Only used with DriverProfile.lazyDisplayFrameParsing: the newest frame as it arrived.
+    private var rawDisplayFrameChannel = createRawChannel()
+
     /**
      * [SharedFlow] publishing all incoming and newly parsed frames.
      *
@@ -82,6 +86,8 @@ class ParsedDisplayFrameStream {
         parsedDisplayFrameChannel.close()
         parsedDisplayFrameChannel = createChannel()
         lastRetrievedParsedDisplayFrame = null
+        rawDisplayFrameChannel.close()
+        rawDisplayFrameChannel = createRawChannel()
     }
 
     /**
@@ -102,6 +108,7 @@ class ParsedDisplayFrameStream {
         @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
         _flow.resetReplayCache()
         parsedDisplayFrameChannel.close(cause)
+        rawDisplayFrameChannel.close(cause)
     }
 
     /**
@@ -126,6 +133,13 @@ class ParsedDisplayFrameStream {
      * This and [getParsedDisplayFrame] can be called concurrently.
      */
     fun feedDisplayFrame(displayFrame: DisplayFrame?) {
+        if (DriverProfile.lazyDisplayFrameParsing) {
+            // Keep the receive loop free: store the frame, and let whoever asks for a screen
+            // parse it. See DriverProfile.lazyDisplayFrameParsing.
+            rawDisplayFrameChannel.trySend(displayFrame)
+            return
+        }
+
         val newParsedDisplayFrame = displayFrame?.let {
             ParsedDisplayFrame(it, parseDisplayFrame(it))
         }
@@ -145,7 +159,8 @@ class ParsedDisplayFrameStream {
      */
     fun hasStoredDisplayFrame(): Boolean =
         @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-        !(parsedDisplayFrameChannel.isEmpty)
+        if (DriverProfile.lazyDisplayFrameParsing) !(rawDisplayFrameChannel.isEmpty)
+        else !(parsedDisplayFrameChannel.isEmpty)
 
     /**
      * Retrieves the last [ParsedDisplayFrame] that was stored by [feedDisplayFrame].
@@ -184,7 +199,9 @@ class ParsedDisplayFrameStream {
      */
     suspend fun getParsedDisplayFrame(filterDuplicates: Boolean = false, processAlertScreens: Boolean = true): ParsedDisplayFrame? {
         while (true) {
-            val thisParsedDisplayFrame = parsedDisplayFrameChannel.receive()
+            val thisParsedDisplayFrame =
+                if (DriverProfile.lazyDisplayFrameParsing) receiveAndParse()
+                else parsedDisplayFrameChannel.receive()
             val lastParsedDisplayFrame = lastRetrievedParsedDisplayFrame
 
             if (filterDuplicates && (lastParsedDisplayFrame != null) && (thisParsedDisplayFrame != null)) {
@@ -227,4 +244,19 @@ class ParsedDisplayFrameStream {
 
     private fun createChannel() =
         Channel<ParsedDisplayFrame?>(capacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    private fun createRawChannel() =
+        Channel<DisplayFrame?>(capacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /**
+     * The lazy counterpart of what [feedDisplayFrame] does eagerly: take the newest frame and
+     * parse it now, on the caller's time. The frame is published through [flow] as well, so that
+     * observers see exactly the screens the driver acted on.
+     */
+    private suspend fun receiveAndParse(): ParsedDisplayFrame? {
+        val displayFrame = rawDisplayFrameChannel.receive()
+        val parsedDisplayFrame = displayFrame?.let { ParsedDisplayFrame(it, parseDisplayFrame(it)) }
+        _flow.tryEmit(parsedDisplayFrame)
+        return parsedDisplayFrame
+    }
 }

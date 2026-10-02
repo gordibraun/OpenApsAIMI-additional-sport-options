@@ -6,7 +6,7 @@ import info.nightscout.comboctl.base.Graph
 import info.nightscout.comboctl.base.LogLevel
 import info.nightscout.comboctl.base.Logger
 import info.nightscout.comboctl.base.PumpIO
-import info.nightscout.comboctl.base.RTLinkProfile
+import info.nightscout.comboctl.base.DriverProfile
 import info.nightscout.comboctl.base.connectBidirectionally
 import info.nightscout.comboctl.base.connectDirectionally
 import info.nightscout.comboctl.base.findShortestPath
@@ -579,8 +579,8 @@ suspend fun waitUntilScreenAppears(
     targetScreenType: KClassifier
 ): ParsedScreen {
     logger(LogLevel.DEBUG) { "Observing incoming parsed screens and waiting for screen of type $targetScreenType to appear" }
-    if (RTLinkProfile.slowLink)
-        return waitUntilScreenAppearsOnSlowLink(rtNavigationContext, targetScreenType)
+    if (DriverProfile.confirmedStepPacing)
+        return waitUntilScreenAppearsBounded(rtNavigationContext, targetScreenType)
 
     var cycleCount = 0
 
@@ -826,13 +826,12 @@ suspend fun adjustQuantityOnScreen(
                     "last / current quantity: $lastQuantity / $currentQuantityOnScreen"
             }
 
-            // Slow link only (see RTLinkProfile). The settling time below exists to catch a held
-            // button running past the target, and a quantity resting on a limit of the pump cannot
-            // have run past it. Waiting anyway costs 3-4 s there, measured from a watch on pump
-            // 10392647, which is most of what the pump leaves before it closes the setting screen
-            // - a confirming press that then got lost had no time left to be repeated, and the
-            // pump discarded the whole edit.
-            if (RTLinkProfile.slowLink && targetIsLimit && (currentQuantityOnScreen == targetQuantity)) {
+            // Confirmed-step pacing only (see DriverProfile). The settling time below exists to
+            // catch a held button running past the target, and a quantity resting on a limit of
+            // the pump cannot have run past it. Skipping the wait there leaves the confirming
+            // press, and a repeat of it if needed, well inside the time the pump keeps the
+            // setting screen open.
+            if (DriverProfile.confirmedStepPacing && targetIsLimit && (currentQuantityOnScreen == targetQuantity)) {
                 lastQuantity = currentQuantityOnScreen
                 break
             }
@@ -887,8 +886,8 @@ suspend fun adjustQuantityOnScreen(
         decrementButton = decrementButton
     )
     if (numNeededShortRTButtonPresses != 0) {
-        if (RTLinkProfile.slowLink) {
-            fineTuneQuantityOnSlowLink(
+        if (DriverProfile.confirmedStepPacing) {
+            fineTuneQuantityWithConfirmedSteps(
                 rtNavigationContext, currentQuantity, targetQuantity, cyclicQuantityRange,
                 incrementSteps, incrementButton, decrementButton, getQuantity
             )
@@ -966,13 +965,13 @@ suspend fun adjustQuantityOnScreen(
 }
 
 /**
- * [waitUntilScreenAppears] for a slow link (see [RTLinkProfile]).
+ * [waitUntilScreenAppears] for the confirmed-step pacing (see [DriverProfile]).
  *
  * Bounds the wait as a whole instead of each frame. getParsedDisplayFrame() legitimately returns
- * null between frames, and on a slow link that happens often enough that treating a null frame as
- * "no screen arrived" aborts the moment the pump switches screens.
+ * null when frames are momentarily unavailable, for instance while the pump switches modes, and
+ * treating that as "no screen arrived" aborts a wait that would have succeeded a moment later.
  */
-private suspend fun waitUntilScreenAppearsOnSlowLink(
+private suspend fun waitUntilScreenAppearsBounded(
     rtNavigationContext: RTNavigationContext,
     targetScreenType: KClassifier
 ): ParsedScreen {
@@ -1007,22 +1006,23 @@ private suspend fun waitUntilScreenAppearsOnSlowLink(
 }
 
 /**
- * The fine-tuning phase of [adjustQuantityOnScreen] for a slow link (see [RTLinkProfile]).
+ * The fine-tuning phase of [adjustQuantityOnScreen] for the confirmed-step pacing (see
+ * [DriverProfile]).
  *
  * Like the standard one it presses once and confirms on screen before pressing again. What
- * differs is what it spends between presses. Measured from a watch on pump 10392647: the pump
- * applies a press 0.9-4.8 s after it is sent and closes a setting screen about 5 s after the last
- * key it accepted, so a frame spent re-establishing that the setting screen is still open is a
- * frame the next press cannot afford. The observation after each press already saw the screen,
- * so only the first press of a run waits for a frame of its own; and a foreign screen ends the
- * run the moment it is seen, before any further press can go out into it.
+ * differs is what it spends between presses: the observation after each press already saw the
+ * setting screen, so only the first press of a run waits for a frame of its own, and a foreign
+ * screen ends the run the moment it is seen, before any further press can go out into it. The
+ * pump closes a setting screen a few seconds after the last key it accepted, so time not spent
+ * between presses is margin.
  *
  * One rule is deliberately not bent here: a press that may have been applied is never repeated
- * on a guess. The response timeout stays above the worst latency measured, because a press
- * repeated while the first one was merely slow is applied twice, and the second one lands after
- * the target was reached - which programmed a TBR nobody asked for when it was tried.
+ * on a guess. The response timeout stays well above the time the pump takes to apply a press,
+ * because a press repeated while the first one was merely slow is applied twice, and the second
+ * one lands after the target was reached - which programmed a TBR nobody asked for when a
+ * shorter timeout was tried on pump 10392647.
  */
-private suspend fun fineTuneQuantityOnSlowLink(
+private suspend fun fineTuneQuantityWithConfirmedSteps(
     rtNavigationContext: RTNavigationContext,
     currentQuantity: Int,
     targetQuantity: Int,
@@ -1068,7 +1068,7 @@ private suspend fun fineTuneQuantityOnSlowLink(
         sawSettingScreenSincePress = false
         rtNavigationContext.shortPressButton(buttonToPress)
 
-        val observation = observeQuantityOnSlowLink(rtNavigationContext, quantityOnScreen, getQuantity)
+        val observation = observeQuantityAfterConfirmedStep(rtNavigationContext, quantityOnScreen, getQuantity)
         observation.leftSettingScreen?.let { foreignScreen ->
             logger(LogLevel.ERROR) {
                 "Combo left the setting screen (now showing $foreignScreen) before the quantity " +
@@ -1097,7 +1097,7 @@ private suspend fun fineTuneQuantityOnSlowLink(
 }
 
 /**
- * What watching the screen after one press established on a slow link.
+ * What watching the screen after one press established.
  *
  * [stillOnSettingScreen] matters even when [quantity] is null: a press the pump dropped leaves
  * the quantity where it was, but the frames that went past still prove the setting screen is open.
@@ -1109,7 +1109,7 @@ private class QuantityObservation(
     val leftSettingScreen: ParsedScreen?
 )
 
-private suspend fun observeQuantityOnSlowLink(
+private suspend fun observeQuantityAfterConfirmedStep(
     rtNavigationContext: RTNavigationContext,
     previousQuantity: Int,
     getQuantity: (parsedScreen: ParsedScreen) -> Int?

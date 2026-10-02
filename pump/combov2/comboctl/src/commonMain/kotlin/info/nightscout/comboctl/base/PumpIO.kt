@@ -1127,14 +1127,14 @@ class PumpIO(
                     // presses from ~0.85 s did not take effect. So cap the wait; the transport's
                     // own 200 ms send interval still paces us, and callers verify the result on
                     // screen and repeat the press if the Combo missed it.
-                    if (RTLinkProfile.slowLink) {
+                    if (DriverProfile.confirmedStepPacing) {
                         // What the pump feels is the time between the packet above and the
-                        // NO_BUTTON that follows, so on a slow link the cap has to cover the send
-                        // as well as the wait. Measured from a watch on pump 10392647: while a
-                        // setting screen is open the pump streams blinking frames and the send
-                        // alone takes 0.55-1.2 s, so waiting a further 0.3 s on top stretched a tap
-                        // into a hold. When the send used up the budget, release at once; callers
-                        // on a slow link verify every press on screen.
+                        // NO_BUTTON that follows, so the cap covers the send as well as the wait.
+                        // Sending is normally immediate, but it is not this function's to
+                        // guarantee: with a pump state store that synced the nonce to disk on
+                        // every packet it was measured at 0.55-1.2 s, and waiting a further 0.3 s
+                        // on top stretched a tap into a hold. When the send used up the budget,
+                        // release at once; with this pacing every press is verified on screen.
                         val sendTook = pressStart.elapsedNow()
                         val remainingHold = MAX_SHORT_RT_BUTTON_PRESS_HOLD - sendTook
                         if (remainingHold > Duration.ZERO)

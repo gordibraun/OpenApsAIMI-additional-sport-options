@@ -18,7 +18,7 @@ import info.nightscout.comboctl.base.ProgressReport
 import info.nightscout.comboctl.base.ProgressReporter
 import info.nightscout.comboctl.base.ProgressStage
 import info.nightscout.comboctl.base.PumpIO
-import info.nightscout.comboctl.base.RTLinkProfile
+import info.nightscout.comboctl.base.DriverProfile
 import info.nightscout.comboctl.base.PumpIO.ConnectionRequestIsNotBeingAcceptedException
 import info.nightscout.comboctl.base.PumpStateStore
 import info.nightscout.comboctl.base.Tbr
@@ -3385,15 +3385,14 @@ class Pump(
             // TBR is never confirmed. Runs of short presses are reliable; a 100 % distance is
             // ten short presses and takes a few seconds.
             //
-            // On a slow link (see RTLinkProfile) the button is held only when running past the
-            // target cannot miss it. Measured from a watch on pump 10392647: the Combo keeps
-            // applying a held button for up to ~3 s after it is released, so a long press aimed
-            // at a value in the middle of the range sails past it (0 -> 100 ended at 120-130
-            // every time), and the short presses that would correct it are not reliably applied.
-            // Decrementing to 0 is the one case where this does not matter, since the pump stops
-            // at 0 and the overshoot lands exactly on the target.
+            // With the confirmed-step pacing (see DriverProfile) the button is held only when
+            // running past the target cannot miss it. A held button keeps being applied for a
+            // while after it is released, so a long press aimed at a value in the middle of the
+            // range lands beyond it and has to be walked back. Decrementing to 0 is the one case
+            // where that cannot happen, since the pump stops at 0 by itself; everything else is
+            // covered with single presses that are each confirmed on screen.
             val longRTButtonPressPercentagePredicate = fun(targetQuantity: Int, quantityOnScreen: Int): Boolean =
-                if (RTLinkProfile.slowLink)
+                if (DriverProfile.confirmedStepPacing)
                     (targetQuantity == 0) && ((quantityOnScreen - targetQuantity) >= TBR_PERCENTAGE_LONG_PRESS_THRESHOLD)
                 else
                     ((targetQuantity - quantityOnScreen).absoluteValue) >= TBR_PERCENTAGE_LONG_PRESS_THRESHOLD
@@ -3406,8 +3405,8 @@ class Pump(
                 longRTButtonPressPredicate = longRTButtonPressPercentagePredicate,
                 // TBR duration is in/decremented in 10-minute steps
                 incrementSteps = arrayOf(Pair(0, 10)),
-                // The pump does not go below 0 %. Only the slow-link pacing makes use of this.
-                targetIsLimit = RTLinkProfile.slowLink && (percentage == 0)
+                // The pump does not go below 0 %. Only the confirmed-step pacing uses this.
+                targetIsLimit = DriverProfile.confirmedStepPacing && (percentage == 0)
             ) {
                 val currentPercentage = (it as ParsedScreen.TemporaryBasalRatePercentageScreen).percentage
                 if (currentPercentage != null)
@@ -3494,21 +3493,20 @@ class Pump(
             setTbrProgressReporter.setCurrentProgressStage(RTCommandProgressStage.SettingTBRDuration(100))
 
             // TBR set. Press CHECK to confirm it and exit back to the main menu.
-            if (RTLinkProfile.slowLink) {
-                // On a slow link this press is repeated until the pump leaves the setting screen.
-                // It is what programs everything the navigation just set up, and it was the only
-                // press in the command with no retry behind it. Measured from a watch on pump
-                // 10392647: presses are dropped at random while a setting screen is open (a CHECK
-                // of 0.89 s was lost while one of 1.22 s went through), and a lost CHECK leaves
-                // the pump to time the screen out and discard the edit, which reads back as a TBR
-                // that was never set. If the first press did land, the pump is already on the
-                // main screen and none follows.
+            if (DriverProfile.confirmedStepPacing) {
+                // With the confirmed-step pacing this press is repeated until the pump leaves
+                // the setting screen. It is what programs everything the navigation just set up,
+                // and in the standard pacing it is the only press in the command with no retry
+                // behind it: a lost CHECK leaves the pump to time the screen out and discard the
+                // edit, which reads back as a TBR that was never set (seen once on pump 10392647).
+                // If the first press did land, the pump is already on the main screen and none
+                // follows.
                 //
                 // A CHECK that landed moves the pump on within ~2.5 s, so that is how long each
-                // one is given; the default four seconds per attempt left no room for a second
-                // press before the pump closed the screen. Repeating CHECK is harmless in a way
-                // repeating an arrow key is not: on the setting screen it confirms the same edit,
-                // and on the main screen it only opens the quick info.
+                // one is given, leaving room for a second press before the pump closes the
+                // screen. Repeating CHECK is harmless in a way repeating an arrow key is not: on
+                // the setting screen it confirms the same edit, and on the main screen it only
+                // opens the quick info.
                 pressButtonUntilScreenAppears(
                     rtNavigationContext,
                     RTNavigationButton.CHECK,

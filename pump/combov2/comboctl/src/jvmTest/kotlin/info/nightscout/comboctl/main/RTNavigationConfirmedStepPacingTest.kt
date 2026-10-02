@@ -3,7 +3,7 @@ package info.nightscout.comboctl.main
 import info.nightscout.comboctl.base.LogLevel
 import info.nightscout.comboctl.base.Logger
 import info.nightscout.comboctl.base.NullDisplayFrame
-import info.nightscout.comboctl.base.RTLinkProfile
+import info.nightscout.comboctl.base.DriverProfile
 import info.nightscout.comboctl.base.testUtils.runBlockingWithWatchdog
 import info.nightscout.comboctl.parser.MainScreenContent
 import info.nightscout.comboctl.parser.ParsedScreen
@@ -16,11 +16,11 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 
 /**
- * The slow-link pacing (see [RTLinkProfile]) against a scripted pump. The standard pacing has its
- * own tests, which run with the switch at its default; these turn it on and restore it afterwards
- * so the two never mix.
+ * The confirmed-step pacing (see [DriverProfile]) against a scripted pump. The standard pacing has
+ * its own tests, which run with the switch at its default; these turn it on and restore it
+ * afterwards so the two never mix.
  */
-class RTNavigationSlowLinkTest {
+class RTNavigationConfirmedStepPacingTest {
     private class ScriptedContext(
         initial: ParsedScreen,
         private val onShortPress: (pressNumber: Int, button: RTNavigationButton, current: ParsedScreen) -> ParsedScreen
@@ -62,14 +62,14 @@ class RTNavigationSlowLinkTest {
     }
 
     @BeforeTest
-    fun enableSlowLink() {
+    fun enableConfirmedStepPacing() {
         Logger.threshold = LogLevel.VERBOSE
-        RTLinkProfile.slowLink = true
+        DriverProfile.confirmedStepPacing = true
     }
 
     @AfterTest
     fun restoreStandardPacing() {
-        RTLinkProfile.slowLink = false
+        DriverProfile.confirmedStepPacing = false
     }
 
     private fun tbr(percentage: Int) = ParsedScreen.TemporaryBasalRatePercentageScreen(percentage, remainingDurationInMinutes = 30)
@@ -133,8 +133,8 @@ class RTNavigationSlowLinkTest {
 
     @Test
     fun waitingForAScreenToleratesTheGapsBetweenFrames() {
-        // The standard pacing treats a missing frame as "no screen arrived"; on a slow link frames
-        // are simply late, and the screen that follows must still be found.
+        // The standard pacing treats a missing frame as "no screen arrived"; here a frame that is
+        // momentarily unavailable is waited out, and the screen that follows must still be found.
         val context = object : RTNavigationContext {
             private var served = 0
             override val maxNumCycleAttempts = 20
