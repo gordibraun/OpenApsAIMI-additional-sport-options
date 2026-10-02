@@ -1119,32 +1119,33 @@ class PumpIO(
                     // in that value, just in receive() suspending this coroutine
                     // until the RT button was confirmed by the Combo.
                     //
-                    val sendTook = pressStart.elapsedNow()
-
                     // Releasing quickly is what makes this a tap. The Combo only sends a display
                     // frame when something changes, so on a static screen waiting for the
                     // confirmation can take over a second - and a MENU/CHECK held that long is
                     // auto-repeated by the Combo, skipping past the intended screen or discarding
                     // the edit. Measured on pump 10392647: presses up to ~0.3 s always registered,
-                    // presses from ~0.85 s did not take effect.
-                    //
-                    // What the pump feels is the time between this packet and the NO_BUTTON that
-                    // follows, so the cap has to cover the send as well, not just the wait for the
-                    // confirmation. Sending is usually immediate, but right after a long button
-                    // press it was measured taking ~0.57 s; waiting a further 0.3 s on top of that
-                    // produced a 0.87 s hold, which this pump ignored - and the ignored press was
-                    // the one correcting a long press's overshoot, so the TBR was never confirmed.
-                    // When the send alone used up the budget, release at once and let the caller
-                    // verify on screen and repeat, which it does for every fine-tuning press.
-                    val remainingHold = MAX_SHORT_RT_BUTTON_PRESS_HOLD - sendTook
-                    if (remainingHold > Duration.ZERO)
-                        withTimeoutOrNull(remainingHold) { rtButtonConfirmationBarrier.receive() }
-                    // Both numbers are worth having in a log: while a setting screen is open the
-                    // Combo streams blinking frames and the send alone was measured at 0.55-1.2 s
-                    // instead of the usual 0.23 s, which is what stretches a tap.
-                    logger(LogLevel.DEBUG) {
-                        "Short RT button press of ${buttons.joinToString()} held for ${pressStart.elapsedNow()} " +
-                            "(sending took $sendTook); releasing"
+                    // presses from ~0.85 s did not take effect. So cap the wait; the transport's
+                    // own 200 ms send interval still paces us, and callers verify the result on
+                    // screen and repeat the press if the Combo missed it.
+                    if (RTLinkProfile.slowLink) {
+                        // What the pump feels is the time between the packet above and the
+                        // NO_BUTTON that follows, so on a slow link the cap has to cover the send
+                        // as well as the wait. Measured from a watch on pump 10392647: while a
+                        // setting screen is open the pump streams blinking frames and the send
+                        // alone takes 0.55-1.2 s, so waiting a further 0.3 s on top stretched a tap
+                        // into a hold. When the send used up the budget, release at once; callers
+                        // on a slow link verify every press on screen.
+                        val sendTook = pressStart.elapsedNow()
+                        val remainingHold = MAX_SHORT_RT_BUTTON_PRESS_HOLD - sendTook
+                        if (remainingHold > Duration.ZERO)
+                            withTimeoutOrNull(remainingHold) { rtButtonConfirmationBarrier.receive() }
+                        logger(LogLevel.DEBUG) {
+                            "Short RT button press of ${buttons.joinToString()} held for ${pressStart.elapsedNow()} " +
+                                "(sending took $sendTook); releasing"
+                        }
+                    } else {
+                        withTimeoutOrNull(MAX_SHORT_RT_BUTTON_PRESS_HOLD) { rtButtonConfirmationBarrier.receive() }
+                        logger(LogLevel.DEBUG) { "Short RT button press of ${buttons.joinToString()} held for ${pressStart.elapsedNow()}; releasing" }
                     }
                 }
             } catch (e: CancellationException) {

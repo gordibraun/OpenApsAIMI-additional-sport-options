@@ -6,6 +6,7 @@ import info.nightscout.comboctl.base.Graph
 import info.nightscout.comboctl.base.LogLevel
 import info.nightscout.comboctl.base.Logger
 import info.nightscout.comboctl.base.PumpIO
+import info.nightscout.comboctl.base.RTLinkProfile
 import info.nightscout.comboctl.base.connectBidirectionally
 import info.nightscout.comboctl.base.connectDirectionally
 import info.nightscout.comboctl.base.findShortestPath
@@ -33,10 +34,6 @@ private const val MAX_NUM_SAME_QUANTITY_OBSERVATIONS = 10
 // A registered short RT button press shows on the next display frame (well under a second);
 // this generous limit only decides when a press is considered lost and repeated.
 // This Combo can take several seconds to apply a press; wait that long before repeating one.
-// Measured on pump 10392647 over full 0 -> 100 % runs: a press it accepted showed up on screen
-// after 0.8 to 3.0 s. This has to stay above that worst case. Shortening it to squeeze in more
-// retries backfires: a press repeated while the first one was merely slow is applied twice, and
-// the second one lands after the target is reached, programming a TBR nobody asked for.
 private const val SHORT_RT_BUTTON_PRESS_RESPONSE_TIMEOUT_IN_MS = 4000L
 private const val MAX_NUM_SHORT_RT_BUTTON_PRESSES_WITHOUT_CHANGE = 5
 // The main screen is static and only emits a new frame when its minute changes, so a legitimate
@@ -582,39 +579,36 @@ suspend fun waitUntilScreenAppears(
     targetScreenType: KClassifier
 ): ParsedScreen {
     logger(LogLevel.DEBUG) { "Observing incoming parsed screens and waiting for screen of type $targetScreenType to appear" }
+    if (RTLinkProfile.slowLink)
+        return waitUntilScreenAppearsOnSlowLink(rtNavigationContext, targetScreenType)
+
+    var cycleCount = 0
 
     rtNavigationContext.resetDuplicate()
 
-    // The cycle count only advances on distinct screens, so a Combo that fell back to a static
-    // screen (for example after ignoring a button press) would keep this waiting for many minutes.
-    // Bound the whole wait, not each frame: getParsedDisplayFrame() legitimately returns null
-    // between frames, and treating that as a timeout would abort the moment the pump switches mode.
-    val screen = withTimeoutOrNull(WAIT_UNTIL_SCREEN_APPEARS_TIMEOUT_IN_MS) {
-        var cycleCount = 0
-        while (true) {
-            if (cycleCount >= rtNavigationContext.maxNumCycleAttempts)
-                throw CouldNotFindRTScreenException(targetScreenType)
+    while (true) {
+        if (cycleCount >= rtNavigationContext.maxNumCycleAttempts)
+            throw CouldNotFindRTScreenException(targetScreenType)
 
-            val parsedDisplayFrame = rtNavigationContext.getParsedDisplayFrame(filterDuplicates = true) ?: continue
-            val parsedScreen = parsedDisplayFrame.parsedScreen
-
-            if (parsedScreen::class == targetScreenType) {
-                logger(LogLevel.DEBUG) { "Target screen of type $targetScreenType appeared; cycleCount = $cycleCount" }
-                return@withTimeoutOrNull parsedScreen
-            } else {
-                logger(LogLevel.VERBOSE) { "Target screen type did not appear yet; cycleCount increased to $cycleCount" }
-                cycleCount++
-            }
+        // The cycle count only advances with distinct screens. A Combo that dropped back to a
+        // static screen (for example after ignoring a button press) would otherwise keep this
+        // waiting for many minutes, so the wait between distinct screens is bounded as well.
+        val parsedDisplayFrame = withTimeoutOrNull(WAIT_UNTIL_SCREEN_APPEARS_TIMEOUT_IN_MS) {
+            rtNavigationContext.getParsedDisplayFrame(filterDuplicates = true)
+        } ?: run {
+            logger(LogLevel.ERROR) { "No new screen within $WAIT_UNTIL_SCREEN_APPEARS_TIMEOUT_IN_MS ms while waiting for $targetScreenType" }
+            throw CouldNotFindRTScreenException(targetScreenType)
         }
-        @Suppress("UNREACHABLE_CODE")
-        null
-    }
+        val parsedScreen = parsedDisplayFrame.parsedScreen
 
-    if (screen == null) {
-        logger(LogLevel.ERROR) { "No $targetScreenType within $WAIT_UNTIL_SCREEN_APPEARS_TIMEOUT_IN_MS ms" }
-        throw CouldNotFindRTScreenException(targetScreenType)
+        if (parsedScreen::class == targetScreenType) {
+            logger(LogLevel.DEBUG) { "Target screen of type $targetScreenType appeared; cycleCount = $cycleCount" }
+            return parsedScreen
+        } else {
+            logger(LogLevel.VERBOSE) { "Target screen type did not appear yet; cycleCount increased to $cycleCount" }
+            cycleCount++
+        }
     }
-    return screen
 }
 
 /**
@@ -881,6 +875,14 @@ suspend fun adjustQuantityOnScreen(
         decrementButton = decrementButton
     )
     if (numNeededShortRTButtonPresses != 0) {
+        if (RTLinkProfile.slowLink) {
+            fineTuneQuantityOnSlowLink(
+                rtNavigationContext, currentQuantity, targetQuantity, cyclicQuantityRange,
+                incrementSteps, incrementButton, decrementButton, getQuantity
+            )
+            return
+        }
+
         // One press at a time, each confirmed on screen before the next.
         //
         // This Combo applies RT button presses with a lag of several seconds. Sending the whole
@@ -890,11 +892,7 @@ suspend fun adjustQuantityOnScreen(
         // value). Pressing once and waiting for the screen to move keeps us in step with the
         // pump, and every accepted press also restarts the pump's own setting-screen timeout.
         var quantityOnScreen = currentQuantity
-
         var numPressesWithoutChange = 0
-        // Set whenever the observation after a press confirmed we are still on the setting
-        // screen, which makes the separate frame wait before the next press unnecessary.
-        var sawSettingScreenSincePress = false
         while (quantityOnScreen != targetQuantity) {
             val (_, buttonToPress) = computeShortRTButtonPress(
                 currentQuantity = quantityOnScreen,
@@ -911,48 +909,28 @@ suspend fun adjustQuantityOnScreen(
             // AlertScreenException, the caller handles the exception, and if the
             // operation that was being performed before the alert screen appeared
             // can be retried, the caller can attempt to do so.
-            // Waiting for a fresh frame before each press used to cost 0.6-0.9 s, because on a
-            // setting screen the Combo blinks the value and frames only arrive that often. The
-            // budget does not allow it: the pump applies a press 2-3 s after it is sent and closes
-            // the screen about 5 s after the last key it accepted, so every press has to be sent
-            // well inside that. The screen that observeQuantityAfterShortPress() already looked at
-            // answers the same question - it is where a foreign screen is noticed - so only the
-            // first press of a run waits for a frame of its own.
-            if (!sawSettingScreenSincePress) {
-                while (true) {
-                    val displayFrame = rtNavigationContext.getParsedDisplayFrame(processAlertScreens = true, filterDuplicates = true)
-                    if ((displayFrame != null) && displayFrame.parsedScreen.isBlinkedOut) {
-                        logger(LogLevel.DEBUG) { "Screen is blinked out (contents: ${displayFrame.parsedScreen}); skipping" }
-                        continue
-                    }
-                    // The Combo closes a setting screen on its own if it accepted no key for a few
-                    // seconds. Pressing on into whatever screen replaced it would be both useless and
-                    // unpredictable, so stop instead.
-                    if ((displayFrame != null) && runCatching { getQuantity(displayFrame.parsedScreen) }.isFailure) {
-                        logger(LogLevel.ERROR) {
-                            "Combo left the setting screen (now showing ${displayFrame.parsedScreen}) before the " +
-                                "quantity reached $targetQuantity; last seen quantity was $quantityOnScreen"
-                        }
-                        throw QuantityNotChangingException(targetQuantity = targetQuantity, hitLimitAt = quantityOnScreen)
-                    }
-                    break
+            while (true) {
+                val displayFrame = rtNavigationContext.getParsedDisplayFrame(processAlertScreens = true, filterDuplicates = true)
+                if ((displayFrame != null) && displayFrame.parsedScreen.isBlinkedOut) {
+                    logger(LogLevel.DEBUG) { "Screen is blinked out (contents: ${displayFrame.parsedScreen}); skipping" }
+                    continue
                 }
+                // The Combo closes a setting screen on its own if it accepted no key for a few
+                // seconds. Pressing on into whatever screen replaced it would be both useless and
+                // unpredictable, and a static screen like the main one only emits a frame once a
+                // minute, so waiting for a reply would stall for a minute per press. Stop instead.
+                if ((displayFrame != null) && runCatching { getQuantity(displayFrame.parsedScreen) }.isFailure) {
+                    logger(LogLevel.ERROR) {
+                        "Combo left the setting screen (now showing ${displayFrame.parsedScreen}) before the " +
+                            "quantity reached $targetQuantity; last seen quantity was $quantityOnScreen"
+                    }
+                    throw QuantityNotChangingException(targetQuantity = targetQuantity, hitLimitAt = quantityOnScreen)
+                }
+                break
             }
-            sawSettingScreenSincePress = false
             rtNavigationContext.shortPressButton(buttonToPress)
 
-            val observation = observeQuantityAfterShortPress(rtNavigationContext, quantityOnScreen, getQuantity)
-            val observedQuantity = observation.quantity
-            observation.leftSettingScreen?.let { foreignScreen ->
-                logger(LogLevel.ERROR) {
-                    "Combo left the setting screen (now showing $foreignScreen) before the quantity " +
-                        "reached $targetQuantity; last seen quantity was $quantityOnScreen"
-                }
-                throw QuantityNotChangingException(targetQuantity = targetQuantity, hitLimitAt = quantityOnScreen)
-            }
-            // Frames seen while waiting prove the screen is still open, whether or not the value
-            // moved, so the next press can go out without waiting for one of its own.
-            sawSettingScreenSincePress = observation.stillOnSettingScreen
+            val observedQuantity = observeQuantityAfterShortPress(rtNavigationContext, quantityOnScreen, getQuantity)
             if ((observedQuantity == null) || (observedQuantity == quantityOnScreen)) {
                 numPressesWithoutChange++
                 logger(LogLevel.WARN) {
@@ -976,18 +954,141 @@ suspend fun adjustQuantityOnScreen(
 }
 
 /**
- * Watches the screen after one short RT button press and returns the first quantity that differs
- * from [previousQuantity], or null if the screen did not move within
- * [SHORT_RT_BUTTON_PRESS_RESPONSE_TIMEOUT_IN_MS]. Blinked-out frames are skipped; alert screens throw.
- */
-/**
- * What watching the screen after one press established.
+ * [waitUntilScreenAppears] for a slow link (see [RTLinkProfile]).
  *
- * [stillOnSettingScreen] matters even when [quantity] is null: a press the pump dropped leaves the
- * quantity where it was, but the frames that went past still prove the setting screen is open, so
- * the next press does not have to spend another frame establishing that. Every frame of that wait
- * comes out of the ~5 s the Combo leaves the screen open, and a retry that misses it by fractions
- * of a second is what a 0 -> 100 % run failed on at the tenth step.
+ * Bounds the wait as a whole instead of each frame. getParsedDisplayFrame() legitimately returns
+ * null between frames, and on a slow link that happens often enough that treating a null frame as
+ * "no screen arrived" aborts the moment the pump switches screens.
+ */
+private suspend fun waitUntilScreenAppearsOnSlowLink(
+    rtNavigationContext: RTNavigationContext,
+    targetScreenType: KClassifier
+): ParsedScreen {
+    rtNavigationContext.resetDuplicate()
+
+    val screen = withTimeoutOrNull(WAIT_UNTIL_SCREEN_APPEARS_TIMEOUT_IN_MS) {
+        var cycleCount = 0
+        while (true) {
+            if (cycleCount >= rtNavigationContext.maxNumCycleAttempts)
+                throw CouldNotFindRTScreenException(targetScreenType)
+
+            val parsedDisplayFrame = rtNavigationContext.getParsedDisplayFrame(filterDuplicates = true) ?: continue
+            val parsedScreen = parsedDisplayFrame.parsedScreen
+
+            if (parsedScreen::class == targetScreenType) {
+                logger(LogLevel.DEBUG) { "Target screen of type $targetScreenType appeared; cycleCount = $cycleCount" }
+                return@withTimeoutOrNull parsedScreen
+            } else {
+                logger(LogLevel.VERBOSE) { "Target screen type did not appear yet; cycleCount increased to $cycleCount" }
+                cycleCount++
+            }
+        }
+        @Suppress("UNREACHABLE_CODE")
+        null
+    }
+
+    if (screen == null) {
+        logger(LogLevel.ERROR) { "No $targetScreenType within $WAIT_UNTIL_SCREEN_APPEARS_TIMEOUT_IN_MS ms" }
+        throw CouldNotFindRTScreenException(targetScreenType)
+    }
+    return screen
+}
+
+/**
+ * The fine-tuning phase of [adjustQuantityOnScreen] for a slow link (see [RTLinkProfile]).
+ *
+ * Like the standard one it presses once and confirms on screen before pressing again. What
+ * differs is what it spends between presses. Measured from a watch on pump 10392647: the pump
+ * applies a press 0.9-4.8 s after it is sent and closes a setting screen about 5 s after the last
+ * key it accepted, so a frame spent re-establishing that the setting screen is still open is a
+ * frame the next press cannot afford. The observation after each press already saw the screen,
+ * so only the first press of a run waits for a frame of its own; and a foreign screen ends the
+ * run the moment it is seen, before any further press can go out into it.
+ *
+ * One rule is deliberately not bent here: a press that may have been applied is never repeated
+ * on a guess. The response timeout stays above the worst latency measured, because a press
+ * repeated while the first one was merely slow is applied twice, and the second one lands after
+ * the target was reached - which programmed a TBR nobody asked for when it was tried.
+ */
+private suspend fun fineTuneQuantityOnSlowLink(
+    rtNavigationContext: RTNavigationContext,
+    currentQuantity: Int,
+    targetQuantity: Int,
+    cyclicQuantityRange: Int?,
+    incrementSteps: Array<Pair<Int, Int>>,
+    incrementButton: RTNavigationButton,
+    decrementButton: RTNavigationButton,
+    getQuantity: (parsedScreen: ParsedScreen) -> Int?
+) {
+    var quantityOnScreen = currentQuantity
+    var numPressesWithoutChange = 0
+    // Set whenever the observation after a press confirmed the setting screen is still open,
+    // which makes the separate frame wait before the next press unnecessary.
+    var sawSettingScreenSincePress = false
+
+    while (quantityOnScreen != targetQuantity) {
+        val (_, buttonToPress) = computeShortRTButtonPress(
+            currentQuantity = quantityOnScreen,
+            targetQuantity = targetQuantity,
+            cyclicQuantityRange = cyclicQuantityRange,
+            incrementSteps = incrementSteps,
+            incrementButton = incrementButton,
+            decrementButton = decrementButton
+        )
+
+        if (!sawSettingScreenSincePress) {
+            while (true) {
+                val displayFrame = rtNavigationContext.getParsedDisplayFrame(processAlertScreens = true, filterDuplicates = true)
+                if ((displayFrame != null) && displayFrame.parsedScreen.isBlinkedOut) {
+                    logger(LogLevel.DEBUG) { "Screen is blinked out (contents: ${displayFrame.parsedScreen}); skipping" }
+                    continue
+                }
+                if ((displayFrame != null) && runCatching { getQuantity(displayFrame.parsedScreen) }.isFailure) {
+                    logger(LogLevel.ERROR) {
+                        "Combo left the setting screen (now showing ${displayFrame.parsedScreen}) before the " +
+                            "quantity reached $targetQuantity; last seen quantity was $quantityOnScreen"
+                    }
+                    throw QuantityNotChangingException(targetQuantity = targetQuantity, hitLimitAt = quantityOnScreen)
+                }
+                break
+            }
+        }
+        sawSettingScreenSincePress = false
+        rtNavigationContext.shortPressButton(buttonToPress)
+
+        val observation = observeQuantityOnSlowLink(rtNavigationContext, quantityOnScreen, getQuantity)
+        observation.leftSettingScreen?.let { foreignScreen ->
+            logger(LogLevel.ERROR) {
+                "Combo left the setting screen (now showing $foreignScreen) before the quantity " +
+                    "reached $targetQuantity; last seen quantity was $quantityOnScreen"
+            }
+            throw QuantityNotChangingException(targetQuantity = targetQuantity, hitLimitAt = quantityOnScreen)
+        }
+        sawSettingScreenSincePress = observation.stillOnSettingScreen
+
+        val observedQuantity = observation.quantity
+        if ((observedQuantity == null) || (observedQuantity == quantityOnScreen)) {
+            numPressesWithoutChange++
+            logger(LogLevel.WARN) {
+                "Quantity still $quantityOnScreen after short-pressing $buttonToPress " +
+                    "($numPressesWithoutChange of $MAX_NUM_SHORT_RT_BUTTON_PRESSES_WITHOUT_CHANGE without a change)"
+            }
+            if (numPressesWithoutChange >= MAX_NUM_SHORT_RT_BUTTON_PRESSES_WITHOUT_CHANGE)
+                throw QuantityNotChangingException(targetQuantity = targetQuantity, hitLimitAt = quantityOnScreen)
+        } else {
+            logger(LogLevel.DEBUG) { "Quantity changed from $quantityOnScreen to $observedQuantity after short RT button press" }
+            quantityOnScreen = observedQuantity
+            numPressesWithoutChange = 0
+        }
+    }
+    logger(LogLevel.DEBUG) { "Target quantity $targetQuantity confirmed on screen after short RT button presses" }
+}
+
+/**
+ * What watching the screen after one press established on a slow link.
+ *
+ * [stillOnSettingScreen] matters even when [quantity] is null: a press the pump dropped leaves
+ * the quantity where it was, but the frames that went past still prove the setting screen is open.
  */
 private class QuantityObservation(
     val quantity: Int?,
@@ -996,7 +1097,7 @@ private class QuantityObservation(
     val leftSettingScreen: ParsedScreen?
 )
 
-private suspend fun observeQuantityAfterShortPress(
+private suspend fun observeQuantityOnSlowLink(
     rtNavigationContext: RTNavigationContext,
     previousQuantity: Int,
     getQuantity: (parsedScreen: ParsedScreen) -> Int?
@@ -1012,10 +1113,9 @@ private suspend fun observeQuantityAfterShortPress(
                 sawSettingScreen = true
                 continue
             }
-            // The Combo leaves the setting screen on its own if it accepted no key for a few
-            // seconds, discarding the edit. getQuantity() is written for one screen type and throws
-            // on any other, which is how that is noticed. Stop watching at once: there is nothing
-            // left to wait for, and the caller must not press into whatever replaced the screen.
+            // getQuantity() is written for one screen type and throws on any other, which is how
+            // the pump leaving the setting screen is noticed. Stop watching at once: there is
+            // nothing left to wait for, and the caller must not press into whatever replaced it.
             val quantity = runCatching { getQuantity(displayFrame.parsedScreen) }.getOrNull()
             if (quantity == null) {
                 leftSettingScreen = displayFrame.parsedScreen
@@ -1029,6 +1129,32 @@ private suspend fun observeQuantityAfterShortPress(
         null
     }
     return QuantityObservation(quantity, sawSettingScreen && (leftSettingScreen == null), leftSettingScreen)
+}
+
+/**
+ * Watches the screen after one short RT button press and returns the first quantity that differs
+ * from [previousQuantity], or null if the screen did not move within
+ * [SHORT_RT_BUTTON_PRESS_RESPONSE_TIMEOUT_IN_MS]. Blinked-out frames are skipped; alert screens throw.
+ */
+private suspend fun observeQuantityAfterShortPress(
+    rtNavigationContext: RTNavigationContext,
+    previousQuantity: Int,
+    getQuantity: (parsedScreen: ParsedScreen) -> Int?
+): Int? = withTimeoutOrNull(SHORT_RT_BUTTON_PRESS_RESPONSE_TIMEOUT_IN_MS) {
+    while (true) {
+        val displayFrame = rtNavigationContext.getParsedDisplayFrame(processAlertScreens = true, filterDuplicates = false)
+            ?: continue
+        if (displayFrame.parsedScreen.isBlinkedOut)
+            continue
+        // The Combo leaves the setting screen on its own if it accepted no key for a few seconds.
+        // getQuantity() is written for one screen type and would throw on any other, so treat a
+        // foreign screen as "no quantity seen" and let the caller decide.
+        val quantity = runCatching { getQuantity(displayFrame.parsedScreen) }.getOrNull() ?: continue
+        if (quantity != previousQuantity)
+            return@withTimeoutOrNull quantity
+    }
+    @Suppress("UNREACHABLE_CODE")
+    null
 }
 
 /**
