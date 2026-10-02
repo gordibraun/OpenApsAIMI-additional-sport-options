@@ -6,4 +6,7 @@
     <item name="manual_pump_pair" type="id" />
     <item name="manual_pump_unpair" type="id" />
     <item name="manual_pump_note" type="id" />
+    <item name="manual_alone_status" type="id" />
+    <item name="manual_alone_mode" type="id" />
+    <item name="manual_alone_journal" type="id" />
 </resources>

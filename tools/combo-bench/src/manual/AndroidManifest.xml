@@ -3,6 +3,10 @@
          the same key can hand commands to the controller or receive its answers. -->
     <permission android:name="app.aaps.combo.permission.RELAY" android:protectionLevel="signature" />
     <uses-permission android:name="app.aaps.combo.permission.RELAY" />
+    <!-- Held by the sensor app on this watch, which hands its readings to the controller. Signature-level
+         for the same reason as the relay: nobody else may tell the controller what the glucose is. -->
+    <permission android:name="app.aaps.combo.permission.GLUCOSE" android:protectionLevel="signature" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -18,6 +22,12 @@
             android:permission="app.aaps.combo.permission.RELAY">
             <intent-filter>
                 <action android:name="app.aaps.combo.action.FROM_PHONE" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name=".controller.ControllerGlucoseReceiver" android:exported="true"
+            android:permission="app.aaps.combo.permission.GLUCOSE">
+            <intent-filter>
+                <action android:name="app.aaps.combo.action.GLUCOSE" />
             </intent-filter>
         </receiver>
         <receiver android:name=".controller.ControllerDebugReceiver" android:exported="true"

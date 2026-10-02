@@ -45,6 +45,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
     @Mock lateinit var pumpSync: PumpSync
     @Mock lateinit var link: ComboWatchLink
     @Mock lateinit var uiInteraction: UiInteraction
+    @Mock lateinit var snapshots: RegulationSnapshotBuilder
 
     private lateinit var plugin: ComboWatchPlugin
 
@@ -58,7 +59,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         doReturn("another pump on the watch").whenever(rh).gs(eq(R.string.combowatch_other_pump), anyString(), anyString())
         doReturn("bolus of another pump").whenever(rh).gs(eq(R.string.combowatch_bolus_of_other_pump), anyDouble(), anyString(), anyString())
         plugin = ComboWatchPlugin(
-            aapsLogger, rh, preferences, commandQueue, link, pumpSync, constraintsChecker, uiInteraction, pumpEnactResultProvider
+            aapsLogger, rh, preferences, commandQueue, link, pumpSync, constraintsChecker, uiInteraction, pumpEnactResultProvider, snapshots
         )
     }
 
@@ -81,14 +82,14 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
 
     private fun commandsAnswer(result: ComboResult) = link.stub {
         onBlocking {
-            execute(any(), any(), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(any(), any(), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         } doReturn result
     }
 
     private fun verifyNothingSentExceptStatus() = verifyBlocking(link, never()) {
         execute(
             org.mockito.kotlin.argThat { this != CommandKind.STATUS }, any(), any(), any(), any(),
-            anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull()
+            anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull()
         )
     }
 
@@ -138,6 +139,22 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
     }
 
     @Test
+    fun `what the watch decided by itself is kept as a note with the treatments`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        plugin.handlePumpEvent(PumpEvent(seq = 5, type = PumpEvent.Type.WATCH_NOTE, timestampEpochMs = 2_000L, pumpSerial = pumpA, note = "Часы без телефона: базал 0 %"))
+        verify(pumpSync).insertTherapyEventIfNewWithTimestamp(2_000L, app.aaps.core.data.model.TE.Type.NOTE, "Часы без телефона: базал 0 %", null, PumpType.ACCU_CHEK_COMBO, pumpA)
+    }
+
+    @Test
+    fun `an event of a kind this build does not know is passed over without harm`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        plugin.handlePumpEvent(PumpEvent(seq = 6, type = PumpEvent.Type.UNKNOWN, timestampEpochMs = 2_000L, pumpSerial = pumpA))
+        verifyNoInteractions(pumpSync)
+    }
+
+    @Test
     fun `while it is not known which pump the watch holds a record is left with the watch`() {
         registered(null)
         watchHolds(null, known = false)
@@ -156,7 +173,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         commandsAnswer(ComboResult("s", Outcome.DONE, 1L))
         plugin.getPumpStatus("test")
         verifyBlocking(link) {
-            execute(eq(CommandKind.STATUS), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(eq(CommandKind.STATUS), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         }
     }
 
@@ -196,7 +213,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         val order = inOrder(pumpSync, link)
         order.verify(pumpSync).syncStopTemporaryBasalWithPumpId(any(), any(), eq(PumpType.ACCU_CHEK_COMBO), eq(pumpA), any())
         order.verifyBlocking(link) {
-            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         }
     }
 
@@ -260,7 +277,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         assertThat(tbr.success).isTrue()
         assertThat(tbr.enacted).isTrue()
         verifyBlocking(link) {
-            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), eq(0), eq(30), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), eq(0), eq(30), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         }
         assertThat(plugin.isInitialized()).isTrue()
     }

@@ -88,6 +88,16 @@ class ControllerService : Service() {
 
             PATH_HEAL                          -> heal(host, attempt = payload?.toIntOrNull() ?: 0)
             PATH_STATE                         -> { host.sendEvents(); host.sendHeartbeat() }
+            PATH_GLUCOSE                       -> {
+                // Alone with a command whose outcome is not known: nobody else will read the pump
+                // back. One try per reading; while it fails, nothing is decided on top of it.
+                val settled = !host.awaitingReconciliation || host.healIfNeeded()
+                if (settled) {
+                    host.regulate()
+                    heal(host, attempt = 0)
+                }
+            }
+            PATH_REHEARSAL                     -> host.regulate(rehearsal = true)
         }
     }
 
@@ -123,6 +133,8 @@ class ControllerService : Service() {
 
         internal const val PATH_HEAL = "/controller/heal"
         internal const val PATH_STATE = "/controller/state"
+        internal const val PATH_GLUCOSE = "/controller/glucose"
+        internal const val PATH_REHEARSAL = "/controller/rehearsal"
 
         /**
          * Start the service for one item. From the background this is allowed only for an app
@@ -171,6 +183,32 @@ class ControllerAlarmReceiver : BroadcastReceiver() {
     }
 }
 
+/**
+ * Sensor readings, handed over by the sensor app on this watch as it receives them.
+ *
+ * Guarded by a signature-level permission: only an app signed with the same key can say what the
+ * glucose is. With the phone in charge a reading is stored and nothing else happens - no service
+ * is started and nothing is computed.
+ */
+class ControllerGlucoseReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (!BuildConfig.MANUAL_TARGET) return
+        val mgdl = intent.getIntExtra("mgdl", -1)
+        val receivedAt = intent.getLongExtra("timestamp", 0L)
+        if (mgdl <= 0 || receivedAt <= 0L) return
+        // The sensor says how old the value was when it was received; the reading is from then.
+        val ageMs = intent.getIntExtra("ageSeconds", 0).coerceIn(0, MAX_AGE_SECONDS) * 1000L
+        val wake = runCatching { ControllerHost.get(context).keepReading(mgdl, receivedAt - ageMs) }
+            .onFailure { Log.e("ComboController", "reading not kept: ${it.javaClass.simpleName}") }
+            .getOrDefault(false)
+        if (wake) ControllerService.start(context, ControllerService.PATH_GLUCOSE, null)
+    }
+
+    private companion object {
+        const val MAX_AGE_SECONDS = 600
+    }
+}
+
 /** Messages from the phone, handed over by the relay in the AAPS watch app. */
 class ControllerInboundReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -184,13 +222,14 @@ class ControllerInboundReceiver : BroadcastReceiver() {
  * Drives the controller from adb, standing in for the phone, so that it can be tested against the
  * pump on its own. Guarded by the DUMP permission, which the shell holds and ordinary apps do not,
  * compiled to do nothing outside debug builds, and limited to the off-body test pump: with any
- * other pump paired only STATE works, which touches nothing.
+ * other pump paired only STATE and REHEARSAL work, which touch nothing.
  *
  *   am broadcast -n <pkg>/app.aaps.combobench.controller.ControllerDebugReceiver --es cmd STATUS
  *   ... --es cmd TBR --ei percent 0 --ei minutes 30 [--es tbrKind EMULATED_STOP]
  *   ... --es cmd CANCEL [--ez force true]
  *   ... --es cmd BOLUS --ei tenths 1 [--es bolusKind SMB]
  *   ... --es cmd STATE
+ *   ... --es cmd REHEARSAL
  */
 class ControllerDebugReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -203,6 +242,8 @@ class ControllerDebugReceiver : BroadcastReceiver() {
             "CANCEL" -> CommandKind.CANCEL_TBR
             "BOLUS"  -> CommandKind.DELIVER_BOLUS
             "STATE"  -> { ControllerService.start(context, ControllerService.PATH_STATE, null); return }
+            // Touches nothing either: shows what the watch would decide right now, into a file.
+            "REHEARSAL" -> { ControllerService.start(context, ControllerService.PATH_REHEARSAL, null); return }
             else     -> return
         }
         // Everything below stands in for the phone, which is allowed on the bench's test pump only.

@@ -9,6 +9,7 @@ import app.aaps.combobench.BuildConfig
 import app.aaps.combobench.ManualPumpRuntime
 import app.aaps.combobench.ManualPumpTarget
 import app.aaps.pump.combowatch.executor.ComboExecutor
+import app.aaps.pump.combowatch.executor.AutonomyPolicy
 import app.aaps.pump.combowatch.executor.CommandGate
 import app.aaps.pump.combowatch.executor.CommandJournal
 import app.aaps.pump.combowatch.executor.EventOutbox
@@ -21,7 +22,9 @@ import app.aaps.pump.combowatch.protocol.ControlLease
 import app.aaps.pump.combowatch.protocol.Outcome
 import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.PumpSnapshot
+import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import app.aaps.pump.combowatch.protocol.WatchHeartbeat
+import app.aaps.pump.combowatch.regulation.GlucoseReading
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -43,16 +46,36 @@ internal class ControllerHost private constructor(context: Context) {
     private val outbox = loadOutbox()
 
     @Volatile private var lease: ControlLease? = loadLease()
+
+    /** When the phone last said anything, by this watch's clock; survives a restart of the app. */
+    @Volatile private var phoneLastHeardEpochMs: Long = runCatching {
+        if (files.exists(PHONE_HEARD_FILE)) files.read(PHONE_HEARD_FILE).getLong("at") else 0L
+    }.getOrDefault(0L)
+
+    private fun phoneHeard() {
+        val now = System.currentTimeMillis()
+        // Written at most once a minute: it only has to be right to within the minutes that matter.
+        if (now - phoneLastHeardEpochMs >= 60_000L) runCatching { files.write(PHONE_HEARD_FILE, JSONObject().put("at", now)) }
+        phoneLastHeardEpochMs = now
+    }
     @Volatile private var lastSnapshot: PumpSnapshot? = null
     @Volatile private var pumpReachable = false
 
+    /** What the watch keeps for the time it may be on its own. */
+    val autonomy = AutonomyStore(files)
+
     private val session = DriverPumpSession(
         context, files,
-        // Stamped here, where the pump is known for certain, rather than left for the phone to infer.
-        onEvent = { outbox.append(it.copy(pumpSerial = heldPump())) },
+        onEvent = { event ->
+            // Stamped here, where the pump is known for certain, rather than left for the phone to infer.
+            outbox.append(event.copy(pumpSerial = heldPump()))
+            // The watch's own record of what the pump delivered, whoever asked for it.
+            runCatching { autonomy.onPumpEvent(event, byWatch = runner.ownCommandInFlight) }
+        },
         onPumpRead = { snapshot, boluses ->
             lastSnapshot = snapshot
             pumpReachable = true
+            runCatching { autonomy.syncWithPump(snapshot.readAtEpochMs, snapshot.tbrRunning, snapshot.tbrPercentage, snapshot.tbrRemainingMinutes) }
             executor.reconcile(snapshot, boluses)
         }
     )
@@ -61,6 +84,43 @@ internal class ControllerHost private constructor(context: Context) {
         CommandGate({ System.currentTimeMillis() }, { maxBolusTenthsIU() }, { heldPump() }),
         journal, session
     ) { System.currentTimeMillis() }
+
+    private val runner: AutonomyRunner = AutonomyRunner(
+        store = autonomy,
+        executor = executor,
+        phoneLease = { lease },
+        phoneLastHeardEpochMs = { phoneLastHeardEpochMs },
+        heldPump = { heldPump() },
+        pumpBasalUph = { pumpBasalUph() },
+        note = { text, at -> outbox.append(PumpEvent(0, PumpEvent.Type.WATCH_NOTE, at, pumpSerial = heldPump(), note = text)) },
+        askForCarbs = ::notifyCarbs,
+        // The bench's own manual sessions use the same pump and pairing; never overlap with them.
+        pumpInOtherUse = { ManualPumpRuntime.get(this.context).usingBluetoothNow() }
+    )
+
+    /** A notification that vibrates: the one thing the watch asks of its wearer by itself. */
+    private fun notifyCarbs(grams: Int, why: String) {
+        runCatching {
+            val manager = context.getSystemService(android.app.NotificationManager::class.java)
+            manager.createNotificationChannel(
+                android.app.NotificationChannel(CARBS_CHANNEL, "Низкий прогноз", android.app.NotificationManager.IMPORTANCE_HIGH).apply {
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 400, 200, 400, 200, 400)
+                }
+            )
+            manager.notify(
+                CARBS_NOTIFICATION_ID,
+                android.app.Notification.Builder(context, CARBS_CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_notify_error)
+                    .setContentTitle("Съешьте около $grams г углеводов")
+                    .setContentText("Одной остановки базала не хватит")
+                    .setStyle(android.app.Notification.BigTextStyle().bigText("Одной остановки базала не хватит. $why"))
+                    .setCategory(android.app.Notification.CATEGORY_ALARM)
+                    .setAutoCancel(true)
+                    .build()
+            )
+        }
+    }
 
     val isBusy: Boolean get() = executor.isBusy
 
@@ -131,6 +191,7 @@ internal class ControllerHost private constructor(context: Context) {
         // counted as insulin. Its events are the only ones ever dropped unsent - along with those
         // from before events named their pump, when the test pump was the only pump there was.
         if (wasTestPump) outbox.discard { it.pumpSerial == null || it.pumpSerial == "PUMP_${ManualPumpTarget.TEST_SERIAL}" }
+        autonomy.forgetPump()
         lastSnapshot = null
         pumpReachable = false
         for (name in listOf(HEARTBEAT_FILE, RESULT_FILE)) {
@@ -146,6 +207,7 @@ internal class ControllerHost private constructor(context: Context) {
     // ---- inbound, called on the controller's worker thread ---------------------------------------
 
     fun onLease(payload: String) {
+        phoneHeard()
         val incoming = ControlLease.fromJson(JSONObject(payload))
         val current = lease
         // An older generation must not replace a newer one: a renewal that was delayed on the way
@@ -153,10 +215,46 @@ internal class ControllerHost private constructor(context: Context) {
         if ((current != null) && (incoming.generation < current.generation)) return
         lease = incoming
         files.write(LEASE_FILE, incoming.toJson())
+        // What the phone leaves for the case that this was its last word for a while.
+        JSONObject(payload).optJSONObject(RegulationSnapshot.KEY_IN_LEASE)?.let { saved ->
+            runCatching { autonomy.saveSnapshot(RegulationSnapshot.fromJson(saved)) }
+        }
+        // The phone is here: whatever the watch noted and did meanwhile goes to it now.
+        sendEvents()
         sendHeartbeat()
     }
 
+    // ---- the watch on its own ----------------------------------------------------------------------
+
+    /**
+     * Keep a sensor reading, and say whether it should wake the regulator. Light enough to be
+     * called for every reading from a broadcast receiver: with the phone in charge it writes one
+     * small file and computes nothing.
+     */
+    fun keepReading(mgdl: Int, sampledAtEpochMs: Long): Boolean {
+        if (!autonomy.addReading(GlucoseReading(sampledAtEpochMs, mgdl.toDouble()))) return false
+        return runner.wantsToRun() || runner.needsSettling()
+    }
+
+    /** Why the watch is not on its own right now, or null when it is. */
+    fun whyNotAlone(): String? = (runner.standing() as? AutonomyPolicy.Standing.NotAlone)?.reason
+
+    /** Let the regulator look at the newest reading; see [AutonomyRunner.onReading]. */
+    fun regulate(rehearsal: Boolean = false): JSONObject? = synchronized(pumpTurn) {
+        val entry = runner.onReading(rehearsal)
+        if (rehearsal && entry != null) files.write(REHEARSAL_FILE, entry)
+        entry
+    }
+
+    /** What the pump delivers at 100 % in each hour, from the profile the driver read off the pump the watch holds. */
+    private fun pumpBasalUph(): List<Double> = runCatching {
+        val saved = files.read(BASAL_PROFILE_FILE)
+        if (saved.getString("pump") != heldPump()) emptyList()
+        else saved.getJSONArray("factors").let { factors -> List(factors.length()) { factors.getInt(it) / 1000.0 } }
+    }.getOrDefault(emptyList())
+
     fun onCommand(payload: String): ComboResult = synchronized(pumpTurn) {
+        phoneHeard()
         val command = ComboCommand.fromJson(JSONObject(payload))
         // The bench's own manual sessions use the same pump and pairing; never overlap with them.
         if (ManualPumpRuntime.get(context).usingBluetoothNow())
@@ -172,6 +270,7 @@ internal class ControllerHost private constructor(context: Context) {
     }
 
     fun onEventsAck(payload: String) {
+        phoneHeard()
         outbox.acknowledge(JSONObject(payload).getLong("upTo"))
     }
 
@@ -266,6 +365,10 @@ internal class ControllerHost private constructor(context: Context) {
         .put("lease", lease?.toJson() ?: JSONObject.NULL)
         .put("leaseLive", lease?.liveAt(System.currentTimeMillis()) == true)
         .put("heldPump", heldPump() ?: JSONObject.NULL)
+        .put("autonomyMode", autonomy.mode().name)
+        .put("autonomyStanding", (runner.standing() as? AutonomyPolicy.Standing.NotAlone)?.reason ?: "alone")
+        .put("readings", autonomy.readings().size)
+        .put("snapshotAt", autonomy.snapshot()?.madeAtEpochMs ?: JSONObject.NULL)
         .put("pendingEvents", outbox.pending().size)
         .put("droppedEvents", outbox.droppedCount)
         .put("journal", JSONArray().apply { journal.entries().takeLast(12).forEach { put(entryJson(it)) } })
@@ -341,6 +444,13 @@ internal class ControllerHost private constructor(context: Context) {
         private const val LIMITS_FILE = "controller-limits.json"
         const val RESULT_FILE = "controller-result.json"
         const val HEARTBEAT_FILE = "controller-heartbeat.json"
+        const val REHEARSAL_FILE = "autonomy-rehearsal.json"
+        private const val PHONE_HEARD_FILE = "controller-phone-heard.json"
+        private const val CARBS_CHANNEL = "combo-autonomy-carbs"
+        private const val CARBS_NOTIFICATION_ID = 42
+
+        /** Written by the driver session each time it reads the profile off the pump. */
+        private const val BASAL_PROFILE_FILE = "manual-basal-profile.json"
 
         /** Far below any real generation, which is a wall-clock timestamp from the phone. */
         private const val DEBUG_GENERATION = 1L

@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 28
-            versionName = "0.28-any-pump"
+            versionCode = 29
+            versionName = "0.29-on-its-own"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }
@@ -44,6 +44,7 @@ dependencies {
     implementation(project(":pump:combov2:comboctl"))
     implementation(project(":pump:combowatch-protocol"))
     implementation(project(":pump:combowatch-executor"))
+    implementation(project(":pump:combowatch-regulation"))
     implementation(libs.com.google.android.gms.playservices.wearable)
     testImplementation("junit:junit:4.13.2")
     // Real org.json for JVM tests of the bench's JSON state files (the Android stub throws).

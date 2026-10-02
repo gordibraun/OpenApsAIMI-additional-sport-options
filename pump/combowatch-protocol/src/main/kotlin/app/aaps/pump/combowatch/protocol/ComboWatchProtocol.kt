@@ -321,7 +321,9 @@ data class PumpEvent(
      * is not the one it has registered - silently, as far as insulin on board is concerned. So
      * the serial travels with the event instead of being guessed by the receiver.
      */
-    val pumpSerial: String? = null
+    val pumpSerial: String? = null,
+    /** The text of a [Type.WATCH_NOTE]. */
+    val note: String? = null
 ) {
 
     enum class Type {
@@ -333,7 +335,18 @@ data class PumpEvent(
         /** The driver found a TBR it did not set and cancelled it. */
         UNKNOWN_TBR_DETECTED,
         BATTERY_LOW,
-        RESERVOIR_LOW
+        RESERVOIR_LOW,
+
+        /**
+         * Not something the pump did: a line the watch wrote about a decision it took (or, while
+         * only observing, would have taken) by itself with the phone away. It travels with the
+         * pump events so that it reaches the phone in order with them and is never lost; the
+         * text is in [note].
+         */
+        WATCH_NOTE,
+
+        /** A type a newer watch sends and this build does not know. Passed over, never an error. */
+        UNKNOWN
     }
 
     fun toJson(): JSONObject = JSONObject()
@@ -348,13 +361,14 @@ data class PumpEvent(
             tbrDurationMinutes?.let { put("tbrDurationMinutes", it) }
             tbrType?.let { put("tbrType", it) }
             pumpSerial?.let { put("pumpSerial", it) }
+            note?.let { put("note", it) }
         }
 
     companion object {
 
         fun fromJson(json: JSONObject) = PumpEvent(
             seq = json.getLong("seq"),
-            type = Type.valueOf(json.getString("type")),
+            type = runCatching { Type.valueOf(json.getString("type")) }.getOrDefault(Type.UNKNOWN),
             timestampEpochMs = json.getLong("timestamp"),
             bolusId = if (json.has("bolusId")) json.getLong("bolusId") else null,
             bolusTenthsIU = json.optIntOrNull("bolusTenthsIU"),
@@ -362,7 +376,8 @@ data class PumpEvent(
             tbrPercentage = json.optIntOrNull("tbrPercentage"),
             tbrDurationMinutes = json.optIntOrNull("tbrDurationMinutes"),
             tbrType = if (json.has("tbrType")) json.getString("tbrType") else null,
-            pumpSerial = if (json.has("pumpSerial")) json.getString("pumpSerial") else null
+            pumpSerial = if (json.has("pumpSerial")) json.getString("pumpSerial") else null,
+            note = if (json.has("note")) json.getString("note") else null
         )
 
         fun listToJson(events: List<PumpEvent>): JSONObject =
@@ -422,6 +437,108 @@ data class WatchHeartbeat(
             watchBatteryPercent = json.optIntOrNull("watchBattery"),
             snapshot = if (json.has("snapshot")) PumpSnapshot.fromJson(json.getJSONObject("snapshot")) else null,
             heldPump = if (json.has("heldPump")) json.getString("heldPump") else null
+        )
+    }
+}
+
+/**
+ * What the phone leaves with the watch at every lease renewal, so that the watch can keep basal
+ * safe by itself once the phone has gone silent.
+ *
+ * Nothing in it is computed for the watch specially: it is what the phone's own loop run already
+ * worked out - how the insulin already given will act, what is left of the carbohydrates, the
+ * sensitivity and the thresholds the algorithm used. The watch adds only what it measures itself
+ * (glucose) and what it did itself (pump commands), and never keeps a model of its own: when the
+ * phone returns, a new snapshot replaces this one.
+ *
+ * It is also the standing permission. Without a snapshot naming the pump the watch holds, and
+ * past [validUntilEpochMs], the watch does nothing on its own.
+ */
+data class RegulationSnapshot(
+    /** When the loop run this is taken from was made. The insulin curve below starts here. */
+    val madeAtEpochMs: Long,
+    /** The pump these numbers belong to, as in the lease. */
+    val pumpSerial: String,
+    /** The watch may act on this snapshot until then, and not a minute longer. */
+    val validUntilEpochMs: Long,
+    /** The glucose target of the loop run, mg/dL. */
+    val targetMgdl: Double,
+    /** The algorithm's own low-glucose threshold, mg/dL. */
+    val hypoThresholdMgdl: Double,
+    /** The sensitivity the algorithm forecast with, mg/dL per unit. */
+    val sensitivityMgdlPerU: Double,
+    /** Grams of carbohydrate per unit, from the profile. */
+    val carbRatioGPerU: Double,
+    /** Carbohydrates not yet absorbed at [madeAtEpochMs], grams. */
+    val cobG: Double,
+    /** Insulin on board at [madeAtEpochMs], units; for the journal and the simple safeguards. */
+    val iobU: Double,
+    /**
+     * How the insulin given up to [madeAtEpochMs] will act: one point every five minutes from
+     * [madeAtEpochMs], activity in units per minute, net of scheduled basal. It already includes
+     * the rest of the temporary basal described by [assumedTbr], and nothing decided after it.
+     */
+    val insulinActivity: List<Double>,
+    /**
+     * The insulin's action curve: the fraction of a unit dose still to act, sampled every two and
+     * a half minutes from the moment of the dose. With it the watch works out the effect of what
+     * the pump delivered after the snapshot was made, by the same curve the phone uses.
+     */
+    val insulinRemaining: List<Double>,
+    /** The temporary basal the phone's records showed running at [madeAtEpochMs], if any. */
+    val assumedTbr: AssumedTbr? = null,
+    /** The phone's own forecast from this run, mg/dL every five minutes; kept for comparison. */
+    val phoneForecast: List<Int>? = null
+) {
+
+    /** A temporary basal as an absolute rate, and when it was due to end. */
+    data class AssumedTbr(val rateUph: Double, val endsAtEpochMs: Long)
+
+    /**
+     * Whether every number in it is a number. One that is not cannot be written to a message, and
+     * nothing should be decided from it either.
+     */
+    val isWellFormed: Boolean
+        get() = listOf(targetMgdl, hypoThresholdMgdl, sensitivityMgdlPerU, carbRatioGPerU, cobG, iobU).all { it.isFinite() } &&
+            insulinActivity.all { it.isFinite() } && insulinRemaining.all { it.isFinite() } &&
+            (assumedTbr?.rateUph?.isFinite() ?: true)
+
+    fun toJson(): JSONObject = JSONObject()
+        .put("madeAt", madeAtEpochMs)
+        .put("pumpSerial", pumpSerial)
+        .put("validUntil", validUntilEpochMs)
+        .put("target", targetMgdl)
+        .put("hypoThreshold", hypoThresholdMgdl)
+        .put("sensitivity", sensitivityMgdlPerU)
+        .put("carbRatio", carbRatioGPerU)
+        .put("cob", cobG)
+        .put("iob", iobU)
+        .put("insulinActivity", JSONArray().apply { insulinActivity.forEach { put(it) } })
+        .put("insulinRemaining", JSONArray().apply { insulinRemaining.forEach { put(it) } })
+        .apply {
+            assumedTbr?.let { put("assumedTbr", JSONObject().put("rate", it.rateUph).put("endsAt", it.endsAtEpochMs)) }
+            phoneForecast?.let { forecast -> put("phoneForecast", JSONArray().apply { forecast.forEach { put(it) } }) }
+        }
+
+    companion object {
+
+        /** The key under which a snapshot rides inside the lease message. */
+        const val KEY_IN_LEASE = "regulation"
+
+        fun fromJson(json: JSONObject) = RegulationSnapshot(
+            madeAtEpochMs = json.getLong("madeAt"),
+            pumpSerial = json.getString("pumpSerial"),
+            validUntilEpochMs = json.getLong("validUntil"),
+            targetMgdl = json.getDouble("target"),
+            hypoThresholdMgdl = json.getDouble("hypoThreshold"),
+            sensitivityMgdlPerU = json.getDouble("sensitivity"),
+            carbRatioGPerU = json.getDouble("carbRatio"),
+            cobG = json.getDouble("cob"),
+            iobU = json.getDouble("iob"),
+            insulinActivity = json.getJSONArray("insulinActivity").let { array -> List(array.length()) { array.getDouble(it) } },
+            insulinRemaining = json.getJSONArray("insulinRemaining").let { array -> List(array.length()) { array.getDouble(it) } },
+            assumedTbr = json.optJSONObject("assumedTbr")?.let { AssumedTbr(it.getDouble("rate"), it.getLong("endsAt")) },
+            phoneForecast = json.optJSONArray("phoneForecast")?.let { array -> List(array.length()) { array.getInt(it) } }
         )
     }
 }

@@ -12,6 +12,7 @@ import app.aaps.pump.combowatch.protocol.ControlLease
 import app.aaps.pump.combowatch.protocol.Outcome
 import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.PumpSnapshot
+import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import app.aaps.pump.combowatch.protocol.TbrKind
 import app.aaps.pump.combowatch.protocol.WatchHeartbeat
 import com.google.android.gms.wearable.Wearable
@@ -91,7 +92,7 @@ class ComboWatchLink @Inject constructor(
      * driving the pump directly does not depend on a message getting through - it only depends
      * on one no longer being sent.
      */
-    suspend fun renewLease(pumpSerial: String, validForMs: Long): Boolean {
+    suspend fun renewLease(pumpSerial: String, validForMs: Long, snapshot: RegulationSnapshot? = null): Boolean {
         val now = System.currentTimeMillis()
         val next = ControlLease(
             generation = lease?.generation ?: now,
@@ -101,7 +102,12 @@ class ComboWatchLink @Inject constructor(
             controllerIsWatch = true
         )
         lease = next
-        return send(ComboWatchProtocol.PATH_LEASE, next.toJson()).also { if (it) lastLeaseSentEpochMs = now }
+        // What the watch needs if this turns out to be the last renewal for a while rides along.
+        // The lease itself must go out whatever becomes of that: commands depend on it.
+        val message = next.toJson().apply {
+            snapshot?.let { runCatching { it.toJson() }.getOrNull() }?.let { put(RegulationSnapshot.KEY_IN_LEASE, it) }
+        }
+        return send(ComboWatchProtocol.PATH_LEASE, message).also { if (it) lastLeaseSentEpochMs = now }
     }
 
     /** Revoke at once, so a watch in contact stands down now instead of when the lease runs out. */
@@ -137,12 +143,15 @@ class ComboWatchLink @Inject constructor(
         tbrKind: TbrKind? = null,
         force100Percent: Boolean? = null,
         bolusTenthsIU: Int? = null,
-        bolusKind: BolusKind? = null
+        bolusKind: BolusKind? = null,
+        snapshot: RegulationSnapshot? = null
     ): ComboResult {
         // A command is refused without a live lease naming the pump it is meant for, so make
-        // sure the watch holds a current one.
-        if ((lease?.pumpSerial != pumpSerial) || (System.currentTimeMillis() - lastLeaseSentEpochMs > LEASE_REFRESH_BEFORE_COMMAND_MS))
-            renewLease(pumpSerial, leaseValidForMs)
+        // sure the watch holds a current one. A command that changes delivery comes straight
+        // after a loop run, so it also brings the watch that run's snapshot.
+        if ((lease?.pumpSerial != pumpSerial) || (snapshot != null && kind != CommandKind.STATUS) ||
+            (System.currentTimeMillis() - lastLeaseSentEpochMs > LEASE_REFRESH_BEFORE_COMMAND_MS)
+        ) renewLease(pumpSerial, leaseValidForMs, snapshot)
 
         val now = System.currentTimeMillis()
         val command = ComboCommand(

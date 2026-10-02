@@ -1,6 +1,7 @@
 package app.aaps.pump.combowatch
 
 import app.aaps.core.data.model.BS
+import app.aaps.core.data.model.TE
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.data.pump.defs.ManufacturerType
 import app.aaps.core.data.pump.defs.PumpDescription
@@ -71,7 +72,8 @@ class ComboWatchPlugin @Inject constructor(
     private val pumpSync: PumpSync,
     private val constraintChecker: ConstraintsChecker,
     private val uiInteraction: UiInteraction,
-    private val pumpEnactResultProvider: Provider<PumpEnactResult>
+    private val pumpEnactResultProvider: Provider<PumpEnactResult>,
+    private val snapshots: RegulationSnapshotBuilder
 ) : PumpPluginBase(
     pluginDescription = PluginDescription()
         .mainType(PluginType.PUMP)
@@ -128,7 +130,7 @@ class ComboWatchPlugin @Inject constructor(
         // phone that stops running lets the lease lapse and the watch stand down by itself.
         leaseJob = scope.launch {
             while (isActive) {
-                runCatching { link.renewLease(pumpSerial, LEASE_VALID_MS) }
+                runCatching { link.renewLease(pumpSerial, LEASE_VALID_MS, snapshots.current(pumpSerial)) }
                     .onFailure { aapsLogger.debug(LTag.PUMP, "combowatch: lease renewal failed: ${it.message}") }
                 delay(LEASE_RENEW_INTERVAL_MS)
             }
@@ -460,6 +462,20 @@ class ComboWatchPlugin @Inject constructor(
             PumpEvent.Type.RESERVOIR_LOW        -> uiInteraction.addNotification(
                 Notification.COMBO_PUMP_ALARM, text = rh.gs(R.string.combowatch_reservoir_low), level = Notification.NORMAL
             )
+
+            // What the watch decided by itself while the phone was away, kept with the treatments
+            // so that the stops it made can be read next to the glucose curve.
+            PumpEvent.Type.WATCH_NOTE           -> event.note?.let { note ->
+                pumpSync.insertTherapyEventIfNewWithTimestamp(
+                    timestamp = event.timestampEpochMs,
+                    type = TE.Type.NOTE,
+                    note = note,
+                    pumpType = PumpType.ACCU_CHEK_COMBO,
+                    pumpSerial = serial
+                )
+            }
+
+            PumpEvent.Type.UNKNOWN              -> aapsLogger.debug(LTag.PUMP, "combowatch: event ${event.seq} is of a kind this build does not know")
         }
     }
 
@@ -546,7 +562,8 @@ class ComboWatchPlugin @Inject constructor(
             tbrKind = tbrKind,
             force100Percent = force100Percent,
             bolusTenthsIU = bolusTenthsIU,
-            bolusKind = bolusKind
+            bolusKind = bolusKind,
+            snapshot = snapshots.current(pumpSerial)
         )
     }
 
@@ -577,10 +594,10 @@ class ComboWatchPlugin @Inject constructor(
 
         private const val UNKNOWN_SERIAL = "неизвестна"
 
-        // The lease outlives several renewals, so one lost message changes nothing, but a phone
-        // that stops renewing stands the watch down within this long.
-        private const val LEASE_VALID_MS = 15 * 60_000L
-        private const val LEASE_RENEW_INTERVAL_MS = 5 * 60_000L
+        // Ten minutes after the phone was last heard from, the watch takes basal into its own
+        // care; renewing every four leaves room for one lost renewal without that happening.
+        private const val LEASE_VALID_MS = 10 * 60_000L
+        private const val LEASE_RENEW_INTERVAL_MS = 4 * 60_000L
 
         private const val WATCH_STALE_MS = 20 * 60_000L
 

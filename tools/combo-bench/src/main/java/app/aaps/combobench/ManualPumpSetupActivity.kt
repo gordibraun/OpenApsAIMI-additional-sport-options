@@ -40,6 +40,11 @@ class ManualPumpSetupActivity : Activity() {
     private lateinit var unpair: Button
     private lateinit var note: TextView
     private lateinit var error: TextView
+    private lateinit var alone: TextView
+    private lateinit var aloneMode: Button
+    private var confirmingActive = false
+    private var activeConfirmationAskedAt = 0L
+    private val cancelActiveConfirmation = Runnable { confirmingActive = false; render() }
     private var confirmingUnpair = false
     private var confirmationAskedAt = 0L
     private var unpairing = false
@@ -99,7 +104,11 @@ class ManualPumpSetupActivity : Activity() {
         error = label("", 12f).apply { visibility = View.GONE; setTextColor(Color.rgb(255, 140, 130)) }
         unpair = button("Отвязать помпу") { onUnpairTapped() }.apply { id = R.id.manual_pump_unpair }
         note = label("", 12f).apply { id = R.id.manual_pump_note; setTextColor(Color.rgb(255, 195, 50)) }
-        label("Команды помпе отдаёт только телефон (AAPS)", 12f)
+        label("Команды помпе отдаёт телефон (AAPS)", 12f)
+        label("Без телефона", 18f).setPadding(0, (resources.displayMetrics.density * 14).toInt(), 0, 0)
+        alone = label("", 12f).apply { id = R.id.manual_alone_status }
+        aloneMode = button("") { onAloneModeTapped() }.apply { id = R.id.manual_alone_mode }
+        button("Журнал") { showAloneJournal() }.apply { id = R.id.manual_alone_journal }
         val scroll = ScrollView(this).apply {
             addView(column); isFocusableInTouchMode = true
             setOnGenericMotionListener { _, event ->
@@ -121,7 +130,9 @@ class ManualPumpSetupActivity : Activity() {
 
     override fun onPause() {
         main.removeCallbacks(cancelConfirmation)
+        main.removeCallbacks(cancelActiveConfirmation)
         confirmingUnpair = false
+        confirmingActive = false
         super.onPause()
     }
 
@@ -167,6 +178,84 @@ class ManualPumpSetupActivity : Activity() {
             else                     -> "Сбросить выбор помпы"
         }
         unpair.backgroundTintList = ColorStateList.valueOf(if (confirmingUnpair) Color.rgb(150, 40, 30) else Color.rgb(45, 45, 45))
+        renderAlone()
+    }
+
+    // ---- what the watch does when the phone is away ------------------------------------------------
+
+    private val host get() = app.aaps.combobench.controller.ControllerHost.get(this)
+
+    private fun renderAlone() {
+        val mode = runCatching { host.autonomy.mode() }.getOrDefault(app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.OFF)
+        aloneMode.text = when {
+            confirmingActive                                                       -> "Да, часы сами снижают базал"
+            mode == app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.OFF     -> "Режим: выключено"
+            mode == app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.OBSERVE -> "Режим: наблюдение"
+            else                                                                   -> "Режим: работа"
+        }
+        aloneMode.backgroundTintList = ColorStateList.valueOf(
+            when {
+                confirmingActive                                                      -> Color.rgb(150, 40, 30)
+                mode == app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.ACTIVE -> Color.rgb(20, 90, 70)
+                else                                                                  -> Color.rgb(45, 45, 45)
+            }
+        )
+        val what = when (mode) {
+            app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.OFF     -> "Часы ничего не делают сами."
+            app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.OBSERVE -> "Часы только записывают, что сделали бы; помпу не трогают."
+            app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.ACTIVE  -> "Часы сами снижают и останавливают базал. Инсулин не добавляют."
+        }
+        val now = when (val reason = runCatching { host.whyNotAlone() }.getOrDefault("нет данных")) {
+            null                                             -> "Сейчас часы одни."
+            "the phone is in charge"                         -> "Сейчас командует телефон."
+            "the phone took control back"                    -> "Телефон забрал управление себе."
+            "no pump is paired with this watch"              -> "Помпа не привязана."
+            "the phone has never been in charge of this watch",
+            "the phone left no snapshot"                     -> "Телефон ещё не оставил данных."
+            "the phone's permission has run out"             -> "Телефона нет больше суток: часы остановились."
+            "the phone's lease was for another pump",
+            "the phone's snapshot is of another pump"        -> "Телефон настроен на другую помпу."
+            "an earlier command is not settled"              -> "Исход прошлой команды не выяснен: часы сначала читают помпу."
+            "the pump is in use"                             -> "Помпа сейчас занята."
+            else                                             -> "Сейчас не одни: $reason."
+        }
+        alone.text = "$what\n$now"
+    }
+
+    private fun onAloneModeTapped() {
+        val modes = app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.entries
+        val next = modes[(host.autonomy.mode().ordinal + 1) % modes.size]
+        // Letting the watch act on the pump by itself is asked for twice.
+        if (next == app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.ACTIVE && !confirmingActive) {
+            confirmingActive = true
+            activeConfirmationAskedAt = android.os.SystemClock.elapsedRealtime()
+            main.postDelayed(cancelActiveConfirmation, CONFIRMATION_WINDOW_MS)
+            render()
+            return
+        }
+        // The second tap of a double tap is not a confirmation: the question could not have been read yet.
+        if (confirmingActive && android.os.SystemClock.elapsedRealtime() - activeConfirmationAskedAt < DOUBLE_TAP_GUARD_MS) return
+        main.removeCallbacks(cancelActiveConfirmation)
+        confirmingActive = false
+        runCatching { host.autonomy.setMode(next) }.onFailure { showError("Не удалось сохранить режим") }
+        render()
+    }
+
+    private fun showAloneJournal() {
+        val time = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
+        val entries = runCatching { host.autonomy.journal() }.getOrDefault(emptyList()).takeLast(JOURNAL_LINES).reversed()
+        val text = if (entries.isEmpty()) "Часы ещё ни разу не оставались одни" else entries.joinToString("\n\n") { entry ->
+            val done = when {
+                entry.optString("action") == "LEAVE" -> ""
+                entry.optBoolean("done")             -> " ✓"
+                entry.optString("mode") == "OBSERVE" -> " (не выполнялось)"
+                else                                 -> " ✗ ${entry.optString("reason")}"
+            }
+            "${time.format(java.util.Date(entry.optLong("at")))} ${entry.optString("text")}$done"
+        }
+        val body = TextView(this).apply { this.text = text; textSize = 12f; setPadding(24, 8, 24, 8) }
+        android.app.AlertDialog.Builder(this).setTitle("Без телефона").setView(ScrollView(this).apply { addView(body) })
+            .setPositiveButton("Закрыть", null).show()
     }
 
     private fun openPairing() {
@@ -225,6 +314,7 @@ class ManualPumpSetupActivity : Activity() {
     private companion object {
         /** How long the second tap is waited for; long enough to read the warnings. */
         const val CONFIRMATION_WINDOW_MS = 20_000L
+        const val JOURNAL_LINES = 20
         const val DOUBLE_TAP_GUARD_MS = 1_500L
     }
 }
