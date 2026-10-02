@@ -1,5 +1,6 @@
 package app.aaps.pump.combowatch.protocol
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -23,6 +24,8 @@ object ComboWatchProtocol {
     const val PATH_COMMAND = "/combowatch/command"
     const val PATH_RESULT = "/combowatch/result"
     const val PATH_HEARTBEAT = "/combowatch/heartbeat"
+    const val PATH_EVENTS = "/combowatch/events"
+    const val PATH_EVENTS_ACK = "/combowatch/events-ack"
 
     /** Capability the watch advertises once its executor is installed and paired to a pump. */
     const val CAPABILITY_EXECUTOR = "combowatch_executor"
@@ -32,8 +35,7 @@ object ComboWatchProtocol {
 
 /**
  * What the phone is allowed to ask for. Deliberately not the whole [app.aaps.core.interfaces.pump.Pump]
- * surface: the first milestones carry reads and the stop/resume pair only, and anything absent
- * here cannot be expressed on the wire at all.
+ * surface: anything absent here cannot be expressed on the wire at all.
  */
 enum class CommandKind {
     /** Read pump state. Never changes delivery, so it is the one command a locked watch may still run. */
@@ -42,9 +44,22 @@ enum class CommandKind {
     /** Set a temporary basal rate, [ComboCommand.percentage] % for [ComboCommand.durationMinutes]. */
     SET_TBR,
 
-    /** Cancel a running temporary basal, i.e. return to 100 %. */
-    CANCEL_TBR
+    /**
+     * End the running temporary basal the way AAPS does it. With [ComboCommand.force100Percent]
+     * the TBR is really cancelled (the pump raises its W6 warning); without it the driver sets a
+     * 15-minute 90 % / 110 % TBR instead, which is what AAPS normally asks for.
+     */
+    CANCEL_TBR,
+
+    /** Deliver a standard bolus of [ComboCommand.bolusTenthsIU] tenths of a unit. */
+    DELIVER_BOLUS
 }
+
+/** Why a temporary basal is being set, so the watch's driver records the same type the phone would. */
+enum class TbrKind { NORMAL, SUPERBOLUS, EMULATED_STOP }
+
+/** What a bolus is for. SMB is the loop's own microbolus. */
+enum class BolusKind { NORMAL, SMB, PRIMING }
 
 /**
  * A lease naming the watch as the pump's controller.
@@ -99,7 +114,12 @@ data class ComboCommand(
     val issuedAtEpochMs: Long,
     val expiresAtEpochMs: Long,
     val percentage: Int? = null,
-    val durationMinutes: Int? = null
+    val durationMinutes: Int? = null,
+    val tbrKind: TbrKind? = null,
+    val force100Percent: Boolean? = null,
+    /** Bolus amount in tenths of a unit, the Combo's own resolution: 3 means 0.3 U. */
+    val bolusTenthsIU: Int? = null,
+    val bolusKind: BolusKind? = null
 ) {
 
     fun toJson(): JSONObject = JSONObject()
@@ -112,6 +132,10 @@ data class ComboCommand(
         .apply {
             percentage?.let { put("percentage", it) }
             durationMinutes?.let { put("durationMinutes", it) }
+            tbrKind?.let { put("tbrKind", it.name) }
+            force100Percent?.let { put("force100Percent", it) }
+            bolusTenthsIU?.let { put("bolusTenthsIU", it) }
+            bolusKind?.let { put("bolusKind", it.name) }
         }
 
     companion object {
@@ -122,8 +146,12 @@ data class ComboCommand(
             kind = CommandKind.valueOf(json.getString("kind")),
             issuedAtEpochMs = json.getLong("issuedAt"),
             expiresAtEpochMs = json.getLong("expiresAt"),
-            percentage = if (json.has("percentage")) json.getInt("percentage") else null,
-            durationMinutes = if (json.has("durationMinutes")) json.getInt("durationMinutes") else null
+            percentage = json.optIntOrNull("percentage"),
+            durationMinutes = json.optIntOrNull("durationMinutes"),
+            tbrKind = if (json.has("tbrKind")) TbrKind.valueOf(json.getString("tbrKind")) else null,
+            force100Percent = if (json.has("force100Percent")) json.getBoolean("force100Percent") else null,
+            bolusTenthsIU = json.optIntOrNull("bolusTenthsIU"),
+            bolusKind = if (json.has("bolusKind")) BolusKind.valueOf(json.getString("bolusKind")) else null
         )
     }
 }
@@ -157,7 +185,13 @@ data class PumpSnapshot(
     val tbrRemainingMinutes: Int?,
     val reservoirUnits: Int?,
     val batteryState: String?,
-    val pumpSerial: String?
+    val pumpSerial: String?,
+    /**
+     * The 24 hourly basal factors programmed on the pump, in 0.001 U/h, when the watch has read
+     * them. The phone compares them with its own profile, since every TBR percentage is relative
+     * to what the pump actually delivers as 100 %.
+     */
+    val basalProfileFactors: List<Int>? = null
 ) {
 
     fun toJson(): JSONObject = JSONObject()
@@ -169,6 +203,7 @@ data class PumpSnapshot(
             reservoirUnits?.let { put("reservoirUnits", it) }
             batteryState?.let { put("batteryState", it) }
             pumpSerial?.let { put("pumpSerial", it) }
+            basalProfileFactors?.let { factors -> put("basalProfileFactors", JSONArray().apply { factors.forEach { put(it) } }) }
         }
 
     companion object {
@@ -180,7 +215,8 @@ data class PumpSnapshot(
             tbrRemainingMinutes = json.optIntOrNull("tbrRemainingMinutes"),
             reservoirUnits = json.optIntOrNull("reservoirUnits"),
             batteryState = if (json.has("batteryState")) json.getString("batteryState") else null,
-            pumpSerial = if (json.has("pumpSerial")) json.getString("pumpSerial") else null
+            pumpSerial = if (json.has("pumpSerial")) json.getString("pumpSerial") else null,
+            basalProfileFactors = json.optJSONArray("basalProfileFactors")?.let { array -> List(array.length()) { array.getInt(it) } }
         )
     }
 }
@@ -191,7 +227,21 @@ data class ComboResult(
     val outcome: Outcome,
     val completedAtEpochMs: Long,
     val snapshot: PumpSnapshot? = null,
-    val reason: String? = null
+    val reason: String? = null,
+    /**
+     * What the driver actually did for a TBR command, in its own words (SET_NORMAL_TBR,
+     * SET_EMULATED_100_TBR, LETTING_EMULATED_100_TBR_FINISH, IGNORED_REDUNDANT_100_TBR). The phone
+     * needs it because "done" covers both a TBR that was set and one that was deliberately left.
+     */
+    val tbrOutcome: String? = null,
+    /** The TBR now active on the pump after a TBR command, as the driver set it. */
+    val tbrPercentage: Int? = null,
+    val tbrDurationMinutes: Int? = null,
+    /**
+     * The bolus the pump's own history recorded for a DELIVER_BOLUS, in tenths of a unit. This is
+     * the amount that counts: it can be less than what was asked for if delivery was cut short.
+     */
+    val bolus: BolusReceipt? = null
 ) {
 
     fun toJson(): JSONObject = JSONObject()
@@ -202,6 +252,10 @@ data class ComboResult(
         .apply {
             snapshot?.let { put("snapshot", it.toJson()) }
             reason?.let { put("reason", it) }
+            tbrOutcome?.let { put("tbrOutcome", it) }
+            tbrPercentage?.let { put("tbrPercentage", it) }
+            tbrDurationMinutes?.let { put("tbrDurationMinutes", it) }
+            bolus?.let { put("bolus", it.toJson()) }
         }
 
     companion object {
@@ -211,8 +265,102 @@ data class ComboResult(
             outcome = Outcome.valueOf(json.getString("outcome")),
             completedAtEpochMs = json.getLong("completedAt"),
             snapshot = if (json.has("snapshot")) PumpSnapshot.fromJson(json.getJSONObject("snapshot")) else null,
-            reason = if (json.has("reason")) json.getString("reason") else null
+            reason = if (json.has("reason")) json.getString("reason") else null,
+            tbrOutcome = if (json.has("tbrOutcome")) json.getString("tbrOutcome") else null,
+            tbrPercentage = json.optIntOrNull("tbrPercentage"),
+            tbrDurationMinutes = json.optIntOrNull("tbrDurationMinutes"),
+            bolus = if (json.has("bolus")) BolusReceipt.fromJson(json.getJSONObject("bolus")) else null
         )
+    }
+}
+
+/** A bolus as the pump's history recorded it. [bolusId] is the pump's own id and makes it unique. */
+data class BolusReceipt(
+    val bolusId: Long,
+    val timestampEpochMs: Long,
+    val tenthsIU: Int
+) {
+
+    fun toJson(): JSONObject = JSONObject()
+        .put("bolusId", bolusId)
+        .put("timestamp", timestampEpochMs)
+        .put("tenthsIU", tenthsIU)
+
+    companion object {
+
+        fun fromJson(json: JSONObject) = BolusReceipt(
+            bolusId = json.getLong("bolusId"),
+            timestampEpochMs = json.getLong("timestamp"),
+            tenthsIU = json.getInt("tenthsIU")
+        )
+    }
+}
+
+/**
+ * Something the watch's driver observed on the pump, forwarded so the phone can keep its
+ * treatment records right.
+ *
+ * These are the driver's own events, not interpretations: the phone applies the same mapping to
+ * them that its direct driver applies, and that mapping is keyed on the pump's ids, so receiving
+ * one twice changes nothing. That is what lets delivery be at-least-once - the watch keeps an
+ * event until the phone acknowledges its [seq].
+ */
+data class PumpEvent(
+    val seq: Long,
+    val type: Type,
+    val timestampEpochMs: Long,
+    val bolusId: Long? = null,
+    val bolusTenthsIU: Int? = null,
+    val bolusKind: BolusKind? = null,
+    val tbrPercentage: Int? = null,
+    val tbrDurationMinutes: Int? = null,
+    val tbrType: String? = null
+) {
+
+    enum class Type {
+        /** A bolus the pump finished delivering. [bolusKind] is null for one given on the pump itself. */
+        BOLUS_INFUSED,
+        TBR_STARTED,
+        TBR_ENDED,
+
+        /** The driver found a TBR it did not set and cancelled it. */
+        UNKNOWN_TBR_DETECTED,
+        BATTERY_LOW,
+        RESERVOIR_LOW
+    }
+
+    fun toJson(): JSONObject = JSONObject()
+        .put("seq", seq)
+        .put("type", type.name)
+        .put("timestamp", timestampEpochMs)
+        .apply {
+            bolusId?.let { put("bolusId", it) }
+            bolusTenthsIU?.let { put("bolusTenthsIU", it) }
+            bolusKind?.let { put("bolusKind", it.name) }
+            tbrPercentage?.let { put("tbrPercentage", it) }
+            tbrDurationMinutes?.let { put("tbrDurationMinutes", it) }
+            tbrType?.let { put("tbrType", it) }
+        }
+
+    companion object {
+
+        fun fromJson(json: JSONObject) = PumpEvent(
+            seq = json.getLong("seq"),
+            type = Type.valueOf(json.getString("type")),
+            timestampEpochMs = json.getLong("timestamp"),
+            bolusId = if (json.has("bolusId")) json.getLong("bolusId") else null,
+            bolusTenthsIU = json.optIntOrNull("bolusTenthsIU"),
+            bolusKind = if (json.has("bolusKind")) BolusKind.valueOf(json.getString("bolusKind")) else null,
+            tbrPercentage = json.optIntOrNull("tbrPercentage"),
+            tbrDurationMinutes = json.optIntOrNull("tbrDurationMinutes"),
+            tbrType = if (json.has("tbrType")) json.getString("tbrType") else null
+        )
+
+        fun listToJson(events: List<PumpEvent>): JSONObject =
+            JSONObject().put("events", JSONArray().apply { events.forEach { put(it.toJson()) } })
+
+        fun listFromJson(json: JSONObject): List<PumpEvent> =
+            json.getJSONArray("events").let { array -> List(array.length()) { fromJson(array.getJSONObject(it)) } }
     }
 }
 

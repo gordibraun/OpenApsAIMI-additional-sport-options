@@ -1,5 +1,27 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <!-- Shared with the relay in the AAPS watch app; signature-level, so only an app signed with
+         the same key can hand commands to the controller or receive its answers. -->
+    <permission android:name="app.aaps.combo.permission.RELAY" android:protectionLevel="signature" />
+    <uses-permission android:name="app.aaps.combo.permission.RELAY" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <queries>
+        <package android:name="info.nightscout.androidaps" />
+    </queries>
+
     <application>
+        <service android:name=".controller.ControllerService" android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+        <receiver android:name=".controller.ControllerAlarmReceiver" android:exported="false" />
+        <receiver android:name=".controller.ControllerInboundReceiver" android:exported="true"
+            android:permission="app.aaps.combo.permission.RELAY">
+            <intent-filter>
+                <action android:name="app.aaps.combo.action.FROM_PHONE" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name=".controller.ControllerDebugReceiver" android:exported="true"
+            android:permission="android.permission.DUMP" />
         <service android:name=".BackgroundProbeService" android:exported="false"
             android:foregroundServiceType="connectedDevice" />
         <receiver android:name=".BackgroundProbeReceiver" android:exported="false" />

@@ -13,7 +13,15 @@ import app.aaps.pump.combowatch.protocol.Outcome
  * [Admission.Refused]. A watch that has lost track of its situation must do nothing, because the
  * pump it holds may be the only one the user has.
  */
-class CommandGate(private val nowEpochMs: () -> Long) {
+class CommandGate(
+    private val nowEpochMs: () -> Long,
+    /**
+     * The largest single bolus this watch will pass on, in tenths of a unit. The phone applies
+     * its own constraints before it asks; this one is held on the watch so that no message,
+     * however it came to be, can make the watch deliver more than its owner allowed it to.
+     */
+    private val maxBolusTenthsIU: () -> Int = { DEFAULT_MAX_BOLUS_TENTHS_IU }
+) {
 
     sealed interface Admission {
 
@@ -62,10 +70,24 @@ class CommandGate(private val nowEpochMs: () -> Long) {
             return Admission.Refused("executor busy")
 
         return when (command.kind) {
-            CommandKind.STATUS     -> Admission.Run
-            CommandKind.CANCEL_TBR -> Admission.Run
-            CommandKind.SET_TBR    -> admitTbr(command)
+            CommandKind.STATUS        -> Admission.Run
+            CommandKind.CANCEL_TBR    -> Admission.Run
+            CommandKind.SET_TBR       -> admitTbr(command)
+            CommandKind.DELIVER_BOLUS -> admitBolus(command)
         }
+    }
+
+    private fun admitBolus(command: ComboCommand): Admission {
+        val amount = command.bolusTenthsIU
+            ?: return Admission.Refused("DELIVER_BOLUS without an amount")
+        if (command.bolusKind == null)
+            return Admission.Refused("DELIVER_BOLUS without a kind")
+        if (amount < 1)
+            return Admission.Refused("bolus of $amount tenths is not a deliverable amount")
+        val limit = maxBolusTenthsIU()
+        if (amount > limit)
+            return Admission.Refused("bolus of $amount tenths exceeds the watch's limit of $limit")
+        return Admission.Run
     }
 
     private fun admitTbr(command: ComboCommand): Admission {
@@ -89,5 +111,8 @@ class CommandGate(private val nowEpochMs: () -> Long) {
         private const val PERCENTAGE_STEP = 10
         private val ALLOWED_DURATION_RANGE = 15..(24 * 60)
         private const val DURATION_STEP_MINUTES = 15
+
+        /** 3.0 U: room for the loop's microboluses, and deliberately not for a meal bolus. */
+        const val DEFAULT_MAX_BOLUS_TENTHS_IU = 30
     }
 }

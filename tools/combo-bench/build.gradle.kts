@@ -42,6 +42,8 @@ androidComponents {
 
 dependencies {
     implementation(project(":pump:combov2:comboctl"))
+    implementation(project(":pump:combowatch-protocol"))
+    implementation(project(":pump:combowatch-executor"))
     implementation(libs.com.google.android.gms.playservices.wearable)
     testImplementation("junit:junit:4.13.2")
     // Real org.json for JVM tests of the bench's JSON state files (the Android stub throws).

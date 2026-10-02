@@ -1,6 +1,7 @@
 package app.aaps.pump.combowatch.executor
 
 import app.aaps.pump.combowatch.executor.CommandJournal.Companion.isResolved
+import app.aaps.pump.combowatch.protocol.CommandKind
 import app.aaps.pump.combowatch.protocol.Outcome
 
 /**
@@ -17,7 +18,14 @@ interface CommandJournal {
         val id: String,
         val startedAtEpochMs: Long,
         val outcome: Outcome?,
-        val reason: String?
+        val reason: String?,
+        /**
+         * What the command was, kept so that an unresolved one can be reconciled against the
+         * right evidence: a temporary basal against the pump's screen, a bolus against its history.
+         */
+        val kind: CommandKind? = null,
+        val bolusTenthsIU: Int? = null,
+        val tbrPercentage: Int? = null
     )
 
     /** Null when this id was never started. */
@@ -30,7 +38,13 @@ interface CommandJournal {
     fun recordedOutcome(id: String): Entry?
 
     /** Write the entry that says "this was started". Must reach storage before the pump is touched. */
-    fun markStarted(id: String, startedAtEpochMs: Long)
+    fun markStarted(
+        id: String,
+        startedAtEpochMs: Long,
+        kind: CommandKind? = null,
+        bolusTenthsIU: Int? = null,
+        tbrPercentage: Int? = null
+    )
 
     /** Record how it ended. [Outcome.UNKNOWN] leaves the executor awaiting reconciliation. */
     fun markFinished(id: String, outcome: Outcome, reason: String?)
@@ -38,8 +52,16 @@ interface CommandJournal {
     /** True when some command was started and never resolved. Blocks everything but reads. */
     fun hasUnresolved(): Boolean
 
-    /** The unresolved entry, if any, so the executor knows what it is reconciling. */
-    fun unresolved(): Entry?
+    /**
+     * The oldest unresolved entry, if any, so the executor knows what it is reconciling.
+     * [excludingId] leaves out the command that is running right now: it is unresolved only
+     * because it has not finished, and reading the pump at the start of its own session must
+     * not be taken as evidence about it.
+     */
+    fun unresolved(excludingId: String? = null): Entry?
+
+    /** Every entry, oldest first, for persistence and inspection. */
+    fun entries(): List<Entry>
 
     companion object {
 
@@ -75,8 +97,11 @@ class SimpleCommandJournal(
     override fun recordedOutcome(id: String): CommandJournal.Entry? = entries[id]?.takeIf { it.outcome != null }
 
     @Synchronized
-    override fun markStarted(id: String, startedAtEpochMs: Long) {
-        entries[id] = CommandJournal.Entry(id, startedAtEpochMs, outcome = null, reason = null)
+    override fun markStarted(id: String, startedAtEpochMs: Long, kind: CommandKind?, bolusTenthsIU: Int?, tbrPercentage: Int?) {
+        entries[id] = CommandJournal.Entry(
+            id, startedAtEpochMs, outcome = null, reason = null,
+            kind = kind, bolusTenthsIU = bolusTenthsIU, tbrPercentage = tbrPercentage
+        )
         // Trim only resolved entries: an unresolved one is the reason therapy is being held, and
         // dropping it to save space would silently unblock the pump.
         while (entries.size > maxEntries) {
@@ -97,5 +122,9 @@ class SimpleCommandJournal(
     override fun hasUnresolved(): Boolean = unresolved() != null
 
     @Synchronized
-    override fun unresolved(): CommandJournal.Entry? = entries.values.firstOrNull { !it.isResolved() }
+    override fun unresolved(excludingId: String?): CommandJournal.Entry? =
+        entries.values.firstOrNull { !it.isResolved() && (it.id != excludingId) }
+
+    @Synchronized
+    override fun entries(): List<CommandJournal.Entry> = entries.values.toList()
 }

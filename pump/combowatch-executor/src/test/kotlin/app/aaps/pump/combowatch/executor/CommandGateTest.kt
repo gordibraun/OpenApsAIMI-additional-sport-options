@@ -16,7 +16,7 @@ import org.junit.jupiter.api.Test
 class CommandGateTest {
 
     private var now = 1_000_000L
-    private val gate = CommandGate { now }
+    private val gate = CommandGate({ now })
 
     private fun lease(
         generation: Long = 7L,

@@ -39,7 +39,7 @@ class ComboExecutorTest {
         PumpSnapshot(now, tbrRunning, percentage, 30, 95, "FULL_BATTERY", "10392647")
 
     private fun executor(session: PumpSession, journal: CommandJournal = SimpleCommandJournal()) =
-        Triple(ComboExecutor(CommandGate { now }, journal, session, { now }), journal, session)
+        Triple(ComboExecutor(CommandGate({ now }), journal, session, { now }), journal, session)
 
     @Test fun `a successful stop is recorded as done and reports the pump it read back`() {
         val session = RecordingSession { PumpSession.SessionResult.Done(snapshot()) }
@@ -141,7 +141,7 @@ class ComboExecutorTest {
             seen.add(journal.hasUnresolved())
             PumpSession.SessionResult.Done(snapshot())
         }
-        ComboExecutor(CommandGate { now }, journal, session, { now }).execute(command(), lease())
+        ComboExecutor(CommandGate({ now }), journal, session, { now }).execute(command(), lease())
         assertEquals(listOf(true), seen)
     }
 
