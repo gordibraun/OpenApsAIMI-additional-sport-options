@@ -109,8 +109,12 @@ internal class ControllerHost private constructor(context: Context) {
     // ---- outbound --------------------------------------------------------------------------------
 
     private fun publish(result: ComboResult) {
-        toPhone(ComboWatchProtocol.PATH_RESULT, result.toJson())
-        sendEvents()
+        // The events ride inside the answer, so the phone has recorded what the pump did before
+        // the command that caused it returns - AAPS reads its own records straight afterwards.
+        val pending = outbox.pending()
+        val message = result.toJson()
+        if (pending.isNotEmpty()) message.put("events", PumpEvent.listToJson(pending).getJSONArray("events"))
+        toPhone(ComboWatchProtocol.PATH_RESULT, message)
         sendHeartbeat()
     }
 

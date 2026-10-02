@@ -41,6 +41,7 @@ import dagger.Component
 import dagger.android.AndroidInjectionModule
 import dagger.android.AndroidInjector
 import app.aaps.pump.common.di.RileyLinkModule
+import app.aaps.pump.combowatch.di.ComboWatchModule
 import info.nightscout.pump.combov2.di.ComboV2Module
 import javax.inject.Singleton
 
@@ -75,6 +76,7 @@ import javax.inject.Singleton
 
         // pumps
         ComboV2Module::class,
+        ComboWatchModule::class,
         DanaHistoryModule::class,
         DanaModule::class,
         DanaRModule::class,

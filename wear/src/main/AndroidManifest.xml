@@ -19,6 +19,17 @@
 
     <uses-sdk tools:overrideLibrary="androidx.wear.tiles" />
 
+    <!-- Relay to the pump controller app; see app.aaps.wear.combo.ComboRelay. Signature-level, so
+         only an app signed with the same key can be on the other end. -->
+    <permission
+        android:name="app.aaps.combo.permission.RELAY"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="app.aaps.combo.permission.RELAY" />
+
+    <queries>
+        <package android:name="app.aaps.combobench.manual" />
+    </queries>
+
     <application
         android:name=".WearApp"
         android:allowBackup="true"
@@ -719,6 +730,24 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Relay between AAPS on the phone and the pump controller app on this watch. -->
+        <service
+            android:name=".combo.ComboRelayListenerService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data
+                    android:host="*"
+                    android:pathPrefix="/combowatch"
+                    android:scheme="wear" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".combo.ComboRelayReceiver"
+            android:exported="true"
+            android:permission="app.aaps.combo.permission.RELAY" />
 
     </application>
 </manifest>

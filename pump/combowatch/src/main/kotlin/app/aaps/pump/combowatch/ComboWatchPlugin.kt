@@ -1,11 +1,14 @@
 package app.aaps.pump.combowatch
 
+import app.aaps.core.data.model.BS
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.data.pump.defs.ManufacturerType
 import app.aaps.core.data.pump.defs.PumpDescription
 import app.aaps.core.data.pump.defs.PumpType
+import app.aaps.core.interfaces.constraints.ConstraintsChecker
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
+import app.aaps.core.interfaces.notifications.Notification
 import app.aaps.core.interfaces.plugin.PluginDescription
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.pump.DetailedBolusInfo
@@ -16,11 +19,16 @@ import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.pump.defs.fillFor
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.resources.ResourceHelper
-import app.aaps.core.interfaces.utils.DateUtil
+import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.keys.interfaces.Preferences
-import app.aaps.pump.combowatch.protocol.CommandKind
+import app.aaps.core.objects.constraints.ConstraintObject
+import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.ComboResult
+import app.aaps.pump.combowatch.protocol.CommandKind
 import app.aaps.pump.combowatch.protocol.Outcome
+import app.aaps.pump.combowatch.protocol.PumpEvent
+import app.aaps.pump.combowatch.protocol.PumpSnapshot
+import app.aaps.pump.combowatch.protocol.TbrKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,21 +39,26 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
+import java.util.Calendar
 import javax.inject.Inject
 import javax.inject.Provider
 import javax.inject.Singleton
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Drives an Accu-Chek Combo that is paired to the watch rather than to this phone.
  *
  * This plugin exists next to the direct driver, never in place of it. Which of the two is active
- * is AAPS's own single-choice among [PluginType.PUMP] plugins, so returning to driving the pump
- * from the phone is a plugin switch and needs no change here — and nothing in this file is
+ * is AAPS's own single choice among [PluginType.PUMP] plugins, so returning to driving the pump
+ * from the phone is a plugin switch and needs no change here - and nothing in this file is
  * reachable while the direct driver is the active one.
  *
- * What this plugin can express is deliberately smaller than [Pump]: the protocol to the watch
- * carries reads and the temporary-basal pair only. Boluses are refused here rather than
- * half-implemented, because a bolus whose outcome is unclear cannot be made safe by the phone.
+ * The phone decides everything and touches nothing: each call below becomes one command to the
+ * watch, which runs it with the same driver the direct mode uses and reports what the pump did.
+ * The phone's treatment records are written from the driver events the watch forwards, with the
+ * same mapping the direct driver applies, so insulin on board is computed from what the pump
+ * actually delivered whether or not the command's own answer made it back.
  */
 @Singleton
 class ComboWatchPlugin @Inject constructor(
@@ -55,7 +68,8 @@ class ComboWatchPlugin @Inject constructor(
     commandQueue: CommandQueue,
     private val link: ComboWatchLink,
     private val pumpSync: PumpSync,
-    private val dateUtil: DateUtil,
+    private val constraintChecker: ConstraintsChecker,
+    private val uiInteraction: UiInteraction,
     private val pumpEnactResultProvider: Provider<PumpEnactResult>
 ) : PumpPluginBase(
     pluginDescription = PluginDescription()
@@ -67,21 +81,25 @@ class ComboWatchPlugin @Inject constructor(
     aapsLogger, rh, preferences, commandQueue
 ), Pump {
 
-    private var scopeJob = SupervisorJob()
-    private var scope = CoroutineScope(Dispatchers.Default + scopeJob)
+    private var scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var leaseJob: Job? = null
 
     private val _pumpDescription = PumpDescription().also { it.fillFor(PumpType.ACCU_CHEK_COMBO) }
 
+    /** The last thing the watch read off the pump, from an answer or a heartbeat. */
+    private val snapshot: PumpSnapshot? get() = link.lastHeartbeat?.snapshot
+
     /** Serial of the pump the watch holds. Read back from the watch, never assumed by the phone. */
-    private val pumpSerial: String get() = link.lastHeartbeat?.snapshot?.pumpSerial ?: UNKNOWN_SERIAL
+    private val pumpSerial: String get() = snapshot?.pumpSerial ?: UNKNOWN_SERIAL
+
+    @Volatile private var lastBolus: Pair<Long, Double>? = null
 
     override fun onStart() {
         super.onStart()
-        scopeJob = SupervisorJob()
-        scope = CoroutineScope(Dispatchers.Default + scopeJob)
-        // Renew well inside the lease's life so a single missed message does not stand the watch
-        // down, while a phone that stops running lets it lapse within one lease length.
+        scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        link.eventHandler = ::handlePumpEvent
+        // Renewed well inside the lease's life so that a lost message changes nothing, while a
+        // phone that stops running lets the lease lapse and the watch stand down by itself.
         leaseJob = scope.launch {
             while (isActive) {
                 runCatching { link.renewLease(pumpSerial, LEASE_VALID_MS) }
@@ -93,85 +111,227 @@ class ComboWatchPlugin @Inject constructor(
 
     override fun onStop() {
         leaseJob = null
+        link.eventHandler = null
         // Tell a watch that is in contact to stand down now rather than at lease expiry. If the
-        // message does not get through, the lapsing lease does the same thing a minute later.
+        // message does not get through, the lapsing lease does the same thing a little later.
         runCatching { runBlocking { link.revokeLease(pumpSerial) } }
         scope.cancel()
         super.onStop()
     }
 
-    // ---- what the watch reports -------------------------------------------------------------
+    // ---- state, as far as the phone can know it -------------------------------------------------
 
-    override fun isInitialized(): Boolean = link.lastHeartbeat != null
+    override fun isInitialized(): Boolean = snapshot != null
 
-    override fun isConnected(): Boolean = link.watchFresh(HEARTBEAT_FRESH_MS) &&
-        link.lastHeartbeat?.pumpReachable == true
-
+    // The link to the pump belongs to the watch; there is nothing for the phone to open or wait
+    // for, and a command sent while the watch is away is answered as such.
+    override fun isConnected(): Boolean = true
     override fun isConnecting(): Boolean = false
     override fun isHandshakeInProgress(): Boolean = false
-    override fun isBusy(): Boolean = link.lastHeartbeat?.executorBusy == true
+    override fun isBusy(): Boolean = false
+    override fun isSuspended(): Boolean = false
+    override fun connect(reason: String) = Unit
+    override fun disconnect(reason: String) = Unit
+    override fun stopConnecting() = Unit
+    override fun waitForDisconnectionInSeconds(): Int = 0
 
-    override fun isSuspended(): Boolean =
-        link.lastHeartbeat?.snapshot?.let { it.tbrRunning && it.tbrPercentage == 0 } == true
+    override val lastDataTime: Long get() = link.lastContactEpochMs
+    override val reservoirLevel: Double get() = snapshot?.reservoirUnits?.toDouble() ?: 0.0
+    override val batteryLevel: Int?
+        get() = when (snapshot?.batteryState) {
+            "NO_BATTERY"   -> 5
+            "LOW_BATTERY"  -> 25
+            "FULL_BATTERY" -> 100
+            else           -> null
+        }
+    override val lastBolusTime: Long? get() = lastBolus?.first
+    override val lastBolusAmount: Double? get() = lastBolus?.second
 
-    override val lastDataTime: Long get() = link.lastHeartbeat?.atEpochMs ?: 0L
-
-    override val baseBasalRate: Double get() = 0.0
-    override val reservoirLevel: Double get() = link.lastHeartbeat?.snapshot?.reservoirUnits?.toDouble() ?: 0.0
-    override val batteryLevel: Int? get() = null
-    override val lastBolusTime: Long? get() = null
-    override val lastBolusAmount: Double? get() = null
-
-    override fun connect(reason: String) { /* the watch owns the link; nothing for the phone to open */ }
-    override fun disconnect(reason: String) { /* same */ }
-    override fun stopConnecting() { /* same */ }
+    /** What the pump delivers as 100 % right now, from the profile the watch read off the pump. */
+    override val baseBasalRate: Double
+        get() = snapshot?.basalProfileFactors
+            ?.getOrNull(Calendar.getInstance().get(Calendar.HOUR_OF_DAY))
+            ?.let { it / 1000.0 } ?: 0.0
 
     override fun getPumpStatus(reason: String) {
-        val result = dispatch(CommandKind.STATUS)
-        result.snapshot?.let { aapsLogger.debug(LTag.PUMP, "combowatch: status tbr=${it.tbrPercentage} res=${it.reservoirUnits}") }
+        dispatch(CommandKind.STATUS)
     }
 
-    // ---- the commands this plugin can actually express ---------------------------------------
+    // ---- temporary basal ---------------------------------------------------------------------
 
     override fun setTempBasalPercent(
         percent: Int, durationInMinutes: Int, profile: Profile, enforceNew: Boolean, tbrType: PumpSync.TemporaryBasalType
     ): PumpEnactResult {
-        val result = dispatch(CommandKind.SET_TBR, percentage = percent, durationMinutes = durationInMinutes)
-        return toEnactResult(result, percent, durationInMinutes, tbrType)
-    }
-
-    override fun cancelTempBasal(enforceNew: Boolean): PumpEnactResult {
-        val result = dispatch(CommandKind.CANCEL_TBR)
-        return toEnactResult(result, percent = 100, durationInMinutes = 0, tbrType = PumpSync.TemporaryBasalType.NORMAL)
+        val enact = pumpEnactResultProvider.get().also { it.isPercent = true }
+        val rounded = ((percent + 5) / 10) * 10
+        val limited = min(rounded, _pumpDescription.maxTempPercent)
+        val kind = when (tbrType) {
+            PumpSync.TemporaryBasalType.NORMAL                -> TbrKind.NORMAL
+            PumpSync.TemporaryBasalType.EMULATED_PUMP_SUSPEND -> TbrKind.EMULATED_STOP
+            PumpSync.TemporaryBasalType.SUPERBOLUS            -> TbrKind.SUPERBOLUS
+            PumpSync.TemporaryBasalType.PUMP_SUSPEND          ->
+                return enact.also { it.success = false; it.enacted = false; it.comment = rh.gs(app.aaps.core.ui.R.string.error) }
+        }
+        // Asking for 100 % is how AAPS ends a temporary basal; the driver has its own way of
+        // doing that, and the watch must take the same path the direct driver would.
+        val result =
+            if (limited == 100) dispatch(CommandKind.CANCEL_TBR, force100Percent = false)
+            else dispatch(CommandKind.SET_TBR, percentage = limited, durationMinutes = durationInMinutes, tbrKind = kind)
+        return tbrResult(result, enact)
     }
 
     override fun setTempBasalAbsolute(
         absoluteRate: Double, durationInMinutes: Int, profile: Profile, enforceNew: Boolean, tbrType: PumpSync.TemporaryBasalType
     ): PumpEnactResult {
-        val baseRate = profile.getBasal()
-        if (baseRate <= 0.0) return refuse(R.string.combowatch_not_supported)
-        val percent = ((absoluteRate / baseRate) * 100).toInt()
-        return setTempBasalPercent(percent, durationInMinutes, profile, enforceNew, tbrType)
+        val base = baseBasalRate
+        if (base == 0.0)
+            return pumpEnactResultProvider.get().also {
+                it.success = false; it.enacted = false
+                it.comment = rh.gs(R.string.combowatch_cannot_set_absolute_tbr_if_basal_zero)
+            }
+        // The Combo only takes percentages, in steps of ten.
+        val percent = (absoluteRate / base * 10).roundToInt() * 10
+        return setTempBasalPercent(percent, durationInMinutes, profile, enforceNew, tbrType).also { it.isPercent = false }
     }
 
-    // ---- refused rather than approximated ----------------------------------------------------
+    override fun cancelTempBasal(enforceNew: Boolean): PumpEnactResult {
+        val enact = pumpEnactResultProvider.get().also { it.isPercent = true; it.isTempCancel = enforceNew }
+        return tbrResult(dispatch(CommandKind.CANCEL_TBR, force100Percent = enforceNew), enact)
+    }
 
-    override fun deliverTreatment(detailedBolusInfo: DetailedBolusInfo): PumpEnactResult = refuse(R.string.combowatch_not_supported)
-    override fun stopBolusDelivering() { /* no bolus can be running, since none can be started */ }
-    override fun setExtendedBolus(insulin: Double, durationInMinutes: Int): PumpEnactResult = refuse(R.string.combowatch_not_supported)
-    override fun cancelExtendedBolus(): PumpEnactResult = refuse(R.string.combowatch_not_supported)
-    override fun setNewBasalProfile(profile: Profile): PumpEnactResult = refuse(R.string.combowatch_not_supported)
-    override fun isThisProfileSet(profile: Profile): Boolean = true
-    override fun loadTDDs(): PumpEnactResult = refuse(R.string.combowatch_not_supported)
+    private fun tbrResult(result: ComboResult, enact: PumpEnactResult): PumpEnactResult {
+        when (result.outcome) {
+            Outcome.DONE    -> {
+                enact.success = true
+                // The driver deliberately leaves a short 90-110 % TBR running instead of
+                // cancelling; that is a success in which nothing was enacted.
+                enact.enacted = result.tbrOutcome != "LETTING_EMULATED_100_TBR_FINISH" && result.tbrOutcome != "IGNORED_REDUNDANT_100_TBR"
+                enact.percent = result.tbrPercentage ?: 100
+                enact.duration = result.tbrDurationMinutes ?: 0
+                enact.comment = result.tbrOutcome ?: ""
+            }
 
-    // ---- identity -----------------------------------------------------------------------------
+            Outcome.REFUSED,
+            Outcome.FAILED  -> {
+                enact.success = false
+                enact.enacted = false
+                enact.comment = result.reason ?: result.outcome.name
+            }
+
+            // Reported as not enacted. AAPS then keeps believing what its records say, and the
+            // records are corrected from the pump's own events once the watch has read it back.
+            Outcome.UNKNOWN -> {
+                enact.success = false
+                enact.enacted = false
+                enact.comment = rh.gs(R.string.combowatch_outcome_unknown)
+            }
+        }
+        if (result.outcome != Outcome.DONE)
+            aapsLogger.warn(LTag.PUMP, "combowatch: TBR ${result.outcome} ${result.reason ?: ""}")
+        return enact
+    }
+
+    // ---- bolus -------------------------------------------------------------------------------
+
+    override fun deliverTreatment(detailedBolusInfo: DetailedBolusInfo): PumpEnactResult {
+        require(detailedBolusInfo.carbs == 0.0) { detailedBolusInfo.toString() }
+        require(detailedBolusInfo.insulin > 0) { detailedBolusInfo.toString() }
+
+        detailedBolusInfo.insulin = constraintChecker
+            .applyBolusConstraints(ConstraintObject(detailedBolusInfo.insulin, aapsLogger))
+            .value()
+
+        val requestedTenths = (detailedBolusInfo.insulin * 10.0).toInt()
+        val kind = when (detailedBolusInfo.bolusType) {
+            BS.Type.NORMAL  -> BolusKind.NORMAL
+            BS.Type.SMB     -> BolusKind.SMB
+            BS.Type.PRIMING -> BolusKind.PRIMING
+        }
+        val enact = pumpEnactResultProvider.get()
+        if (requestedTenths < 1)
+            return enact.also { it.success = false; it.enacted = false; it.bolusDelivered = 0.0 }
+
+        // A bolus that arrives late is a dosing error, so it is given less time than a TBR before
+        // the watch must drop it instead of delivering it.
+        val result = dispatch(
+            CommandKind.DELIVER_BOLUS, bolusTenthsIU = requestedTenths, bolusKind = kind,
+            validForMs = BOLUS_VALID_MS
+        )
+        val delivered = result.bolus
+        if (delivered != null) {
+            detailedBolusInfo.bolusTimestamp = delivered.timestampEpochMs
+            lastBolus = delivered.timestampEpochMs to delivered.tenthsIU / 10.0
+        }
+        when (result.outcome) {
+            Outcome.DONE    -> {
+                enact.success = true
+                enact.enacted = (delivered?.tenthsIU ?: 0) > 0
+                enact.bolusDelivered = (delivered?.tenthsIU ?: 0) / 10.0
+                enact.comment = rh.gs(R.string.combowatch_bolus_delivered, enact.bolusDelivered)
+            }
+
+            Outcome.FAILED  -> {
+                enact.success = false
+                enact.enacted = (delivered?.tenthsIU ?: 0) > 0
+                enact.bolusDelivered = (delivered?.tenthsIU ?: 0) / 10.0
+                enact.comment =
+                    if (enact.enacted) rh.gs(R.string.combowatch_bolus_partial, enact.bolusDelivered, requestedTenths / 10.0)
+                    else result.reason ?: result.outcome.name
+            }
+
+            Outcome.REFUSED -> {
+                enact.success = false
+                enact.enacted = false
+                enact.bolusDelivered = 0.0
+                enact.comment = result.reason ?: result.outcome.name
+            }
+
+            // Never treated as "not delivered, try again". The watch settles it from the pump's
+            // history, and the bolus - if there was one - reaches the records as a pump event.
+            Outcome.UNKNOWN -> {
+                enact.success = false
+                enact.enacted = false
+                enact.bolusDelivered = 0.0
+                enact.comment = rh.gs(R.string.combowatch_outcome_unknown)
+            }
+        }
+        aapsLogger.debug(LTag.PUMP, "combowatch: bolus ${result.outcome} delivered=${enact.bolusDelivered} ${result.reason ?: ""}")
+        return enact
+    }
+
+    // Once the watch has started a bolus it runs to its end; there is no channel to interrupt it.
+    override fun stopBolusDelivering() = Unit
+
+    // ---- not carried by this driver ------------------------------------------------------------
+
+    override fun setExtendedBolus(insulin: Double, durationInMinutes: Int): PumpEnactResult = refuse()
+    override fun cancelExtendedBolus(): PumpEnactResult = refuse()
+    override fun loadTDDs(): PumpEnactResult = refuse()
+
+    /**
+     * Writing a basal profile is a walk through 24 setting screens, far beyond what the watch's
+     * link to the pump carries reliably, so it is refused here and done in direct mode.
+     */
+    override fun setNewBasalProfile(profile: Profile): PumpEnactResult = refuse()
+
+    /**
+     * Compared against the profile the watch read off the pump, because every TBR percentage is
+     * relative to what the pump itself delivers as 100 %. Until the watch has reported one there
+     * is nothing to compare with, and AAPS is not sent into a profile write it cannot perform.
+     */
+    override fun isThisProfileSet(profile: Profile): Boolean {
+        val onPump = snapshot?.basalProfileFactors ?: return true
+        return (0 until 24).all { hour -> (profile.getBasalTimeFromMidnight(hour * 60 * 60) * 1000.0).toInt() == onPump.getOrNull(hour) }
+    }
+
+    // ---- identity ----------------------------------------------------------------------------
 
     override fun manufacturer(): ManufacturerType = ManufacturerType.Roche
     override fun model(): PumpType = PumpType.ACCU_CHEK_COMBO
     override fun serialNumber(): String = pumpSerial
     override val pumpDescription: PumpDescription get() = _pumpDescription
     override val isFakingTempsByExtendedBoluses: Boolean = false
-    override fun canHandleDST(): Boolean = false
+    override fun canHandleDST(): Boolean = true
 
     override fun updateExtendedJsonStatus(extendedStatus: JSONObject) {
         val heartbeat = link.lastHeartbeat ?: return
@@ -183,7 +343,7 @@ class ComboWatchPlugin @Inject constructor(
     /** Shown wherever AAPS shows a pump's own status, so the active mode is visible at a glance. */
     override fun pumpSpecificShortStatus(veryShort: Boolean): String {
         val heartbeat = link.lastHeartbeat ?: return rh.gs(R.string.combowatch_watch_unreachable)
-        if (!link.watchFresh(HEARTBEAT_FRESH_MS)) return rh.gs(R.string.combowatch_watch_unreachable)
+        if (System.currentTimeMillis() - link.lastContactEpochMs > WATCH_STALE_MS) return rh.gs(R.string.combowatch_watch_unreachable)
         if (heartbeat.awaitingReconciliation) return rh.gs(R.string.combowatch_awaiting_reconciliation)
         val tbr = heartbeat.snapshot
             ?.takeIf { it.tbrRunning }
@@ -193,82 +353,120 @@ class ComboWatchPlugin @Inject constructor(
         return "через часы$tbr$battery"
     }
 
-    // ---- plumbing ------------------------------------------------------------------------------
-
-    private fun dispatch(kind: CommandKind, percentage: Int? = null, durationMinutes: Int? = null): ComboResult =
-        runBlocking {
-            link.execute(
-                kind = kind,
-                percentage = percentage,
-                durationMinutes = durationMinutes,
-                validForMs = COMMAND_VALID_MS,
-                timeoutMs = COMMAND_TIMEOUT_MS
-            )
-        }
+    // ---- what the watch saw on the pump ------------------------------------------------------
 
     /**
-     * Turn the watch's answer into AAPS's own.
-     *
-     * [Outcome.UNKNOWN] is reported as *not* enacted. That is the safe direction for a stop —
-     * AAPS keeps believing delivery continues — and the watch is meanwhile reading the pump back,
-     * so the next heartbeat corrects the record either way.
+     * The same mapping the direct driver applies to its own events. Every record is keyed on an
+     * id from the pump, so an event that arrives twice changes nothing.
      */
-    private fun toEnactResult(
-        result: ComboResult, percent: Int, durationInMinutes: Int, tbrType: PumpSync.TemporaryBasalType
-    ): PumpEnactResult {
-        val enact = pumpEnactResultProvider.get()
-        when (result.outcome) {
-            Outcome.DONE    -> {
-                pumpSync.syncTemporaryBasalWithPumpId(
-                    timestamp = result.completedAtEpochMs,
-                    rate = percent.toDouble(),
-                    duration = durationInMinutes * 60L * 1000L,
-                    isAbsolute = false,
-                    type = tbrType,
-                    pumpId = result.completedAtEpochMs,
-                    pumpType = PumpType.ACCU_CHEK_COMBO,
-                    pumpSerial = pumpSerial
+    private fun handlePumpEvent(event: PumpEvent) {
+        aapsLogger.debug(LTag.PUMP, "combowatch: pump event $event")
+        when (event.type) {
+            PumpEvent.Type.BOLUS_INFUSED        -> {
+                val amount = checkNotNull(event.bolusTenthsIU) / 10.0
+                pumpSync.syncBolusWithPumpId(
+                    event.timestampEpochMs,
+                    amount,
+                    when (event.bolusKind) {
+                        BolusKind.SMB     -> BS.Type.SMB
+                        BolusKind.PRIMING -> BS.Type.PRIMING
+                        else              -> BS.Type.NORMAL
+                    },
+                    checkNotNull(event.bolusId),
+                    PumpType.ACCU_CHEK_COMBO,
+                    serialNumber()
                 )
-                enact.success = true
-                enact.enacted = true
-                enact.percent = percent
-                enact.duration = durationInMinutes
-                enact.isPercent = true
+                lastBolus = event.timestampEpochMs to amount
             }
 
-            Outcome.REFUSED,
-            Outcome.FAILED,
-            Outcome.UNKNOWN -> {
-                enact.success = false
-                enact.enacted = false
-                enact.comment = result.reason ?: result.outcome.name
-                aapsLogger.warn(LTag.PUMP, "combowatch: ${result.outcome} ${result.reason ?: ""}")
-            }
+            PumpEvent.Type.TBR_STARTED          -> pumpSync.syncTemporaryBasalWithPumpId(
+                timestamp = event.timestampEpochMs,
+                rate = checkNotNull(event.tbrPercentage).toDouble(),
+                duration = checkNotNull(event.tbrDurationMinutes).toLong() * 60 * 1000,
+                isAbsolute = false,
+                type = when (event.tbrType) {
+                    "superbolus"        -> PumpSync.TemporaryBasalType.SUPERBOLUS
+                    "emulatedComboStop" -> PumpSync.TemporaryBasalType.EMULATED_PUMP_SUSPEND
+                    "comboStopped"      -> PumpSync.TemporaryBasalType.PUMP_SUSPEND
+                    else                -> PumpSync.TemporaryBasalType.NORMAL
+                },
+                pumpId = event.timestampEpochMs,
+                pumpType = PumpType.ACCU_CHEK_COMBO,
+                pumpSerial = serialNumber()
+            )
+
+            PumpEvent.Type.TBR_ENDED            -> pumpSync.syncStopTemporaryBasalWithPumpId(
+                timestamp = event.timestampEpochMs,
+                endPumpId = event.timestampEpochMs,
+                pumpType = PumpType.ACCU_CHEK_COMBO,
+                pumpSerial = serialNumber()
+            )
+
+            PumpEvent.Type.UNKNOWN_TBR_DETECTED -> uiInteraction.addNotification(
+                Notification.COMBO_UNKNOWN_TBR,
+                text = rh.gs(R.string.combowatch_unknown_tbr_detected, event.tbrPercentage ?: 0, event.tbrDurationMinutes ?: 0),
+                level = Notification.URGENT
+            )
+
+            PumpEvent.Type.BATTERY_LOW          -> uiInteraction.addNotification(
+                Notification.COMBO_PUMP_ALARM, text = rh.gs(R.string.combowatch_battery_low), level = Notification.NORMAL
+            )
+
+            PumpEvent.Type.RESERVOIR_LOW        -> uiInteraction.addNotification(
+                Notification.COMBO_PUMP_ALARM, text = rh.gs(R.string.combowatch_reservoir_low), level = Notification.NORMAL
+            )
         }
-        return enact
     }
 
-    private fun refuse(comment: Int): PumpEnactResult = pumpEnactResultProvider.get().apply {
+    // ---- plumbing ----------------------------------------------------------------------------
+
+    private fun dispatch(
+        kind: CommandKind,
+        percentage: Int? = null,
+        durationMinutes: Int? = null,
+        tbrKind: TbrKind? = null,
+        force100Percent: Boolean? = null,
+        bolusTenthsIU: Int? = null,
+        bolusKind: BolusKind? = null,
+        validForMs: Long = COMMAND_VALID_MS
+    ): ComboResult = runBlocking {
+        link.execute(
+            kind = kind,
+            pumpSerial = pumpSerial,
+            leaseValidForMs = LEASE_VALID_MS,
+            validForMs = validForMs,
+            timeoutMs = COMMAND_TIMEOUT_MS,
+            percentage = percentage,
+            durationMinutes = durationMinutes,
+            tbrKind = tbrKind,
+            force100Percent = force100Percent,
+            bolusTenthsIU = bolusTenthsIU,
+            bolusKind = bolusKind
+        )
+    }
+
+    private fun refuse(): PumpEnactResult = pumpEnactResultProvider.get().apply {
         success = false
         enacted = false
-        this.comment = rh.gs(comment)
+        comment = rh.gs(R.string.combowatch_not_supported)
     }
 
     companion object {
 
         private const val UNKNOWN_SERIAL = "неизвестна"
 
-        // A lease outlives several renewals, so one lost message changes nothing, but a phone
+        // The lease outlives several renewals, so one lost message changes nothing, but a phone
         // that stops renewing stands the watch down within this long.
-        private const val LEASE_VALID_MS = 5 * 60_000L
-        private const val LEASE_RENEW_INTERVAL_MS = 60_000L
+        private const val LEASE_VALID_MS = 15 * 60_000L
+        private const val LEASE_RENEW_INTERVAL_MS = 5 * 60_000L
 
-        private const val HEARTBEAT_FRESH_MS = 5 * 60_000L
+        private const val WATCH_STALE_MS = 20 * 60_000L
 
-        // Measured on the bench: a session takes 45-70 s, and the watch's alarms were seen
-        // arriving up to 224 s late. A command older than this is dropped by the watch instead
-        // of applied, because a stop that lands that late is a dosing error, not a slow success.
+        // A command older than this is dropped by the watch instead of applied: a change that
+        // lands this late is a dosing error, not a slow success. A session on the watch takes
+        // about a minute, a staged TBR up to a few.
         private const val COMMAND_VALID_MS = 4 * 60_000L
-        private const val COMMAND_TIMEOUT_MS = 6 * 60_000L
+        private const val BOLUS_VALID_MS = 2 * 60_000L
+        private const val COMMAND_TIMEOUT_MS = 12 * 60_000L
     }
 }

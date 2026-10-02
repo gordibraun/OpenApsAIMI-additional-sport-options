@@ -2,8 +2,8 @@ package app.aaps.pump.combowatch
 
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
-import app.aaps.pump.combowatch.protocol.ComboResult
 import app.aaps.pump.combowatch.protocol.ComboWatchProtocol
+import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.WatchHeartbeat
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.WearableListenerService
@@ -12,7 +12,7 @@ import org.json.JSONObject
 import javax.inject.Inject
 
 /**
- * Receives the watch's answers and heartbeats.
+ * Receives the watch's answers, heartbeats and pump events.
  *
  * Declared with its own paths so it runs alongside the existing AAPS wear listener rather than
  * replacing it: the companion's own traffic keeps flowing through the service it always used.
@@ -29,8 +29,9 @@ class ComboWatchListenerService : WearableListenerService() {
 
     override fun onMessageReceived(messageEvent: MessageEvent) {
         when (messageEvent.path) {
-            ComboWatchProtocol.PATH_RESULT    -> parse(messageEvent) { link.onResult(ComboResult.fromJson(it)) }
+            ComboWatchProtocol.PATH_RESULT    -> parse(messageEvent) { link.onResultMessage(it) }
             ComboWatchProtocol.PATH_HEARTBEAT -> parse(messageEvent) { link.onHeartbeat(WatchHeartbeat.fromJson(it)) }
+            ComboWatchProtocol.PATH_EVENTS    -> parse(messageEvent) { link.onEvents(PumpEvent.listFromJson(it)) }
             else                              -> super.onMessageReceived(messageEvent)
         }
     }
