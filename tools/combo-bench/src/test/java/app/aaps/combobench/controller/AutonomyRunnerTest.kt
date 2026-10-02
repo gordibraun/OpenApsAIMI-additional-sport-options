@@ -287,6 +287,11 @@ class AutonomyRunnerTest {
         assertEquals("REHEARSAL", entry!!.getString("mode"))
         assertEquals("the phone is in charge", entry.getString("standing"))
         assertEquals("TBR 0 % 30 min", entry.getString("action"))
+        // The watch's forecast is there to be compared with the phone's.
+        assertEquals(49, entry.getJSONArray("watchForecast").length())
+        assertEquals(150, entry.getJSONArray("watchForecast").getInt(0))
+        assertEquals(50.0, entry.getJSONObject("snapshot").getDouble("sensitivity"), 0.0)
+        assertTrue(entry.getBoolean("basalProfileKnown"))
         assertTrue(sent.isEmpty())
         assertTrue(notes.isEmpty())
         assertTrue(store.journal().isEmpty())

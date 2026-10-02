@@ -98,7 +98,15 @@ class WatchRegulator {
         val trend: GlucoseTrend?,
         /** Lowest and last value of the forecast with profile basal, when a forecast could be made. */
         val forecastMinMgdl: Int?,
-        val forecastEndMgdl: Int?
+        val forecastEndMgdl: Int?,
+        /** That forecast itself, mg/dL every five minutes from now; for looking at, not for deciding. */
+        val forecastMgdl: List<Int>? = null,
+        /**
+         * The forecast with the temporary basal that runs now left to run to its end - the one to
+         * hold against the phone's own forecast, which counts the basal it has just set. Null when
+         * no temporary basal runs: then it is [forecastMgdl].
+         */
+        val forecastAsRunningMgdl: List<Int>? = null
     )
 
     private class Cap(val fraction: Double, val rule: Rule, val text: String)
@@ -260,7 +268,10 @@ class WatchRegulator {
                 ) set else Action.Leave
         }
 
-        return Decision(action, rule, wantedPercent, text, carbsHint, trend, forecastMin, forecastEnd)
+        val asRunning = if (running == null || forecast == null) null else runCatching {
+            forecast.series(basalNow * runningPercent / 100.0, ceil(remainingMinutes).toInt().coerceAtLeast(1))
+        }.getOrNull()
+        return Decision(action, rule, wantedPercent, text, carbsHint, trend, forecastMin, forecastEnd, atProfile, asRunning)
     }
 
     /** The phone's first-stage basal guard, run on the watch's own glucose. */

@@ -6,6 +6,7 @@ import app.aaps.pump.combowatch.protocol.ComboResult
 import app.aaps.pump.combowatch.protocol.ControlLease
 import app.aaps.pump.combowatch.protocol.Outcome
 import app.aaps.pump.combowatch.regulation.WatchRegulator
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Calendar
 import java.util.UUID
@@ -105,7 +106,25 @@ internal class AutonomyRunner(
             .put("forecastEnd", decision.forecastEndMgdl ?: JSONObject.NULL)
             .put("snapshotAgeMin", snapshot?.let { (now - it.madeAtEpochMs) / 60_000L } ?: JSONObject.NULL)
             .put("carbsHintG", decision.carbsHintG ?: JSONObject.NULL)
-        if (rehearsal) entry.put("standing", (standing as? AutonomyPolicy.Standing.NotAlone)?.reason ?: "alone")
+        if (rehearsal) {
+            entry.put("standing", (standing as? AutonomyPolicy.Standing.NotAlone)?.reason ?: "alone")
+            // Side by side, for checking the watch's forecast against the phone's own from the
+            // same snapshot. They differ where the phone counted its planned dose and basal.
+            entry.put("watchForecast", decision.forecastMgdl?.let { JSONArray(it) } ?: JSONObject.NULL)
+            entry.put("watchForecastAsRunning", decision.forecastAsRunningMgdl?.let { JSONArray(it) } ?: JSONObject.NULL)
+            entry.put("runningPercent", store.delivery().percentAt(now))
+            entry.put("phoneForecast", snapshot?.phoneForecast?.let { JSONArray(it) } ?: JSONObject.NULL)
+            entry.put("readings", store.readings().size)
+            entry.put("basalProfileKnown", pumpBasalUph().size == 24)
+            snapshot?.let {
+                entry.put(
+                    "snapshot",
+                    JSONObject().put("iob", it.iobU).put("cob", it.cobG).put("sensitivity", it.sensitivityMgdlPerU)
+                        .put("target", it.targetMgdl).put("hypoThreshold", it.hypoThresholdMgdl)
+                        .put("assumedTbrUph", it.assumedTbr?.rateUph ?: JSONObject.NULL)
+                )
+            }
+        }
 
         when (action) {
             WatchRegulator.Action.Leave     -> entry.put("action", "LEAVE")
