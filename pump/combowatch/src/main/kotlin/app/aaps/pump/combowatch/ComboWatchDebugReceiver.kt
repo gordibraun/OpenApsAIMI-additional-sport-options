@@ -12,6 +12,7 @@ import app.aaps.pump.combowatch.protocol.TbrKind
 import dagger.android.DaggerBroadcastReceiver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
@@ -25,6 +26,10 @@ import javax.inject.Inject
  * is written, and the active pump driver is not involved - so the chain can be exercised against
  * a test pump on the watch while the loop keeps driving the real pump directly. The watch's pump
  * events are left unacknowledged, i.e. they stay on the watch.
+ *
+ * It can only ever move the bench's off-body test pump: the lease it sends names that pump, and
+ * the watch changes delivery on no pump but the one the lease names. While the watch-backed
+ * driver is the active one it does nothing at all, because then AAPS itself is in charge.
  *
  * Only in debuggable builds, and only for a sender holding DUMP, which is the adb shell.
  *
@@ -47,11 +52,14 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
         val cmd = intent.getStringExtra("cmd") ?: return
         val tag = intent.getStringExtra("tag") ?: System.currentTimeMillis().toString()
         val out = File(context.filesDir, OUTPUT_FILE)
-        val pending = goAsync()
-        CoroutineScope(Dispatchers.Default).launch {
+        // The broadcast is not held open: a command takes about a minute, far beyond what a
+        // receiver may keep the system waiting, and this runs inside the app that drives the loop.
+        // The work continues in the app's own process, which its foreground service keeps alive.
+        scope.launch {
             val started = System.currentTimeMillis()
             val answer = JSONObject().put("tag", tag).put("cmd", cmd).put("startedAt", started)
             try {
+                check(link.eventHandler == null) { "the watch-backed driver is active; commands go through AAPS" }
                 if (cmd == "REVOKE") {
                     link.revokeLease(DEBUG_SERIAL)
                     answer.put("revoked", true)
@@ -85,12 +93,13 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
             answer.put("tookMs", System.currentTimeMillis() - started)
             runCatching { out.writeText(answer.toString()) }
             aapsLogger.debug(LTag.PUMP, "combowatch debug: $answer")
-            pending.finish()
         }
     }
 
     private companion object {
         const val OUTPUT_FILE = "combowatch-debug.json"
-        const val DEBUG_SERIAL = "debug"
+        /** The bench's test pump, the only one this receiver's lease ever names. */
+        const val DEBUG_SERIAL = "PUMP_10392647"
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
 }

@@ -80,7 +80,8 @@ internal class ControllerPumpStore(
         check(pairing.hasPumpState(pumpAddress))
         if (!files.exists(tbrFile)) return CurrentTbrState.NoTbrOngoing
         val saved = files.read(tbrFile)
-        check(saved.getString("address").equals(pumpAddress.toString(), ignoreCase = true)) { "TBR state belongs to another pump" }
+        // A record left by another pump says nothing about this one.
+        if (!saved.getString("address").equals(pumpAddress.toString(), ignoreCase = true)) return CurrentTbrState.NoTbrOngoing
         if (!saved.getBoolean("started")) return CurrentTbrState.NoTbrOngoing
         return CurrentTbrState.TbrStarted(
             Tbr(

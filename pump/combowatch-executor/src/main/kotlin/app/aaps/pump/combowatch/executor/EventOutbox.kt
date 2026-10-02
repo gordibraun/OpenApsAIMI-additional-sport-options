@@ -42,6 +42,19 @@ class EventOutbox(
     @Synchronized
     fun pending(): List<PumpEvent> = events.toList()
 
+    /**
+     * Drop the events [predicate] selects without the phone having seen them, and say how many.
+     * This is the opposite of what the outbox is for, so it has exactly one use: the records of
+     * a bench pump that was never connected to anybody, which must not reach treatment records.
+     */
+    @Synchronized
+    fun discard(predicate: (PumpEvent) -> Boolean): Int {
+        val before = events.size
+        events.removeAll(predicate)
+        if (events.size != before) persist(events.toList(), nextSeq)
+        return before - events.size
+    }
+
     /** The phone has processed everything up to and including [upToSeq]. */
     @Synchronized
     fun acknowledge(upToSeq: Long) {

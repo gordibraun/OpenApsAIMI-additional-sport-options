@@ -314,7 +314,14 @@ data class PumpEvent(
     val bolusKind: BolusKind? = null,
     val tbrPercentage: Int? = null,
     val tbrDurationMinutes: Int? = null,
-    val tbrType: String? = null
+    val tbrType: String? = null,
+    /**
+     * The pump this was observed on, exactly as the driver names it ("PUMP_" plus the serial).
+     * The phone files its treatment records under this, and AAPS discards a record whose serial
+     * is not the one it has registered - silently, as far as insulin on board is concerned. So
+     * the serial travels with the event instead of being guessed by the receiver.
+     */
+    val pumpSerial: String? = null
 ) {
 
     enum class Type {
@@ -340,6 +347,7 @@ data class PumpEvent(
             tbrPercentage?.let { put("tbrPercentage", it) }
             tbrDurationMinutes?.let { put("tbrDurationMinutes", it) }
             tbrType?.let { put("tbrType", it) }
+            pumpSerial?.let { put("pumpSerial", it) }
         }
 
     companion object {
@@ -353,7 +361,8 @@ data class PumpEvent(
             bolusKind = if (json.has("bolusKind")) BolusKind.valueOf(json.getString("bolusKind")) else null,
             tbrPercentage = json.optIntOrNull("tbrPercentage"),
             tbrDurationMinutes = json.optIntOrNull("tbrDurationMinutes"),
-            tbrType = if (json.has("tbrType")) json.getString("tbrType") else null
+            tbrType = if (json.has("tbrType")) json.getString("tbrType") else null,
+            pumpSerial = if (json.has("pumpSerial")) json.getString("pumpSerial") else null
         )
 
         fun listToJson(events: List<PumpEvent>): JSONObject =
@@ -378,7 +387,13 @@ data class WatchHeartbeat(
     val awaitingReconciliation: Boolean,
     val pumpReachable: Boolean,
     val watchBatteryPercent: Int?,
-    val snapshot: PumpSnapshot? = null
+    val snapshot: PumpSnapshot? = null,
+    /**
+     * The pump the watch is paired with right now, as the driver names it, or null when it holds
+     * none. Known without a pump session, so the phone learns of an unpairing or of a different
+     * pump at once and stops trusting a [snapshot] it was given for the previous one.
+     */
+    val heldPump: String? = null
 ) {
 
     fun toJson(): JSONObject = JSONObject()
@@ -392,6 +407,7 @@ data class WatchHeartbeat(
         .apply {
             watchBatteryPercent?.let { put("watchBattery", it) }
             snapshot?.let { put("snapshot", it.toJson()) }
+            heldPump?.let { put("heldPump", it) }
         }
 
     companion object {
@@ -404,7 +420,8 @@ data class WatchHeartbeat(
             awaitingReconciliation = json.getBoolean("awaitingReconciliation"),
             pumpReachable = json.getBoolean("pumpReachable"),
             watchBatteryPercent = json.optIntOrNull("watchBattery"),
-            snapshot = if (json.has("snapshot")) PumpSnapshot.fromJson(json.getJSONObject("snapshot")) else null
+            snapshot = if (json.has("snapshot")) PumpSnapshot.fromJson(json.getJSONObject("snapshot")) else null,
+            heldPump = if (json.has("heldPump")) json.getString("heldPump") else null
         )
     }
 }

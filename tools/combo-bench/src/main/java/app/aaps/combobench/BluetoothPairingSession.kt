@@ -44,7 +44,7 @@ internal class BluetoothPairingSession(
             if (closed.get()) return
             if (intent.action == BluetoothAdapter.ACTION_SCAN_MODE_CHANGED) {
                 if (intent.getIntExtra(BluetoothAdapter.EXTRA_SCAN_MODE, -1) == BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE)
-                    update("DISCOVERABLE", "Часы видны для поиска пульта на тестовой Combo")
+                    update("DISCOVERABLE", "Часы видны для поиска пульта на помпе")
                 return
             }
             val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
@@ -64,7 +64,7 @@ internal class BluetoothPairingSession(
             if (!PairingTarget.matches(resolvedAddress ?: return, device.address)) return
             when (intent.action) {
                 BluetoothDevice.ACTION_PAIRING_REQUEST -> {
-                    update("PAIRING_REQUEST", "Получен Bluetooth-запрос тестовой Combo")
+                    update("PAIRING_REQUEST", "Получен Bluetooth-запрос помпы")
                     // Same legacy PIN exchange as ComboCtl AndroidBluetoothInterface.
                     // This public protocol constant is not the pump's ten-digit application PIN.
                     runCatching { device.setPin("}gZ='GD?gj2r|B}>".toByteArray(Charsets.US_ASCII)) }
@@ -111,7 +111,7 @@ internal class BluetoothPairingSession(
                 if (!closed.get()) stop("FAILED", "Bluetooth-служба сопряжения закрылась")
             }
         }
-        if (wasDiscoverable) update("DISCOVERABLE", "Часы уже видны. На тестовой Combo запустите поиск нового пульта")
+        if (wasDiscoverable) update("DISCOVERABLE", "Часы уже видны. На помпе запустите поиск нового устройства")
         else update("WAITING_VISIBILITY", "Нужно разрешить видимость часов в системном окне")
     }
 
@@ -125,7 +125,7 @@ internal class BluetoothPairingSession(
             !DiscoverabilityResult.accepted(resultCode, BuildConfig.FLAVOR == "watch" || BuildConfig.MANUAL_TARGET, wasDiscoverable, isDiscoverable) ->
                 stop("CANCELLED", "Android не разрешил видимость часов или окно было отменено")
             isDiscoverable ->
-                update("DISCOVERABLE", "Часы видны. На тестовой Combo запустите поиск нового пульта")
+                update("DISCOVERABLE", "Часы видны. На помпе запустите поиск нового устройства")
             else -> update("WAITING_DISCOVERABLE", "Разрешение получено. Ждём включения видимости Bluetooth")
         }
     }

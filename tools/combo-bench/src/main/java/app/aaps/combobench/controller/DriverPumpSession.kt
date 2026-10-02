@@ -14,6 +14,7 @@ import app.aaps.combobench.BenchFiles
 import app.aaps.combobench.BenchPairingStore
 import app.aaps.combobench.BluetoothLinkObservation
 import app.aaps.combobench.BuildConfig
+import app.aaps.combobench.ManualPumpRuntime
 import app.aaps.combobench.ProbeBondGuard
 import app.aaps.combobench.ProbePreparation
 import app.aaps.combobench.TherapySessionPolicy
@@ -114,7 +115,9 @@ internal class DriverPumpSession(
         val pump: Pump,
         val store: ControllerPumpStore,
         val address: BluetoothAddress,
-        val statusAtConnect: Pump.Status
+        val statusAtConnect: Pump.Status,
+        /** The pump's own id, "PUMP_" plus its serial; what the phone files its records under. */
+        val pumpId: String
     )
 
     private sealed interface Attempt<out T> {
@@ -385,8 +388,10 @@ internal class DriverPumpSession(
 
     @SuppressLint("MissingPermission", "UnspecifiedRegisterReceiverFlag")
     private suspend fun <T> withPump(record: SessionRecord, block: suspend (Connected) -> T): Attempt<T> {
-        val pumpId = TherapySessionPolicy.PUMP
-        val address = TherapySessionPolicy.ADDRESS
+        val paired = ManualPumpRuntime.get(context).pairedPump()
+            ?: return Attempt.NotReached("no pump is paired with this watch")
+        val pumpId = paired.pump
+        val address = paired.address
         val adapter = context.getSystemService(BluetoothManager::class.java).adapter
         if ((adapter == null) || !adapter.isEnabled) return Attempt.NotReached("Bluetooth is off")
         val device = adapter.getRemoteDevice(address)
@@ -430,7 +435,7 @@ internal class DriverPumpSession(
             }
         }
 
-        val pump = Pump(transport, store, loadBasalProfile()) { event ->
+        val pump = Pump(transport, store, loadBasalProfile(pumpId)) { event ->
             record.phase("PUMP_EVENT_${event::class.simpleName}")
             forward(event, boluses)
         }
@@ -473,10 +478,10 @@ internal class DriverPumpSession(
                 record.phase("CONNECTING")
                 withTimeout(TherapySessionPolicy.CONNECT_TIMEOUT_MS) { pump.connect(maxNumAttempts = 3) }
                 val status = checkNotNull(pump.statusFlow.value) { "no pump status after connecting" }
-                pump.currentBasalProfile?.let { saveBasalProfile(it) }
+                pump.currentBasalProfile?.let { saveBasalProfile(pumpId, it) }
                 connected = true
                 record.phase("CONNECTED", statusJson(status))
-                val session = Connected(pump, store, btAddress, status)
+                val session = Connected(pump, store, btAddress, status, pumpId)
                 // What the pump showed, and what its history added, before this command touched it.
                 onPumpRead(snapshot(pump, session), boluses.toList())
                 val sampler = if (BuildConfig.DEBUG && files.exists(PROFILE_SWITCH_FILE)) StackSampler().also { it.start() } else null
@@ -499,7 +504,7 @@ internal class DriverPumpSession(
                 work.cancel()
                 driverLog.uninstall()
                 record.driverLog(driverLog.snapshot())
-                pump.currentBasalProfile?.let { saveBasalProfile(it) }
+                pump.currentBasalProfile?.let { saveBasalProfile(pumpId, it) }
                 try {
                     withTimeout(60_000L) { pump.disconnect() }
                     record.phase("DISCONNECTED")
@@ -594,7 +599,7 @@ internal class DriverPumpSession(
             tbrRemainingMinutes = if (running) (overrideTbrDuration ?: status.remainingTbrDurationInMinutes) else null,
             reservoirUnits = status.availableUnitsInReservoir,
             batteryState = status.batteryState.name,
-            pumpSerial = TherapySessionPolicy.PUMP,
+            pumpSerial = connected.pumpId,
             basalProfileFactors = pump.currentBasalProfile?.let { profile -> List(profile.size) { profile[it] } }
         )
     }
@@ -608,19 +613,20 @@ internal class DriverPumpSession(
         .put("tbrRemaining", status.remainingTbrDurationInMinutes)
         .put("battery", status.batteryState.name)
 
-    private fun loadBasalProfile(): BasalProfile? = try {
+    private fun loadBasalProfile(pumpId: String): BasalProfile? = try {
         if (!files.exists(BASAL_PROFILE_FILE)) null
         else files.read(BASAL_PROFILE_FILE).let { saved ->
-            check(saved.getString("pump") == TherapySessionPolicy.PUMP)
+            // A profile read off another pump is not this pump's; the driver then reads it afresh.
+            check(saved.getString("pump") == pumpId)
             val array = saved.getJSONArray("factors")
             BasalProfile((0 until array.length()).map { array.getInt(it) })
         }
     } catch (_: Exception) { null }
 
-    private fun saveBasalProfile(profile: BasalProfile) = runCatching {
+    private fun saveBasalProfile(pumpId: String, profile: BasalProfile) = runCatching {
         files.write(
             BASAL_PROFILE_FILE,
-            JSONObject().put("pump", TherapySessionPolicy.PUMP).put("savedAt", System.currentTimeMillis())
+            JSONObject().put("pump", pumpId).put("savedAt", System.currentTimeMillis())
                 .put("factors", JSONArray(List(profile.size) { profile[it] }))
         )
     }

@@ -183,7 +183,8 @@ class ControllerInboundReceiver : BroadcastReceiver() {
 /**
  * Drives the controller from adb, standing in for the phone, so that it can be tested against the
  * pump on its own. Guarded by the DUMP permission, which the shell holds and ordinary apps do not,
- * and compiled to do nothing outside debug builds.
+ * compiled to do nothing outside debug builds, and limited to the off-body test pump: with any
+ * other pump paired only STATE works, which touches nothing.
  *
  *   am broadcast -n <pkg>/app.aaps.combobench.controller.ControllerDebugReceiver --es cmd STATUS
  *   ... --es cmd TBR --ei percent 0 --ei minutes 30 [--es tbrKind EMULATED_STOP]
@@ -204,7 +205,13 @@ class ControllerDebugReceiver : BroadcastReceiver() {
             "STATE"  -> { ControllerService.start(context, ControllerService.PATH_STATE, null); return }
             else     -> return
         }
-        val lease = host.grantDebugLease(validForMs = 10 * 60_000L)
+        // Everything below stands in for the phone, which is allowed on the bench's test pump only.
+        val lease = try {
+            host.grantDebugLease(validForMs = 10 * 60_000L)
+        } catch (e: IllegalStateException) {
+            Log.w("ComboController", "debug command ignored: ${e.message}")
+            return
+        }
         val command = ComboCommand(
             id = intent.getStringExtra("id") ?: UUID.randomUUID().toString(),
             leaseGeneration = lease.generation,

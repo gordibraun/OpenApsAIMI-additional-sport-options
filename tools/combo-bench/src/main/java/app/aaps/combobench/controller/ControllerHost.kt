@@ -7,7 +7,7 @@ import android.os.BatteryManager
 import app.aaps.combobench.BenchFiles
 import app.aaps.combobench.BuildConfig
 import app.aaps.combobench.ManualPumpRuntime
-import app.aaps.combobench.TherapySessionPolicy
+import app.aaps.combobench.ManualPumpTarget
 import app.aaps.pump.combowatch.executor.ComboExecutor
 import app.aaps.pump.combowatch.executor.CommandGate
 import app.aaps.pump.combowatch.executor.CommandJournal
@@ -48,7 +48,8 @@ internal class ControllerHost private constructor(context: Context) {
 
     private val session = DriverPumpSession(
         context, files,
-        onEvent = { outbox.append(it) },
+        // Stamped here, where the pump is known for certain, rather than left for the phone to infer.
+        onEvent = { outbox.append(it.copy(pumpSerial = heldPump())) },
         onPumpRead = { snapshot, boluses ->
             lastSnapshot = snapshot
             pumpReachable = true
@@ -57,11 +58,90 @@ internal class ControllerHost private constructor(context: Context) {
     )
 
     private val executor: ComboExecutor = ComboExecutor(
-        CommandGate({ System.currentTimeMillis() }, { maxBolusTenthsIU() }),
+        CommandGate({ System.currentTimeMillis() }, { maxBolusTenthsIU() }, { heldPump() }),
         journal, session
     ) { System.currentTimeMillis() }
 
     val isBusy: Boolean get() = executor.isBusy
+
+    /** Held by whatever is using the pump or changing which pump is held; one at a time. */
+    private val pumpTurn = Any()
+
+    /** Run [block] while no command is using the pump, and keep commands out until it returns. */
+    fun <T> whilePumpIdle(block: () -> T): T = synchronized(pumpTurn) { block() }
+
+    /** The pump this watch is fully paired with, as the driver names it. */
+    private fun heldPump(): String? = ManualPumpRuntime.get(context).pairedPump()?.pump
+
+    /**
+     * What the owner should know before the pump is unpaired, in the words shown on the watch.
+     * None of it prevents the unpairing: a pump that is broken or gone has to be replaceable.
+     */
+    fun unpairWarnings(testPump: Boolean): List<String> {
+        val warnings = mutableListOf<String>()
+        val now = System.currentTimeMillis()
+        journal.unresolved()?.let { entry ->
+            val what = when (entry.kind) {
+                CommandKind.DELIVER_BOLUS -> "болюс ${(entry.bolusTenthsIU ?: 0) / 10.0} ЕД"
+                CommandKind.SET_TBR       -> "TBR ${entry.tbrPercentage ?: "?"} %"
+                CommandKind.CANCEL_TBR    -> "отмена TBR"
+                else                      -> "команда"
+            }
+            warnings += "Исход последней команды ($what) не выяснен. После отвязки узнать его можно будет только по самой помпе"
+        }
+        val pending = outbox.pending()
+        if (pending.isNotEmpty() && testPump)
+            warnings += "Записи тестовой помпы (${pending.size}) телефону не передаются и будут удалены"
+        else if (pending.isNotEmpty()) {
+            val boluses = pending.count { it.type == PumpEvent.Type.BOLUS_INFUSED }
+            warnings += "Телефон ещё не получил записей с этой помпы: ${pending.size}" +
+                (if (boluses > 0) ", из них болюсов: $boluses" else "") + ". Они будут переданы, когда телефон окажется на связи"
+        }
+        if (lease?.liveAt(now) == true) warnings += "Телефон сейчас управляет помпой через часы; после отвязки его команды выполняться не будут"
+        savedSnapshot()?.let { snapshot ->
+            val remaining = (snapshot.tbrRemainingMinutes ?: 0) - ((now - snapshot.readAtEpochMs) / 60_000L).toInt()
+            if (snapshot.tbrRunning && remaining > 0)
+                warnings += "На помпе, по последним данным, идёт TBR ${snapshot.tbrPercentage} % ещё около $remaining мин; он продолжится"
+        }
+        return warnings
+    }
+
+    /** The last reading of the held pump, from memory or, after a restart, from the last heartbeat. */
+    private fun savedSnapshot(): PumpSnapshot? = lastSnapshot ?: runCatching {
+        if (!files.exists(HEARTBEAT_FILE)) null
+        else WatchHeartbeat.fromJson(files.read(HEARTBEAT_FILE)).snapshot?.takeIf { it.pumpSerial == heldPump() }
+    }.getOrNull()
+
+    /**
+     * Called when the pump is unpaired, after the pairing itself is gone.
+     *
+     * What is known about that pump is dropped, and commands whose outcome was never established
+     * are given up: the next pump's screen and history are no evidence about them, so they must
+     * not be settled from it. Everything else is kept on purpose. The journal still answers a
+     * late copy of an old command instead of running it; the lease is the phone's statement and
+     * names the pump it was granted for, so it authorises nothing on another pump; and the
+     * events not yet acknowledged still go to the phone, each naming the pump it was seen on -
+     * they are how the phone accounts for insulin that pump delivered.
+     *
+     * @return the commands whose outcome was given up, for telling the owner.
+     */
+    fun forgetPump(wasTestPump: Boolean): List<CommandJournal.Entry> {
+        val givenUp = journal.abandonUnresolved("pump unpaired before the outcome was established")
+        // The bench's test pump is not connected to anybody, so what it "delivered" must never be
+        // counted as insulin. Its events are the only ones ever dropped unsent - along with those
+        // from before events named their pump, when the test pump was the only pump there was.
+        if (wasTestPump) outbox.discard { it.pumpSerial == null || it.pumpSerial == "PUMP_${ManualPumpTarget.TEST_SERIAL}" }
+        lastSnapshot = null
+        pumpReachable = false
+        for (name in listOf(HEARTBEAT_FILE, RESULT_FILE)) {
+            java.io.File(context.filesDir, name).delete()
+            java.io.File(context.filesDir, "$name.bak").delete()
+        }
+        // Tells the phone at once that this watch holds no pump any more.
+        sendEvents()
+        sendHeartbeat()
+        return givenUp
+    }
 
     // ---- inbound, called on the controller's worker thread ---------------------------------------
 
@@ -76,10 +156,10 @@ internal class ControllerHost private constructor(context: Context) {
         sendHeartbeat()
     }
 
-    fun onCommand(payload: String): ComboResult {
+    fun onCommand(payload: String): ComboResult = synchronized(pumpTurn) {
         val command = ComboCommand.fromJson(JSONObject(payload))
         // The bench's own manual sessions use the same pump and pairing; never overlap with them.
-        if (ManualPumpRuntime.get(context).let { it.otherWorkActive() || it.therapy.isActive() })
+        if (ManualPumpRuntime.get(context).usingBluetoothNow())
             return ComboResult(command.id, Outcome.REFUSED, System.currentTimeMillis(), reason = "the bench is using the pump")
                 .also { publish(it) }
 
@@ -88,7 +168,7 @@ internal class ControllerHost private constructor(context: Context) {
         result.snapshot?.let { lastSnapshot = it }
         files.write(RESULT_FILE, result.toJson())
         publish(result)
-        return result
+        result
     }
 
     fun onEventsAck(payload: String) {
@@ -96,12 +176,12 @@ internal class ControllerHost private constructor(context: Context) {
     }
 
     /** Settle an unclear ending by reading the pump; see [ComboExecutor.reconcileNow]. */
-    fun healIfNeeded(): Boolean {
+    fun healIfNeeded(): Boolean = synchronized(pumpTurn) {
         if (!executor.awaitingReconciliation) return true
         val healed = executor.reconcileNow()
         sendEvents()
         sendHeartbeat()
-        return healed
+        healed
     }
 
     val awaitingReconciliation: Boolean get() = executor.awaitingReconciliation
@@ -126,6 +206,7 @@ internal class ControllerHost private constructor(context: Context) {
     fun sendHeartbeat() {
         val now = System.currentTimeMillis()
         val current = lease
+        val held = heldPump()
         val heartbeat = WatchHeartbeat(
             atEpochMs = now,
             leaseGeneration = current?.generation ?: 0L,
@@ -135,7 +216,9 @@ internal class ControllerHost private constructor(context: Context) {
             pumpReachable = pumpReachable,
             watchBatteryPercent = context.getSystemService(BatteryManager::class.java)
                 ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)?.takeIf { it in 0..100 },
-            snapshot = lastSnapshot
+            // Only ever a reading of the pump held now, never one left over from another.
+            snapshot = lastSnapshot?.takeIf { it.pumpSerial == held },
+            heldPump = held
         )
         files.write(HEARTBEAT_FILE, heartbeat.toJson())
         toPhone(ComboWatchProtocol.PATH_HEARTBEAT, heartbeat.toJson())
@@ -163,11 +246,14 @@ internal class ControllerHost private constructor(context: Context) {
      */
     fun grantDebugLease(validForMs: Long): ControlLease {
         check(BuildConfig.DEBUG) { "debug lease is only available in debug builds" }
+        // Standing in for the phone is a bench technique. A pump that may be in use takes its
+        // orders from the phone alone, and the phone's lease is not to be overwritten from adb.
+        check(ManualPumpRuntime.get(context).pairedPump()?.isTestPump == true) { "debug lease is only for the off-body test pump" }
         val now = System.currentTimeMillis()
         val granted = ControlLease(
             generation = maxOf(lease?.generation ?: 0L, DEBUG_GENERATION),
             issuedAtEpochMs = now, expiresAtEpochMs = now + validForMs,
-            pumpSerial = TherapySessionPolicy.PUMP, controllerIsWatch = true
+            pumpSerial = heldPump() ?: "none", controllerIsWatch = true
         )
         lease = granted
         files.write(LEASE_FILE, granted.toJson())
@@ -179,6 +265,7 @@ internal class ControllerHost private constructor(context: Context) {
         .put("awaitingReconciliation", executor.awaitingReconciliation)
         .put("lease", lease?.toJson() ?: JSONObject.NULL)
         .put("leaseLive", lease?.liveAt(System.currentTimeMillis()) == true)
+        .put("heldPump", heldPump() ?: JSONObject.NULL)
         .put("pendingEvents", outbox.pending().size)
         .put("droppedEvents", outbox.droppedCount)
         .put("journal", JSONArray().apply { journal.entries().takeLast(12).forEach { put(entryJson(it)) } })
@@ -198,6 +285,7 @@ internal class ControllerHost private constructor(context: Context) {
         .put("kind", entry.kind?.name ?: JSONObject.NULL)
         .put("bolusTenthsIU", entry.bolusTenthsIU ?: JSONObject.NULL)
         .put("tbrPercentage", entry.tbrPercentage ?: JSONObject.NULL)
+        .put("abandoned", entry.abandoned)
 
     private fun saveJournal(entries: List<CommandJournal.Entry>) {
         files.write(JOURNAL_FILE, JSONObject().put("entries", JSONArray().apply { entries.forEach { put(entryJson(it)) } }))
@@ -217,7 +305,8 @@ internal class ControllerHost private constructor(context: Context) {
                 reason = if (json.isNull("reason")) null else json.getString("reason"),
                 kind = if (json.isNull("kind")) null else CommandKind.valueOf(json.getString("kind")),
                 bolusTenthsIU = if (json.isNull("bolusTenthsIU")) null else json.getInt("bolusTenthsIU"),
-                tbrPercentage = if (json.isNull("tbrPercentage")) null else json.getInt("tbrPercentage")
+                tbrPercentage = if (json.isNull("tbrPercentage")) null else json.getInt("tbrPercentage"),
+                abandoned = json.optBoolean("abandoned", false)
             )
         }
     }

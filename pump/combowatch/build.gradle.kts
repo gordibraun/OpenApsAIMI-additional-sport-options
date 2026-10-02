@@ -27,6 +27,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.play.services)
 
+    testImplementation(project(":shared:tests"))
+
     kapt(libs.com.google.dagger.compiler)
     kapt(libs.com.google.dagger.android.processor)
 }

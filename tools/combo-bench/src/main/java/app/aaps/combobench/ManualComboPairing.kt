@@ -47,6 +47,28 @@ internal class ManualComboPairing(private val context: Context) {
         record("REPAIR_PREPARED", "Старая привязка стенда сохранена в зашифрованном архиве на часах. Можно начать новое сопряжение")
     }
     fun recordStartFailure(errorType: String) = record("START_REJECTED", "Запуск отклонён: $errorType", true)
+
+    /**
+     * Close the record of the last pairing after its pump was unpaired, so that the next pairing
+     * starts from nothing. The record moves to the history, like every earlier session.
+     */
+    @Synchronized fun forget() {
+        check(job?.isActive != true && !state.optBoolean("active")) { "Pairing is active" }
+        // The history is a convenience; failing to write it must not leave the pump half unpaired.
+        runCatching { archiveState() }
+        state = JSONObject()
+        android.util.AtomicFile(java.io.File(context.filesDir, "manual-pairing.json")).delete()
+    }
+
+    private fun archiveState() {
+        if (!state.has("id")) return
+        val history = if (files.exists("manual-pairing-history.json"))
+            files.read("manual-pairing-history.json").getJSONArray("sessions") else JSONArray()
+        val retained = JSONArray()
+        for (i in maxOf(0, history.length() - 7) until history.length()) retained.put(history.getJSONObject(i))
+        retained.put(state)
+        files.write("manual-pairing-history.json", JSONObject().put("sessions", retained))
+    }
     @Synchronized fun visibilityResult(id: String, resultCode: Int?) {
         if (state.optString("id") == id && state.optBoolean("active")) bluetoothSession?.visibilityResult(resultCode)
     }
@@ -95,19 +117,15 @@ internal class ManualComboPairing(private val context: Context) {
             !java.io.File(context.noBackupFilesDir, "combo-pairing.enc.bak").exists()) {
             "Сопряжение стенда уже сохранено; оно не будет перезаписано"
         }
-        if (state.has("id")) {
-            val history = if (files.exists("manual-pairing-history.json"))
-                files.read("manual-pairing-history.json").getJSONArray("sessions") else JSONArray()
-            val retained = JSONArray()
-            for (i in maxOf(0, history.length() - 7) until history.length()) retained.put(history.getJSONObject(i))
-            retained.put(state)
-            files.write("manual-pairing-history.json", JSONObject().put("sessions", retained))
-        }
+        archiveState()
         state = JSONObject().put("id", UUID.randomUUID().toString()).put("startedAt", System.currentTimeMillis())
             .put("active", true).put("pump", pump).put("address", addressText)
-            .put("confirmation", if (BuildConfig.MANUAL_TARGET) "user-confirmed-off-body-and-no-other-controller"
-                else "user-confirmed-off-body-and-AAPS-disabled").put("dosingAvailable", false)
-        record("STARTING", "Подготовка сопряжения тестовой Combo ${pump.removePrefix("PUMP_")}")
+            .put("confirmation", when {
+                !BuildConfig.MANUAL_TARGET        -> "user-confirmed-off-body-and-AAPS-disabled"
+                manualTarget?.isTestPump == false -> "user-confirmed-no-other-controller"
+                else                              -> "user-confirmed-off-body-and-no-other-controller"
+            }).put("dosingAvailable", false)
+        record("STARTING", "Подготовка сопряжения Combo ${pump.removePrefix("PUMP_")}")
         try { context.startForegroundService(Intent(context, PairingForegroundService::class.java)) }
         catch (e: Exception) {
             state.put("active", false)
@@ -125,13 +143,18 @@ internal class ManualComboPairing(private val context: Context) {
                 withTimeout(8 * 60_000L) {
                     val adapter = checkNotNull(context.getSystemService(BluetoothManager::class.java).adapter)
                     check(adapter.isEnabled) { "Bluetooth disabled" }
-                    if (addressText != null) {
-                        val target = adapter.getRemoteDevice(addressText)
-                        if (target.bondState != SystemDevice.BOND_NONE) {
-                            check(!BuildConfig.MANUAL_TARGET) { "У устройства уже есть Bluetooth-привязка. Она не будет удалена автоматически" }
-                            record("RESETTING_BOND", "Удаляем прежнюю Bluetooth-привязку этой тестовой помпы на часах")
-                            check(target.javaClass.getMethod("removeBond").invoke(target) == true)
-                            withTimeout(10_000) { while (target.bondState != SystemDevice.BOND_NONE) delay(100) }
+                    if (manualTarget != null) {
+                        // The watch holds no Combo keys at this point (checked before starting),
+                        // so a Bluetooth bond with any Combo is a leftover of an earlier pairing.
+                        // Android turns away a pairing request from a device it believes it is
+                        // bonded with, and the pump only accepts a fresh pairing - so with such
+                        // a bond in place the pairing would wait until it times out. The pump is
+                        // not known by address yet, hence every Combo bond is cleared.
+                        val leftovers = adapter.bondedDevices.orEmpty().filter { manualTarget.isCombo(it.address) }
+                        for (leftover in leftovers) {
+                            record("RESETTING_BOND", "Удаляем прежнюю Bluetooth-привязку Combo на часах")
+                            check(leftover.javaClass.getMethod("removeBond").invoke(leftover) == true) { "Прежняя Bluetooth-привязка не снята" }
+                            withTimeout(10_000) { while (leftover.bondState != SystemDevice.BOND_NONE) delay(100) }
                         }
                     }
                     val bonded = CompletableDeferred<Unit>()
@@ -217,7 +240,8 @@ internal class ManualComboPairing(private val context: Context) {
                         completed = true
                     } finally { collector.cancelAndJoin() }
                 }
-                record("PAIRED", "Сопряжение Combo завершено. Команды подачи в стенде недоступны")
+                record("PAIRED", if (manualTarget?.isTestPump == false) "Сопряжение Combo завершено. Помпой управляет телефон через AAPS"
+                    else "Сопряжение Combo завершено. Команды подачи в стенде недоступны")
             } catch (_: TimeoutCancellationException) {
                 record("TIMEOUT", "Время ожидания истекло. Отмените сопряжение на помпе; подробности этапов сохранены в журнале")
             } catch (_: CancellationException) {

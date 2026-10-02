@@ -11,6 +11,7 @@ import app.aaps.pump.combowatch.protocol.CommandKind
 import app.aaps.pump.combowatch.protocol.ControlLease
 import app.aaps.pump.combowatch.protocol.Outcome
 import app.aaps.pump.combowatch.protocol.PumpEvent
+import app.aaps.pump.combowatch.protocol.PumpSnapshot
 import app.aaps.pump.combowatch.protocol.TbrKind
 import app.aaps.pump.combowatch.protocol.WatchHeartbeat
 import com.google.android.gms.wearable.Wearable
@@ -45,6 +46,24 @@ class ComboWatchLink @Inject constructor(
 
     @Volatile
     var lastHeartbeat: WatchHeartbeat? = null
+        private set
+
+    /**
+     * The newest reading the watch sent of the pump it holds now, whether in an answer or in a
+     * heartbeat. Dropped as soon as the watch reports holding a different pump, or none.
+     */
+    @Volatile
+    var lastSnapshot: PumpSnapshot? = null
+        private set
+
+    /** The pump the watch last said it holds, as the driver names it; null when it holds none. */
+    @Volatile
+    var watchPump: String? = null
+        private set
+
+    /** False until the watch has said anything about which pump it holds. */
+    @Volatile
+    var watchPumpKnown: Boolean = false
         private set
 
     /** When the watch last said anything at all, which is what "pump reachable" is judged by. */
@@ -120,8 +139,9 @@ class ComboWatchLink @Inject constructor(
         bolusTenthsIU: Int? = null,
         bolusKind: BolusKind? = null
     ): ComboResult {
-        // A command is refused without a live lease, so make sure the watch holds a current one.
-        if (System.currentTimeMillis() - lastLeaseSentEpochMs > LEASE_REFRESH_BEFORE_COMMAND_MS)
+        // A command is refused without a live lease naming the pump it is meant for, so make
+        // sure the watch holds a current one.
+        if ((lease?.pumpSerial != pumpSerial) || (System.currentTimeMillis() - lastLeaseSentEpochMs > LEASE_REFRESH_BEFORE_COMMAND_MS))
             renewLease(pumpSerial, leaseValidForMs)
 
         val now = System.currentTimeMillis()
@@ -156,9 +176,14 @@ class ComboWatchLink @Inject constructor(
 
     fun onResultMessage(json: JSONObject) {
         lastContactEpochMs = System.currentTimeMillis()
+        val result = ComboResult.fromJson(json)
+        // First which pump this is about: the events below are filed by the pump they name.
+        result.snapshot?.let { snapshot ->
+            lastSnapshot = snapshot
+            snapshot.pumpSerial?.let { watchPump = it; watchPumpKnown = true }
+        }
         // What the pump did is recorded before the command that caused it returns.
         if (json.has("events")) onEvents(PumpEvent.listFromJson(json))
-        val result = ComboResult.fromJson(json)
         aapsLogger.debug(LTag.PUMP, "combowatch: result ${result.id} ${result.outcome} ${result.reason ?: ""}")
         pending.remove(result.id)?.complete(result)
     }
@@ -166,6 +191,11 @@ class ComboWatchLink @Inject constructor(
     fun onHeartbeat(heartbeat: WatchHeartbeat) {
         lastContactEpochMs = System.currentTimeMillis()
         lastHeartbeat = heartbeat
+        watchPump = heartbeat.heldPump
+        watchPumpKnown = true
+        heartbeat.snapshot?.let { lastSnapshot = it }
+        // A reading of a pump the watch no longer holds says nothing about the one it holds now.
+        if (lastSnapshot?.pumpSerial != heartbeat.heldPump) lastSnapshot = null
     }
 
     fun onEvents(events: List<PumpEvent>) {

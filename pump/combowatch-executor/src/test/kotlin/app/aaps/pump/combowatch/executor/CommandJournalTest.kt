@@ -56,6 +56,51 @@ class CommandJournalTest {
         assertEquals("a", restored.unresolved()?.id)
     }
 
+    @Test fun `giving a pump up releases the hold without claiming to know what happened`() {
+        val saved = mutableListOf<List<CommandJournal.Entry>>()
+        val journal = SimpleCommandJournal(persist = { saved.add(it) })
+        journal.markStarted("unknown", 1L)
+        journal.markFinished("unknown", Outcome.UNKNOWN, "link lost")
+        journal.markStarted("crashed", 2L)
+        journal.markStarted("done", 3L)
+        journal.markFinished("done", Outcome.DONE, null)
+        saved.clear()
+
+        val given = journal.abandonUnresolved("pump unpaired")
+        assertEquals(listOf("unknown", "crashed"), given.map { it.id })
+        assertFalse(journal.hasUnresolved())
+
+        // The answer to a resend stays "unknown": nothing was learned about either of them.
+        assertEquals(Outcome.UNKNOWN, journal.recordedOutcome("unknown")?.outcome)
+        assertEquals("link lost; pump unpaired", journal.recordedOutcome("unknown")?.reason)
+        assertEquals(Outcome.UNKNOWN, journal.recordedOutcome("crashed")?.outcome)
+        assertEquals("pump unpaired", journal.recordedOutcome("crashed")?.reason)
+        // The one that had finished is untouched.
+        assertEquals(Outcome.DONE, journal.recordedOutcome("done")?.outcome)
+        assertFalse(journal.entry("done")!!.abandoned)
+
+        assertEquals(1, saved.size)
+        assertTrue(saved.last().first { it.id == "unknown" }.abandoned)
+    }
+
+    @Test fun `giving up with nothing unresolved changes nothing`() {
+        val saved = mutableListOf<List<CommandJournal.Entry>>()
+        val journal = SimpleCommandJournal(persist = { saved.add(it) })
+        journal.markStarted("done", 1L)
+        journal.markFinished("done", Outcome.DONE, null)
+        saved.clear()
+        assertTrue(journal.abandonUnresolved("pump unpaired").isEmpty())
+        assertTrue(saved.isEmpty())
+    }
+
+    @Test fun `an abandoned entry restored from storage does not hold therapy back again`() {
+        val restored = SimpleCommandJournal(
+            initial = listOf(CommandJournal.Entry("a", 1L, outcome = Outcome.UNKNOWN, reason = "pump unpaired", abandoned = true))
+        )
+        assertFalse(restored.hasUnresolved())
+        assertNull(restored.unresolved())
+    }
+
     @Test fun `trimming drops finished entries and never the unresolved one`() {
         val journal = SimpleCommandJournal(maxEntries = 3)
         journal.markStarted("old", 1L)

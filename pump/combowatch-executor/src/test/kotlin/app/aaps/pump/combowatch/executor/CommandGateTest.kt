@@ -1,5 +1,6 @@
 package app.aaps.pump.combowatch.executor
 
+import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.ComboCommand
 import app.aaps.pump.combowatch.protocol.CommandKind
 import app.aaps.pump.combowatch.protocol.ControlLease
@@ -115,6 +116,48 @@ class CommandGateTest {
         assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = command(duration = 0)))
         assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = command(percentage = null)))
         assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = command(duration = null)))
+    }
+
+    // ---- the lease has to name the pump this watch holds ---------------------------------------
+
+    private fun holding(pump: String?) = CommandGate({ now }, heldPump = { pump })
+
+    private fun admitHolding(pump: String?, command: ComboCommand = command(), leasedPump: String = "PUMP_10392647") =
+        holding(pump).admit(
+            command, ControlLease(7L, now - 1_000, now + 60_000, leasedPump, true), SimpleCommandJournal(), false, false
+        )
+
+    @Test fun `a command for the pump this watch holds runs`() {
+        assertInstanceOf(CommandGate.Admission.Run::class.java, admitHolding("PUMP_10392647"))
+    }
+
+    @Test fun `a command decided for another pump never reaches the one this watch holds`() {
+        val refused = assertInstanceOf(CommandGate.Admission.Refused::class.java, admitHolding("PUMP_41056642"))
+        assertTrue(refused.reason.contains("PUMP_10392647") && refused.reason.contains("PUMP_41056642"))
+        // The same for every kind that changes delivery.
+        assertInstanceOf(
+            CommandGate.Admission.Refused::class.java,
+            admitHolding("PUMP_41056642", command(kind = CommandKind.CANCEL_TBR, percentage = null, duration = null))
+        )
+        assertInstanceOf(
+            CommandGate.Admission.Refused::class.java,
+            admitHolding(
+                "PUMP_41056642",
+                ComboCommand("b1", 7L, CommandKind.DELIVER_BOLUS, now, now + 30_000, bolusTenthsIU = 1, bolusKind = BolusKind.SMB)
+            )
+        )
+    }
+
+    @Test fun `with no pump paired nothing that changes delivery is attempted`() {
+        val refused = assertInstanceOf(CommandGate.Admission.Refused::class.java, admitHolding(null))
+        assertTrue(refused.reason.contains("no pump"))
+    }
+
+    @Test fun `reading the pump needs no match, that is how the phone learns which pump is held`() {
+        assertInstanceOf(
+            CommandGate.Admission.Run::class.java,
+            admitHolding("PUMP_41056642", command(kind = CommandKind.STATUS))
+        )
     }
 
     @Test fun `cancelling a temporary basal needs no quantities`() {

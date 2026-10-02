@@ -56,6 +56,7 @@ class ManualPairingActivity : Activity() {
     private lateinit var send: Button
     private lateinit var pinGroup: LinearLayout
     private lateinit var scroll: ScrollView
+    private var testPump = true
     private var visibilityId = ""
     private var visiblePinRequest = ""
     private var requestingStart = false
@@ -72,16 +73,29 @@ class ManualPairingActivity : Activity() {
         val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(padding, padding, padding, padding) }
         fun label(text: String, size: Float) = TextView(this).apply { this.text = text; textSize = size; column.addView(this) }
         label("Сопряжение Combo", 18f)
-        label("${if (BuildConfig.MANUAL_TARGET) manualRuntime.target()?.serial ?: "не выбрана" else "41056642"} · тестовая помпа", 14f)
-        label(if (BuildConfig.MANUAL_TARGET) "Терапии нет; только остановка подачи на тестовой помпе" else "Подача инсулина недоступна", 12f)
-            .setTextColor(Color.rgb(255, 195, 50))
+        val target = if (BuildConfig.MANUAL_TARGET) runCatching { manualRuntime.target() }.getOrNull() else null
+        // Everything the bench does by itself - probes, the manual stop and resume - is for the
+        // off-body test pump. Any other pump is only paired here and then driven by the phone.
+        testPump = !BuildConfig.MANUAL_TARGET || target?.isTestPump == true
+        label(when {
+            !BuildConfig.MANUAL_TARGET -> "41056642 · тестовая помпа"
+            target == null             -> "помпа не выбрана"
+            testPump                   -> "${target.serial} · тестовая помпа"
+            else                       -> target.serial
+        }, 14f)
+        label(when {
+            !BuildConfig.MANUAL_TARGET -> "Подача инсулина недоступна"
+            testPump                   -> "Терапии нет; только остановка подачи на тестовой помпе"
+            else                       -> "Команды помпе отдаёт только телефон (AAPS)"
+        }, 12f).setTextColor(Color.rgb(255, 195, 50))
         stateText = label("Готов к сопряжению", 14f).apply { setPadding(0, 12, 0, 12) }
         progress = ProgressBar(this).apply { isIndeterminate = true; visibility = View.GONE }
         column.addView(progress, LinearLayout.LayoutParams(-1, 30))
         offBody = CheckBox(this).apply { text = "Помпа вне тела и не используется для лечения"; textSize = 12f }
         phoneDisabled = CheckBox(this).apply {
-            if (BuildConfig.MANUAL_TARGET) text = "Другой контроллер не подключается к этой тестовой помпе"
-            else setText(R.string.manual_pairing_phone_confirmation)
+            if (!BuildConfig.MANUAL_TARGET) setText(R.string.manual_pairing_phone_confirmation)
+            else text = if (testPump) "Другой контроллер не подключается к этой тестовой помпе"
+            else "Телефон и другие устройства к этой помпе сейчас не подключаются"
             textSize = 12f
         }
         column.addView(offBody)
@@ -198,7 +212,8 @@ class ManualPairingActivity : Activity() {
         val state = pairing.snapshot()
         val active = state.optBoolean("active")
         val therapyActive = BuildConfig.MANUAL_TARGET && manualRuntime.therapy.isActive()
-        val controlBlocked = BuildConfig.MANUAL_TARGET && (manualRuntime.control.isBlocked() || manualRuntime.background.isActive() || therapyActive)
+        val controlBlocked = BuildConfig.MANUAL_TARGET &&
+            ((if (testPump) manualRuntime.control.isBlocked() else manualRuntime.control.isActive()) || manualRuntime.background.isActive() || therapyActive)
         val controlActive = BuildConfig.MANUAL_TARGET && manualRuntime.control.isActive()
         val stage = state.optString("stage")
         val error = if (BuildConfig.MANUAL_TARGET) manualRuntime.error else runtime.snapshot().optString("error")
@@ -213,13 +228,14 @@ class ManualPairingActivity : Activity() {
             else -> Color.WHITE
         })
         progress.visibility = if ((active && stage != "PIN_REQUIRED") || controlActive || therapyActive) View.VISIBLE else View.GONE
-        offBody.visibility = if (active || stage == "PAIRED") View.GONE else View.VISIBLE
-        phoneDisabled.visibility = offBody.visibility
+        phoneDisabled.visibility = if (active || stage == "PAIRED") View.GONE else View.VISIBLE
+        // "Off body" is a condition of the bench's test pump only; a pump in use is, of course, worn.
+        offBody.visibility = if (testPump) phoneDisabled.visibility else View.GONE
         start.visibility = if (active || stage == "PAIRED") View.GONE else View.VISIBLE
-        start.isEnabled = offBody.isChecked && phoneDisabled.isChecked && !requestingStart && (stage != "INTERRUPTED" || retryPreparation) &&
-            state.optBoolean("cleanupKnown", true) && !controlBlocked
+        start.isEnabled = (offBody.isChecked || !testPump) && phoneDisabled.isChecked && !requestingStart &&
+            (stage != "INTERRUPTED" || retryPreparation) && state.optBoolean("cleanupKnown", true) && !controlBlocked
         cancel.visibility = if (active) View.VISIBLE else View.GONE
-        reconnectButton.visibility = if (BuildConfig.MANUAL_TARGET && stage == "PAIRED") View.VISIBLE else View.GONE
+        reconnectButton.visibility = if (BuildConfig.MANUAL_TARGET && testPump && stage == "PAIRED") View.VISIBLE else View.GONE
         reconnectText.visibility = reconnectButton.visibility
         secureSocket.visibility = reconnectButton.visibility
         secureSocket.isEnabled = !active && !controlBlocked && (!BuildConfig.MANUAL_TARGET || !manualRuntime.reconnect.isActive())
@@ -239,7 +255,7 @@ class ManualPairingActivity : Activity() {
         stop45Button.visibility = reconnectButton.visibility
         resumeButton.visibility = reconnectButton.visibility
         therapyText.visibility = reconnectButton.visibility
-        if (BuildConfig.MANUAL_TARGET) {
+        if (BuildConfig.MANUAL_TARGET && testPump) {
             val probe = manualRuntime.reconnect.snapshot()
             val cleanupCheck = manualRuntime.reconnect.canCheckDisconnect()
             reconnectButton.text = if (cleanupCheck) "Проверить разрыв" else "Проверить связь"

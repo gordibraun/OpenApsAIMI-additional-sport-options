@@ -25,7 +25,13 @@ interface CommandJournal {
          */
         val kind: CommandKind? = null,
         val bolusTenthsIU: Int? = null,
-        val tbrPercentage: Int? = null
+        val tbrPercentage: Int? = null,
+        /**
+         * Set when the pump this command ran on was given up before its outcome was established;
+         * see [abandonUnresolved]. The answer stays [Outcome.UNKNOWN], because nothing was
+         * learned, but the entry no longer waits for a read-back that can never come.
+         */
+        val abandoned: Boolean = false
     )
 
     /** Null when this id was never started. */
@@ -60,6 +66,15 @@ interface CommandJournal {
      */
     fun unresolved(excludingId: String? = null): Entry?
 
+    /**
+     * Stop waiting for the outcome of every unresolved command, because the pump they ran on is
+     * no longer the one this watch holds. Whatever is read off the next pump is no evidence about
+     * them, so they must not be reconciled against it; they are recorded as never established.
+     *
+     * @return the entries that were given up, as they now stand.
+     */
+    fun abandonUnresolved(reason: String): List<Entry>
+
     /** Every entry, oldest first, for persistence and inspection. */
     fun entries(): List<Entry>
 
@@ -68,9 +83,10 @@ interface CommandJournal {
         /**
          * One definition of "finished with it", used both for answering a resend and for deciding
          * what may be trimmed. [Outcome.UNKNOWN] is not finished: it is the state that holds
-         * therapy back, so treating it as resolved anywhere would quietly release that hold.
+         * therapy back, so treating it as resolved anywhere would quietly release that hold. The
+         * one exception is an entry given up together with its pump, see [Entry.abandoned].
          */
-        fun Entry.isResolved(): Boolean = outcome != null && outcome != Outcome.UNKNOWN
+        fun Entry.isResolved(): Boolean = abandoned || (outcome != null && outcome != Outcome.UNKNOWN)
     }
 }
 
@@ -124,6 +140,16 @@ class SimpleCommandJournal(
     @Synchronized
     override fun unresolved(excludingId: String?): CommandJournal.Entry? =
         entries.values.firstOrNull { !it.isResolved() && (it.id != excludingId) }
+
+    @Synchronized
+    override fun abandonUnresolved(reason: String): List<CommandJournal.Entry> {
+        val given = entries.values.filter { !it.isResolved() }
+            .map { it.copy(outcome = Outcome.UNKNOWN, reason = listOfNotNull(it.reason, reason).joinToString("; "), abandoned = true) }
+        if (given.isEmpty()) return given
+        given.forEach { entries[it.id] = it }
+        persist(entries.values.toList())
+        return given
+    }
 
     @Synchronized
     override fun entries(): List<CommandJournal.Entry> = entries.values.toList()

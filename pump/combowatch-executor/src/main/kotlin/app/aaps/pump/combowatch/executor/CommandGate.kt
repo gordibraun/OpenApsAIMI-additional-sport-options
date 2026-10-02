@@ -20,7 +20,19 @@ class CommandGate(
      * its own constraints before it asks; this one is held on the watch so that no message,
      * however it came to be, can make the watch deliver more than its owner allowed it to.
      */
-    private val maxBolusTenthsIU: () -> Int = { DEFAULT_MAX_BOLUS_TENTHS_IU }
+    private val maxBolusTenthsIU: () -> Int = { DEFAULT_MAX_BOLUS_TENTHS_IU },
+    /**
+     * The pump this watch is paired with, as the driver names it, or null when it holds none.
+     * The controller always supplies this; left out, the rule below is not applied, which is
+     * only meant for tests of the other rules.
+     *
+     * The phone decides for one particular pump - the one its glucose, its insulin on board and
+     * its records belong to. A watch that has since been paired with a different pump must not
+     * carry those decisions out on it, so every command that changes delivery has to come under
+     * a lease naming the very pump the watch holds. Reading the pump needs no such match: that
+     * is how the phone finds out which pump is there.
+     */
+    private val heldPump: (() -> String?)? = null
 ) {
 
     sealed interface Admission {
@@ -60,6 +72,12 @@ class CommandGate(
 
         if (now >= command.expiresAtEpochMs)
             return Admission.Refused("command expired ${now - command.expiresAtEpochMs} ms ago")
+
+        if ((heldPump != null) && (command.kind != CommandKind.STATUS)) {
+            val held = heldPump.invoke() ?: return Admission.Refused("no pump is paired with this watch")
+            if (lease.pumpSerial != held)
+                return Admission.Refused("the phone asked for pump ${lease.pumpSerial}, this watch holds $held")
+        }
 
         // Reading the pump is how an unresolved command gets resolved, so it stays allowed while
         // everything that changes delivery is held back.

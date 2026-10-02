@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 27
-            versionName = "0.27-aaps-driver-tbr"
+            versionCode = 28
+            versionName = "0.28-any-pump"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

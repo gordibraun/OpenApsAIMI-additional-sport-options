@@ -12,5 +12,9 @@
     <string name="combowatch_unknown_tbr_detected">На помпе найден неизвестный временный базал %1$d%% (осталось %2$d мин); драйвер на часах его отменил</string>
     <string name="combowatch_battery_low">Батарея помпы разряжена</string>
     <string name="combowatch_reservoir_low">В резервуаре помпы мало инсулина</string>
+    <string name="combowatch_no_pump_on_watch">К часам не привязана помпа</string>
+    <string name="combowatch_other_pump_short">На часах другая помпа: %1$s</string>
+    <string name="combowatch_other_pump">Часы привязаны к помпе %1$s, а AAPS ведёт записи для %2$s. Команды на помпу не передаются. Чтобы работать с %1$s, выберите в конфигураторе другой драйвер помпы и затем снова «Combo через часы»</string>
+    <string name="combowatch_bolus_of_other_pump">Часы сообщили о болюсе %1$.1f ЕД на помпе %2$s. AAPS ведёт записи для %3$s, поэтому этот болюс в расчёт не вошёл</string>
     <string name="combowatch_cannot_set_absolute_tbr_if_basal_zero">Нельзя задать абсолютный временный базал при нулевой базальной скорости</string>
 </resources>

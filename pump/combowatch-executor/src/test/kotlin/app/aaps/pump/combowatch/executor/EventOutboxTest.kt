@@ -41,6 +41,24 @@ class EventOutboxTest {
         assertEquals(listOf(1 to 2L, 2 to 3L, 1 to 3L), saved)
     }
 
+    @Test fun `discarding removes only what was selected and keeps the numbering`() {
+        val saved = mutableListOf<Pair<Int, Long>>()
+        val outbox = EventOutbox(persist = { events, nextSeq -> saved.add(events.size to nextSeq) })
+        outbox.append(bolus(1).copy(pumpSerial = "PUMP_10392647"))
+        outbox.append(bolus(2).copy(pumpSerial = "PUMP_41056642"))
+        outbox.append(tbrEnded(3)) // from before events named their pump
+        saved.clear()
+
+        assertEquals(2, outbox.discard { it.pumpSerial == null || it.pumpSerial == "PUMP_10392647" })
+        assertEquals(listOf("PUMP_41056642"), outbox.pending().map { it.pumpSerial })
+        assertEquals(listOf(1 to 4L), saved)
+        assertEquals(4L, outbox.append(tbrEnded()).seq)
+
+        saved.clear()
+        assertEquals(0, outbox.discard { false })
+        assertTrue(saved.isEmpty())
+    }
+
     @Test fun `a restored outbox continues numbering after what it already holds`() {
         val restored = EventOutbox(initial = listOf(bolus().copy(seq = 7)), initialNextSeq = 3)
         assertEquals(8L, restored.append(tbrEnded()).seq)
