@@ -24,6 +24,7 @@ import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.eq
+import org.mockito.kotlin.inOrder
 import org.mockito.kotlin.never
 import org.mockito.kotlin.stub
 import org.mockito.kotlin.verify
@@ -183,6 +184,71 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         assertThat(tbr.success).isFalse()
         assertThat(tbr.comment).isEqualTo("no pump on the watch")
         verifyNothingSentExceptStatus()
+    }
+
+    @Test
+    fun `with no pump registered the watch's pump is registered before a command is sent`() {
+        // Otherwise AAPS would spend the command's own record on the registration and drop it.
+        registered(null)
+        watchHolds(pumpA)
+        commandsAnswer(ComboResult("c", Outcome.DONE, 1L, tbrOutcome = "SET_NORMAL_TBR", tbrPercentage = 0, tbrDurationMinutes = 30))
+        plugin.setTempBasalPercent(0, 30, validProfile, true, PumpSync.TemporaryBasalType.EMULATED_PUMP_SUSPEND)
+        val order = inOrder(pumpSync, link)
+        order.verify(pumpSync).syncStopTemporaryBasalWithPumpId(any(), any(), eq(PumpType.ACCU_CHEK_COMBO), eq(pumpA), any())
+        order.verifyBlocking(link) {
+            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+        }
+    }
+
+    @Test
+    fun `reading the pump registers the watch's pump once it is known`() {
+        registered(null)
+        watchHolds(pumpA)
+        commandsAnswer(ComboResult("s", Outcome.DONE, 1L))
+        plugin.getPumpStatus("test")
+        verify(pumpSync).syncStopTemporaryBasalWithPumpId(any(), any(), eq(PumpType.ACCU_CHEK_COMBO), eq(pumpA), any())
+    }
+
+    @Test
+    fun `a registered pump is never registered over, and an unknown one never registered`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        commandsAnswer(ComboResult("s", Outcome.DONE, 1L))
+        plugin.getPumpStatus("test")
+        plugin.setTempBasalPercent(0, 30, validProfile, true, PumpSync.TemporaryBasalType.EMULATED_PUMP_SUSPEND)
+
+        registered(null)
+        watchHolds(null, known = false)
+        plugin.getPumpStatus("test")
+        verifyNoInteractions(pumpSync)
+    }
+
+    // ---- basal profile ---------------------------------------------------------------------------
+
+    @Test
+    fun `basal rates are rounded the way the pump holds them`() {
+        // The same cases comboctl's BasalProfile rounds: 0.01 steps up to 1 U/h, 0.05 above.
+        assertThat(listOf(930, 1230, 1260, 1280, 1290, 1370, 1000, 1024, 1025, 999, 40, 20, 10300, 10349, 10350).map { ComboWatchPlugin.comboBasalFactor(it) })
+            .isEqualTo(listOf(930, 1250, 1250, 1300, 1300, 1350, 1000, 1000, 1050, 1000, 50, 0, 10300, 10300, 10400))
+    }
+
+    @Test
+    fun `a profile equals the pump's when it matches after the pump's rounding`() {
+        registered(pumpA)
+        val asked = listOf(0.93, 1.23, 1.26, 1.28, 1.29, 1.23, 1.37, 1.2, 1.1, 0.94, 1.0, 0.95, 1.0, 1.15, 1.2, 1.1, 0.94, 0.81, 1.05, 1.05, 1.05, 1.1, 1.05, 1.15)
+        val profile = org.mockito.kotlin.mock<app.aaps.core.interfaces.profile.Profile>()
+        for (hour in 0 until 24) whenever(profile.getBasalTimeFromMidnight(hour * 60 * 60)).thenReturn(asked[hour])
+        val held = listOf(930, 1250, 1250, 1300, 1300, 1250, 1350, 1200, 1100, 940, 1000, 950, 1000, 1150, 1200, 1100, 940, 810, 1050, 1050, 1050, 1100, 1050, 1150)
+        fun pumpHolds(factors: List<Int>) {
+            whenever(link.watchPumpKnown).thenReturn(true)
+            whenever(link.watchPump).thenReturn(pumpA)
+            whenever(link.lastSnapshot).thenReturn(PumpSnapshot(1L, false, null, null, 100, "FULL_BATTERY", pumpA, factors))
+        }
+        pumpHolds(held)
+        assertThat(plugin.isThisProfileSet(profile)).isTrue()
+        // A real difference in one hour is still a difference.
+        pumpHolds(held.toMutableList().also { it[3] = 1350 })
+        assertThat(plugin.isThisProfileSet(profile)).isFalse()
     }
 
     @Test

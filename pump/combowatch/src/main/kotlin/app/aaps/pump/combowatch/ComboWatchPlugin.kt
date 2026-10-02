@@ -181,6 +181,7 @@ class ComboWatchPlugin @Inject constructor(
 
     override fun getPumpStatus(reason: String) {
         dispatch(CommandKind.STATUS)
+        adoptWatchPumpIfNoneRegistered()
         // Raises the notice about a different pump on the watch as soon as it is known.
         whyNotThisPump()
     }
@@ -349,7 +350,9 @@ class ComboWatchPlugin @Inject constructor(
      */
     override fun isThisProfileSet(profile: Profile): Boolean {
         val onPump = snapshot?.basalProfileFactors ?: return true
-        return (0 until 24).all { hour -> (profile.getBasalTimeFromMidnight(hour * 60 * 60) * 1000.0).toInt() == onPump.getOrNull(hour) }
+        return (0 until 24).all { hour ->
+            comboBasalFactor((profile.getBasalTimeFromMidnight(hour * 60 * 60) * 1000.0).toInt()) == onPump.getOrNull(hour)
+        }
     }
 
     // ---- identity ----------------------------------------------------------------------------
@@ -460,6 +463,27 @@ class ComboWatchPlugin @Inject constructor(
         }
     }
 
+    /**
+     * With no pump registered - this driver has just been selected - the pump the watch holds is
+     * made the one AAPS keeps records for, before anything is asked of it.
+     *
+     * Left alone, AAPS registers the pump from the first record it is handed and discards that
+     * very record if it is more than a minute old - which the record of a TBR that took a while
+     * to set is, and then AAPS would not know about a TBR the pump is running. Registered
+     * beforehand, every record made afterwards is accepted.
+     *
+     * AAPS has no call that only registers a pump. Reporting "no temporary basal is running as
+     * of now" does, and changes nothing else: selecting a driver has already closed whatever the
+     * records said was running.
+     */
+    private fun adoptWatchPumpIfNoneRegistered() {
+        if (registeredPump != null) return
+        val held = link.watchPump ?: return
+        val now = System.currentTimeMillis()
+        pumpSync.syncStopTemporaryBasalWithPumpId(timestamp = now, endPumpId = now, pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = held)
+        aapsLogger.info(LTag.PUMP, "combowatch: $held is now the pump AAPS keeps records for")
+    }
+
     private fun reportEventOfOtherPump(event: PumpEvent) {
         aapsLogger.warn(LTag.PUMP, "combowatch: event ${event.seq} is from ${event.pumpSerial ?: "an unnamed pump"}, not from $boundPump; not recorded")
         // Only insulin is worth interrupting the owner for.
@@ -503,8 +527,13 @@ class ComboWatchPlugin @Inject constructor(
         validForMs: Long = COMMAND_VALID_MS
     ): ComboResult = runBlocking {
         // Reading the pump is always allowed: it is how the phone finds out which pump is there.
-        if (kind != CommandKind.STATUS) whyNotThisPump()?.let {
-            return@runBlocking ComboResult("not-sent", Outcome.REFUSED, System.currentTimeMillis(), reason = it)
+        if (kind != CommandKind.STATUS) {
+            whyNotThisPump()?.let {
+                return@runBlocking ComboResult("not-sent", Outcome.REFUSED, System.currentTimeMillis(), reason = it)
+            }
+            // Before the command, so that the record of what it does is not the one AAPS
+            // spends on registering the pump.
+            adoptWatchPumpIfNoneRegistered()
         }
         link.execute(
             kind = kind,
@@ -528,6 +557,23 @@ class ComboWatchPlugin @Inject constructor(
     }
 
     companion object {
+
+        /**
+         * A basal rate as the Combo can hold it, in 0.001 U/h: in steps of 0.01 U/h up to 1 U/h,
+         * of 0.05 up to 10 U/h and of 0.1 above. It is the rounding the driver applies whenever
+         * it writes or compares a profile (comboctl's BasalProfile), repeated here because this
+         * module does not depend on the driver. Without it a profile asking for 1.23 U/h never
+         * equals the 1.25 the pump holds for it, and AAPS keeps asking for a profile write.
+         */
+        internal fun comboBasalFactor(factor: Int): Int {
+            val granularity = when (factor) {
+                in 0..50       -> 50
+                in 50..1000    -> 10
+                in 1000..10000 -> 50
+                else           -> 100
+            }
+            return ((factor + granularity / 2) / granularity) * granularity
+        }
 
         private const val UNKNOWN_SERIAL = "неизвестна"
 
