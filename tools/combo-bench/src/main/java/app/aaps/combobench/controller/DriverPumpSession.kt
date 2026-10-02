@@ -613,9 +613,13 @@ internal class DriverPumpSession(
         private const val BASAL_PROFILE_FILE = "manual-basal-profile.json"
         private const val BOLUS_TIMEOUT_MS = 4 * 60_000L
 
-        /** Six confirmed steps is what a single connection manages reliably; see [plan]. */
-        private const val MAX_STEPS_PER_CONNECTION = 6
-        private const val MAX_STAGES = 5
+        /**
+         * How many confirmed steps one connection is asked to make; see [plan]. Measured from the
+         * watch on pump 10392647: five steps got through every time and the sixth to eighth was
+         * where a walk failed, so four leaves a step of margin for the confirming press as well.
+         */
+        private const val MAX_STEPS_PER_CONNECTION = 4
+        private const val MAX_STAGES = 8
     }
 }
 

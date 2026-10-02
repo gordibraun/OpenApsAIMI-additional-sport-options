@@ -667,6 +667,7 @@ suspend fun adjustQuantityOnScreen(
     cyclicQuantityRange: Int? = null,
     longRTButtonPressPredicate: (targetQuantity: Int, quantityOnScreen: Int) -> Boolean = { _, _ -> true },
     incrementSteps: Array<Pair<Int, Int>>,
+    targetIsLimit: Boolean = false,
     getQuantity: (parsedScreen: ParsedScreen) -> Int?
 ) {
     require(incrementSteps.isNotEmpty()) { "There must be at least one incrementSteps item" }
@@ -823,6 +824,17 @@ suspend fun adjustQuantityOnScreen(
             logger(LogLevel.DEBUG) {
                 "Observed quantity after long-pressing RT button: " +
                     "last / current quantity: $lastQuantity / $currentQuantityOnScreen"
+            }
+
+            // Slow link only (see RTLinkProfile). The settling time below exists to catch a held
+            // button running past the target, and a quantity resting on a limit of the pump cannot
+            // have run past it. Waiting anyway costs 3-4 s there, measured from a watch on pump
+            // 10392647, which is most of what the pump leaves before it closes the setting screen
+            // - a confirming press that then got lost had no time left to be repeated, and the
+            // pump discarded the whole edit.
+            if (RTLinkProfile.slowLink && targetIsLimit && (currentQuantityOnScreen == targetQuantity)) {
+                lastQuantity = currentQuantityOnScreen
+                break
             }
 
             if (currentQuantityOnScreen != null) {

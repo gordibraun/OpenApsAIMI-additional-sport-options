@@ -3405,7 +3405,9 @@ class Pump(
                 targetQuantity = percentage,
                 longRTButtonPressPredicate = longRTButtonPressPercentagePredicate,
                 // TBR duration is in/decremented in 10-minute steps
-                incrementSteps = arrayOf(Pair(0, 10))
+                incrementSteps = arrayOf(Pair(0, 10)),
+                // The pump does not go below 0 %. Only the slow-link pacing makes use of this.
+                targetIsLimit = RTLinkProfile.slowLink && (percentage == 0)
             ) {
                 val currentPercentage = (it as ParsedScreen.TemporaryBasalRatePercentageScreen).percentage
                 if (currentPercentage != null)
@@ -3501,10 +3503,18 @@ class Pump(
                 // the pump to time the screen out and discard the edit, which reads back as a TBR
                 // that was never set. If the first press did land, the pump is already on the
                 // main screen and none follows.
+                //
+                // A CHECK that landed moves the pump on within ~2.5 s, so that is how long each
+                // one is given; the default four seconds per attempt left no room for a second
+                // press before the pump closed the screen. Repeating CHECK is harmless in a way
+                // repeating an arrow key is not: on the setting screen it confirms the same edit,
+                // and on the main screen it only opens the quick info.
                 pressButtonUntilScreenAppears(
                     rtNavigationContext,
                     RTNavigationButton.CHECK,
-                    ParsedScreen.MainScreen::class
+                    ParsedScreen.MainScreen::class,
+                    maxNumAttempts = 4,
+                    perAttemptTimeoutInMs = 2500L
                 )
             } else
                 rtNavigationContext.shortPressButton(RTNavigationButton.CHECK)
