@@ -238,6 +238,7 @@ class ManualPumpSetupActivity : Activity() {
         main.removeCallbacks(cancelActiveConfirmation)
         confirmingActive = false
         runCatching { host.autonomy.setMode(next) }.onFailure { showError("Не удалось сохранить режим") }
+        runCatching { host.refreshFace() }
         render()
     }
 

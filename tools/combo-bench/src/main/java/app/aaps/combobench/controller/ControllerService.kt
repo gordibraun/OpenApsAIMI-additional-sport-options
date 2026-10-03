@@ -209,6 +209,25 @@ class ControllerGlucoseReceiver : BroadcastReceiver() {
     }
 }
 
+/**
+ * Carbohydrates entered on the watch, handed over by the AAPS watch app's own entry screen.
+ * Guarded by the relay's signature-level permission: only that app can say the owner ate.
+ */
+class ControllerCarbsReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (!BuildConfig.MANUAL_TARGET) return
+        val grams = intent.getIntExtra("grams", 0)
+        val at = intent.getLongExtra("timestamp", 0L).takeIf { it > 0L } ?: System.currentTimeMillis()
+        if (grams <= 0 || grams > MAX_GRAMS) return
+        runCatching { ControllerHost.get(context).keepCarbs(grams, at, intent.getStringExtra("foodType")) }
+            .onFailure { Log.e("ComboController", "carbs not kept: ${it.javaClass.simpleName}") }
+    }
+
+    private companion object {
+        const val MAX_GRAMS = 300
+    }
+}
+
 /** Messages from the phone, handed over by the relay in the AAPS watch app. */
 class ControllerInboundReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {

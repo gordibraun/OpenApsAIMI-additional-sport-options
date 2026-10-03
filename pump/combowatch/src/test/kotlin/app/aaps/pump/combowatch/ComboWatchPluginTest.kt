@@ -188,6 +188,17 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
     }
 
     @Test
+    fun `carbohydrates entered on the watch are filed as carbohydrates, whatever the pump's registration says`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        doReturn("С часов: fast").whenever(rh).gs(eq(R.string.combowatch_carbs_from_watch), anyString())
+        whenever(persistenceLayer.insertPumpCarbsIfNewByTimestamp(any())).thenReturn(Single.just(PersistenceLayer.TransactionResult()))
+        plugin.handlePumpEvent(PumpEvent(seq = 9, type = PumpEvent.Type.CARBS, timestampEpochMs = 2_000L, pumpSerial = pumpA, note = "fast", carbsGrams = 20))
+        verify(persistenceLayer).insertPumpCarbsIfNewByTimestamp(argThat { timestamp == 2_000L && amount == 20.0 && ids.pumpSerial == pumpA })
+        verifyNoInteractions(pumpSync)
+    }
+
+    @Test
     fun `a record that names no pump is not filed under a guess`() {
         registered(pumpA)
         watchHolds(pumpA)

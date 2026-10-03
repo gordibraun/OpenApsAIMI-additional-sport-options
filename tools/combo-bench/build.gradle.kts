@@ -46,6 +46,8 @@ dependencies {
     implementation(project(":pump:combowatch-executor"))
     implementation(project(":pump:combowatch-regulation"))
     implementation(libs.com.google.android.gms.playservices.wearable)
+    // The controller's complications for the watch face (pump, link, forecast).
+    implementation("androidx.wear.watchface:watchface-complications-data-source:1.2.1")
     testImplementation("junit:junit:4.13.2")
     // Real org.json for JVM tests of the bench's JSON state files (the Android stub throws).
     testImplementation("org.json:json:20090211")

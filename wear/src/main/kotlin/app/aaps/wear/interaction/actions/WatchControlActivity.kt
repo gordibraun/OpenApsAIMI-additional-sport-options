@@ -1,6 +1,9 @@
 package app.aaps.wear.interaction.actions
 
 import android.content.Intent
+import app.aaps.wear.combo.ComboWatchMode
+import app.aaps.wear.combo.ComboRelay
+import android.content.ComponentName
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -147,6 +150,26 @@ class WatchControlActivity : DaggerActivity() {
             }
             buttons.add(this)
             setOnClickListener {
+                // With the pump driven through this watch, carbohydrates alone are the watch's
+                // business: its pump controller keeps them for its own forecast and hands them to
+                // the phone's records when the phone is in touch. Insulin still goes to the phone.
+                if (requestKind == "CARBS" && amount > 0 && ComboWatchMode.isWatchMode(this@WatchControlActivity)) {
+                    buttons.forEach { it.isEnabled = false }
+                    runCatching {
+                        sendBroadcast(
+                            Intent(ComboRelay.ACTION_CARBS)
+                                .setComponent(ComponentName(ComboRelay.CONTROLLER_PACKAGE, ComboRelay.CONTROLLER_CARBS_RECEIVER))
+                                .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
+                                .putExtra("grams", amount)
+                                .putExtra("timestamp", System.currentTimeMillis())
+                                .putExtra("foodType", foodType),
+                            ComboRelay.PERMISSION_RELAY
+                        )
+                    }
+                    showStatus("Записано: $amount г")
+                    handler.postDelayed({ finish() }, 1_500)
+                    return@setOnClickListener
+                }
                 if (sp.getInt("watch_control_api_version", 0) < if (requestKind == "MEAL") 2 else 1) {
                     showStatus("Нужно обновить AAPS на телефоне и дождаться синхронизации.")
                     rxBus.send(EventWearToMobile(EventData.ActionResendData("Watch controls compatibility")))

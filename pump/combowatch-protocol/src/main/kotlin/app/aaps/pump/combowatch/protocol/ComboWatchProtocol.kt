@@ -322,8 +322,10 @@ data class PumpEvent(
      * the serial travels with the event instead of being guessed by the receiver.
      */
     val pumpSerial: String? = null,
-    /** The text of a [Type.WATCH_NOTE]. */
-    val note: String? = null
+    /** The text of a [Type.WATCH_NOTE]; for [Type.CARBS], what kind of food. */
+    val note: String? = null,
+    /** Grams of a [Type.CARBS] entry. */
+    val carbsGrams: Int? = null
 ) {
 
     enum class Type {
@@ -345,6 +347,13 @@ data class PumpEvent(
          */
         WATCH_NOTE,
 
+        /**
+         * Not something the pump did either: carbohydrates the owner entered on the watch, kept
+         * by the watch for its own forecast and handed to the phone's records whenever it is in
+         * touch. Grams in [carbsGrams], the kind of food in [note].
+         */
+        CARBS,
+
         /** A type a newer watch sends and this build does not know. Passed over, never an error. */
         UNKNOWN
     }
@@ -362,6 +371,7 @@ data class PumpEvent(
             tbrType?.let { put("tbrType", it) }
             pumpSerial?.let { put("pumpSerial", it) }
             note?.let { put("note", it) }
+            carbsGrams?.let { put("carbsGrams", it) }
         }
 
     companion object {
@@ -377,7 +387,8 @@ data class PumpEvent(
             tbrDurationMinutes = json.optIntOrNull("tbrDurationMinutes"),
             tbrType = if (json.has("tbrType")) json.getString("tbrType") else null,
             pumpSerial = if (json.has("pumpSerial")) json.getString("pumpSerial") else null,
-            note = if (json.has("note")) json.getString("note") else null
+            note = if (json.has("note")) json.getString("note") else null,
+            carbsGrams = json.optIntOrNull("carbsGrams")
         )
 
         fun listToJson(events: List<PumpEvent>): JSONObject =

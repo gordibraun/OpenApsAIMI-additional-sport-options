@@ -118,4 +118,11 @@ class AutonomyStoreTest {
         assertEquals(AutonomyStore.MAX_JOURNAL_ENTRIES, journal.size)
         assertEquals(AutonomyStore.MAX_JOURNAL_ENTRIES + 4, journal.last().getInt("n"))
     }
+
+    @Test fun carbsEnteredOnTheWatchAreKeptAndCountedWithDelivery() {
+        store.addCarbs(app.aaps.pump.combowatch.regulation.CarbsRecord(now - 60_000L, 25))
+        store.addCarbs(app.aaps.pump.combowatch.regulation.CarbsRecord(now, 10))
+        assertEquals(listOf(25, 10), store.carbs().map { it.grams })
+        assertEquals(2, store.delivery().carbs.size)
+    }
 }

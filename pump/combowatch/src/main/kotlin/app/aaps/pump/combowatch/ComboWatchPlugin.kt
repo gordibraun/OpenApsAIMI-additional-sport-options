@@ -1,6 +1,7 @@
 package app.aaps.pump.combowatch
 
 import app.aaps.core.data.model.BS
+import app.aaps.core.data.model.CA
 import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.IDs
 import app.aaps.core.data.model.TB
@@ -505,6 +506,19 @@ class ComboWatchPlugin @Inject constructor(
                         timestamp = event.timestampEpochMs, action = Action.CAREPORTAL, source = Sources.Pump, note = note,
                         listValues = listOf(ValueWithUnit.Timestamp(event.timestampEpochMs), ValueWithUnit.TEType(TE.Type.NOTE))
                     ).blockingGet()
+            }
+
+            // Carbohydrates the owner entered on the watch. Not pump history, so not gated by the
+            // pump's registration; keyed on their time, so a copy that arrives twice is filed once.
+            PumpEvent.Type.CARBS                -> event.carbsGrams?.takeIf { it > 0 }?.let { grams ->
+                persistenceLayer.insertPumpCarbsIfNewByTimestamp(
+                    CA(
+                        timestamp = event.timestampEpochMs, duration = 0, amount = grams.toDouble(),
+                        notes = event.note?.let { rh.gs(R.string.combowatch_carbs_from_watch, it) },
+                        ids = IDs(pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial)
+                    )
+                ).blockingGet()
+                aapsLogger.info(LTag.PUMP, "combowatch: $grams g of carbohydrates entered on the watch filed")
             }
 
             PumpEvent.Type.UNKNOWN              -> aapsLogger.debug(LTag.PUMP, "combowatch: event ${event.seq} is of a kind this build does not know")

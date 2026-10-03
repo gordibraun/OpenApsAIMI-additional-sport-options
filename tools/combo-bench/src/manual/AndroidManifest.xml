@@ -24,6 +24,12 @@
                 <action android:name="app.aaps.combo.action.FROM_PHONE" />
             </intent-filter>
         </receiver>
+        <receiver android:name=".controller.ControllerCarbsReceiver" android:exported="true"
+            android:permission="app.aaps.combo.permission.RELAY">
+            <intent-filter>
+                <action android:name="app.aaps.combo.action.CARBS" />
+            </intent-filter>
+        </receiver>
         <receiver android:name=".controller.ControllerGlucoseReceiver" android:exported="true"
             android:permission="app.aaps.combo.permission.GLUCOSE">
             <intent-filter>
@@ -32,6 +38,25 @@
         </receiver>
         <receiver android:name=".controller.ControllerDebugReceiver" android:exported="true"
             android:permission="android.permission.DUMP" />
+        <!-- The face's three complications: pump, link, forecast. Pushed on events; re-read every five minutes. -->
+        <service android:name=".controller.PumpComplicationService" android:label="Combo: помпа" android:exported="true"
+            android:permission="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER">
+            <intent-filter><action android:name="android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST" /></intent-filter>
+            <meta-data android:name="android.support.wearable.complications.SUPPORTED_TYPES" android:value="SHORT_TEXT" />
+            <meta-data android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS" android:value="300" />
+        </service>
+        <service android:name=".controller.LinkComplicationService" android:label="Combo: связь" android:exported="true"
+            android:permission="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER">
+            <intent-filter><action android:name="android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST" /></intent-filter>
+            <meta-data android:name="android.support.wearable.complications.SUPPORTED_TYPES" android:value="SHORT_TEXT" />
+            <meta-data android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS" android:value="300" />
+        </service>
+        <service android:name=".controller.ForecastComplicationService" android:label="Combo: прогноз" android:exported="true"
+            android:permission="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER">
+            <intent-filter><action android:name="android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST" /></intent-filter>
+            <meta-data android:name="android.support.wearable.complications.SUPPORTED_TYPES" android:value="SHORT_TEXT" />
+            <meta-data android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS" android:value="300" />
+        </service>
         <service android:name=".BackgroundProbeService" android:exported="false"
             android:foregroundServiceType="connectedDevice" />
         <receiver android:name=".BackgroundProbeReceiver" android:exported="false" />

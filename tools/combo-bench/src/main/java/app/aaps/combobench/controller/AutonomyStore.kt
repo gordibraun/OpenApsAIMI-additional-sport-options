@@ -5,6 +5,7 @@ import app.aaps.pump.combowatch.executor.AutonomyPolicy
 import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import app.aaps.pump.combowatch.regulation.BolusRecord
+import app.aaps.pump.combowatch.regulation.CarbsRecord
 import app.aaps.pump.combowatch.regulation.DeliveryLog
 import app.aaps.pump.combowatch.regulation.GlucoseReading
 import app.aaps.pump.combowatch.regulation.TbrSegment
@@ -62,7 +63,7 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
     // ---- what the pump delivered -------------------------------------------------------------------
 
     @Synchronized fun delivery(): DeliveryLog = runCatching {
-        if (!files.exists(DELIVERY_FILE)) DeliveryLog()
+        if (!files.exists(DELIVERY_FILE)) DeliveryLog(carbs = carbs())
         else files.read(DELIVERY_FILE).let { saved ->
             val tbrs = saved.getJSONArray("tbrs").let { array ->
                 List(array.length()) {
@@ -77,9 +78,23 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
             val boluses = saved.getJSONArray("boluses").let { array ->
                 List(array.length()) { array.getJSONObject(it).let { item -> BolusRecord(item.getLong("at"), item.getDouble("units")) } }
             }
-            DeliveryLog(tbrs, boluses)
+            DeliveryLog(tbrs, boluses, carbs())
         }
-    }.getOrDefault(DeliveryLog())
+    }.getOrDefault(DeliveryLog(carbs = carbs()))
+
+    // ---- carbohydrates entered on the watch ---------------------------------------------------------
+
+    @Synchronized fun carbs(): List<CarbsRecord> = runCatching {
+        if (!files.exists(CARBS_FILE)) emptyList()
+        else files.read(CARBS_FILE).getJSONArray("carbs").let { array ->
+            List(array.length()) { array.getJSONObject(it).let { item -> CarbsRecord(item.getLong("at"), item.getInt("grams")) } }
+        }
+    }.getOrDefault(emptyList())
+
+    @Synchronized fun addCarbs(record: CarbsRecord) {
+        val kept = (carbs() + record).filter { it.atEpochMs >= nowEpochMs() - KEEP_DELIVERY_MS }.sortedBy { it.atEpochMs }
+        files.write(CARBS_FILE, JSONObject().put("carbs", JSONArray().apply { kept.forEach { put(JSONObject().put("at", it.atEpochMs).put("grams", it.grams)) } }))
+    }
 
     private fun saveDelivery(tbrs: List<TbrSegment>, boluses: List<BolusRecord>) {
         val since = nowEpochMs() - KEEP_DELIVERY_MS
@@ -177,6 +192,7 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
         const val SNAPSHOT_FILE = "autonomy-snapshot.json"
         const val GLUCOSE_FILE = "autonomy-glucose.json"
         const val DELIVERY_FILE = "autonomy-delivery.json"
+        const val CARBS_FILE = "autonomy-carbs.json"
         const val JOURNAL_FILE = "autonomy-journal.json"
 
         const val SAME_SAMPLE_MS = 60_000L

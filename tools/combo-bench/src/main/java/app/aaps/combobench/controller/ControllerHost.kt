@@ -24,6 +24,7 @@ import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.PumpSnapshot
 import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import app.aaps.pump.combowatch.protocol.WatchHeartbeat
+import app.aaps.pump.combowatch.regulation.CarbsRecord
 import app.aaps.pump.combowatch.regulation.GlucoseReading
 import org.json.JSONArray
 import org.json.JSONObject
@@ -260,10 +261,23 @@ internal class ControllerHost private constructor(context: Context) {
     /** Why the watch is not on its own right now, or null when it is. */
     fun whyNotAlone(): String? = (runner.standing() as? AutonomyPolicy.Standing.NotAlone)?.reason
 
+    /**
+     * Carbohydrates the owner entered on the watch. Kept here for the watch's own forecast, and
+     * put in the queue for the phone's records, which get them the moment the phone is in touch -
+     * at once when it is, later when it is not. Nobody waits for the phone.
+     */
+    fun keepCarbs(grams: Int, atEpochMs: Long, foodType: String?) {
+        autonomy.addCarbs(CarbsRecord(atEpochMs, grams))
+        outbox.append(PumpEvent(0, PumpEvent.Type.CARBS, atEpochMs, pumpSerial = heldPump(), note = foodType, carbsGrams = grams))
+        sendEvents()
+        refreshFace()
+    }
+
     /** Let the regulator look at the newest reading; see [AutonomyRunner.onReading]. */
     fun regulate(rehearsal: Boolean = false): JSONObject? = synchronized(pumpTurn) {
         val entry = runner.onReading(rehearsal)
         if (rehearsal && entry != null) files.write(REHEARSAL_FILE, entry)
+        if (!rehearsal && entry != null) refreshFace()
         entry
     }
 
@@ -344,6 +358,7 @@ internal class ControllerHost private constructor(context: Context) {
         )
         files.write(HEARTBEAT_FILE, heartbeat.toJson())
         toPhone(ComboWatchProtocol.PATH_HEARTBEAT, heartbeat.toJson())
+        refreshFace()
     }
 
     /** Hand a message to the relay in the AAPS watch app, which owns the link to the phone. */
@@ -381,6 +396,45 @@ internal class ControllerHost private constructor(context: Context) {
         files.write(LEASE_FILE, granted.toJson())
         return granted
     }
+
+    /** The face's view of things; see [FaceFacts]. */
+    fun faceFacts(): FaceFacts {
+        val now = System.currentTimeMillis()
+        val held = heldPump()
+        val pump = savedSnapshot()
+        val running = autonomy.delivery().tbrAt(now)
+        val tbr = running?.let { FaceFacts.Tbr(it.percent, it.endEpochMs) }
+            ?: pump?.takeIf { it.tbrRunning && it.tbrPercentage != null && it.tbrRemainingMinutes != null }
+                ?.let { FaceFacts.Tbr(it.tbrPercentage!!, it.readAtEpochMs + it.tbrRemainingMinutes!! * 60_000L) }
+                ?.takeIf { it.endsAtEpochMs > now }
+        val alone = runner.standing() == AutonomyPolicy.Standing.Alone
+        // The phone's forecast travels with every lease; the watch's own stands only while it is alone.
+        val forecast = if (alone) {
+            autonomy.journal().lastOrNull()?.let { entry ->
+                val min = entry.optInt("forecastMin", -1); val end = entry.optInt("forecastEnd", -1)
+                if (min > 0 && end > 0) FaceFacts.Forecast(min, end, entry.optLong("at", now), byWatch = true) else null
+            }
+        } else {
+            autonomy.snapshot()?.let { snapshot ->
+                snapshot.phoneForecast?.takeIf { it.isNotEmpty() }?.let { FaceFacts.Forecast(it.min(), it.last(), snapshot.madeAtEpochMs, byWatch = false) }
+            }
+        }
+        return FaceFacts(
+            heldPump = held,
+            phoneHeardEpochMs = phoneLastHeardEpochMs,
+            leaseLive = lease?.liveAt(now) == true,
+            pumpReachable = pumpReachable,
+            pumpReadAtEpochMs = pump?.readAtEpochMs,
+            tbr = tbr,
+            reservoirUnits = pump?.reservoirUnits,
+            mode = autonomy.mode(),
+            alone = alone,
+            forecast = forecast
+        )
+    }
+
+    /** Tell the face its complications have something new. Cheap: one broadcast per complication. */
+    fun refreshFace() = FaceComplications.requestUpdate(context)
 
     fun stateJson(): JSONObject = JSONObject()
         .put("busy", executor.isBusy)

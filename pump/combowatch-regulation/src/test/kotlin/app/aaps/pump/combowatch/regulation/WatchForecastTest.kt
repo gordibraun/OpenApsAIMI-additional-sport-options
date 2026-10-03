@@ -109,4 +109,23 @@ class WatchForecastTest {
         assertThat(WatchForecast.usable(fixture.snapshot().copy(insulinActivity = emptyList()), fixture.now)).isFalse()
         assertThat(WatchForecast.usable(fixture.snapshot().copy(insulinActivity = listOf(Double.NaN)), fixture.now)).isFalse()
     }
+
+    @Test fun `carbohydrates entered on the watch after the snapshot lift the forecast`() {
+        val fixture = Fixture().glucose(100.0)
+        fixture.snapshot = fixture.snapshot(bolusUnits = 2.0, bolusAgeAtSnapshot = 10.0)
+        val without = WatchForecast(fixture.snapshot!!, GlucoseTrend.from(fixture.readings, fixture.now)!!, DeliveryLog(), { 1.2 }, fixture.now)
+        val with = WatchForecast(
+            fixture.snapshot!!, GlucoseTrend.from(fixture.readings, fixture.now)!!,
+            DeliveryLog(carbs = listOf(CarbsRecord(fixture.minutesAgo(1.0), 30))), { 1.2 }, fixture.now
+        )
+        assertThat(with.cobNowG).isGreaterThan(without.cobNowG + 25.0)
+        assertThat(with.series(1.2).minOrNull()!!).isGreaterThan(without.series(1.2).minOrNull()!!)
+
+        // Entered before the snapshot: the phone's figure already holds them.
+        val earlier = WatchForecast(
+            fixture.snapshot!!, GlucoseTrend.from(fixture.readings, fixture.now)!!,
+            DeliveryLog(carbs = listOf(CarbsRecord(fixture.minutesAgo(30.0), 30))), { 1.2 }, fixture.now
+        )
+        assertThat(earlier.cobNowG).isEqualTo(without.cobNowG)
+    }
 }

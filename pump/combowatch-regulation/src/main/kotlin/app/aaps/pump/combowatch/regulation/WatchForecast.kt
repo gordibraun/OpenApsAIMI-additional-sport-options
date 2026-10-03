@@ -107,9 +107,16 @@ internal class WatchForecast(
         return points[lower] + (points[lower + 1] - points[lower]) * (position - lower)
     }
 
-    /** Carbohydrates still to be absorbed now: the snapshot's amount, absorbed on by the phone's model. */
+    /**
+     * Carbohydrates still to be absorbed now: the snapshot's amount, absorbed on by the phone's
+     * model, plus what the owner entered on the watch after the snapshot was made - the phone
+     * knows nothing of those until it is back, and a snapshot made after them already counts them.
+     */
     val cobNowG: Double = snapshot.cobG.coerceAtLeast(0.0) *
-        CarbAbsorptionModel.remainingFraction(elapsedMinutes = minutesSinceSnapshot, selectedFoodType = null, delta = trend.delta)
+        CarbAbsorptionModel.remainingFraction(elapsedMinutes = minutesSinceSnapshot, selectedFoodType = null, delta = trend.delta) +
+        delivery.carbs
+            .filter { it.atEpochMs > snapshot.madeAtEpochMs - CLOCK_TOLERANCE_MS && it.atEpochMs <= nowEpochMs }
+            .sumOf { it.grams * CarbAbsorptionModel.remainingFraction((nowEpochMs - it.atEpochMs) / 60_000.0, selectedFoodType = null, delta = trend.delta) }
 
     /** What the insulin at work is doing to glucose right now, units per minute, net of profile basal. */
     private val activityNow: Double = snapshotActivityAt(nowEpochMs) + unaccounted[0] / 5.0

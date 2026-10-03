@@ -21,11 +21,14 @@ data class TbrSegment(
 /** A bolus the pump delivered, as its own history recorded it. */
 data class BolusRecord(val atEpochMs: Long, val units: Double)
 
+/** Carbohydrates the owner entered on the watch. */
+data class CarbsRecord(val atEpochMs: Long, val grams: Int)
+
 /**
  * What the pump actually delivered lately, kept by the watch from its own driver's events.
  * It is the one thing about insulin the watch knows better than the phone's last snapshot.
  */
-class DeliveryLog(tbrs: List<TbrSegment> = emptyList(), val boluses: List<BolusRecord> = emptyList()) {
+class DeliveryLog(tbrs: List<TbrSegment> = emptyList(), val boluses: List<BolusRecord> = emptyList(), val carbs: List<CarbsRecord> = emptyList()) {
 
     val tbrs: List<TbrSegment> = tbrs.sortedBy { it.startEpochMs }
 

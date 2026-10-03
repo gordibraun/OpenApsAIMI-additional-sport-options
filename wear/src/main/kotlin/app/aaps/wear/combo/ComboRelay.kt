@@ -33,6 +33,11 @@ internal object ComboRelay {
     const val CONTROLLER_PACKAGE = "app.aaps.combobench.manual"
     const val CONTROLLER_RECEIVER = "app.aaps.combobench.controller.ControllerInboundReceiver"
 
+    /** Carbohydrates entered on this watch, for the controller to keep; see [ComboWatchMode]. */
+    const val ACTION_CARBS = "app.aaps.combo.action.CARBS"
+    const val CONTROLLER_CARBS_RECEIVER = "app.aaps.combobench.controller.ControllerCarbsReceiver"
+    const val PATH_LEASE = "/combowatch/lease"
+
     const val TAG = "ComboRelay"
 }
 
@@ -42,6 +47,7 @@ class ComboRelayListenerService : WearableListenerService() {
     override fun onMessageReceived(messageEvent: MessageEvent) {
         val path = messageEvent.path
         if (!path.startsWith(ComboRelay.PATH_PREFIX)) return
+        if (path == ComboRelay.PATH_LEASE) ComboWatchMode.remember(this, String(messageEvent.data))
         runCatching {
             sendBroadcast(
                 Intent(ComboRelay.ACTION_FROM_PHONE)
