@@ -61,6 +61,8 @@ internal class ControllerHost private constructor(context: Context) {
     }
     @Volatile private var lastSnapshot: PumpSnapshot? = null
     @Volatile private var pumpReachable = false
+    /** When a command last failed to reach the pump; zero when none did since the last read. */
+    @Volatile private var pumpNotReachedAtEpochMs = 0L
 
     /** What the watch keeps for the time it may be on its own. */
     val autonomy = AutonomyStore(files)
@@ -76,6 +78,7 @@ internal class ControllerHost private constructor(context: Context) {
         onPumpRead = { snapshot, boluses ->
             lastSnapshot = snapshot
             pumpReachable = true
+            pumpNotReachedAtEpochMs = 0L
             runCatching { autonomy.syncWithPump(snapshot.readAtEpochMs, snapshot.tbrRunning, snapshot.tbrPercentage, snapshot.tbrRemainingMinutes) }
             executor.reconcile(snapshot, boluses)
         }
@@ -298,7 +301,10 @@ internal class ControllerHost private constructor(context: Context) {
 
         leaveTheSensorItsWindow()
         val result = executor.execute(command, lease)
-        if (result.outcome == Outcome.FAILED && result.reason?.startsWith("pump not reached") == true) pumpReachable = false
+        if (result.outcome == Outcome.FAILED && result.reason?.startsWith("pump not reached") == true) {
+            pumpReachable = false
+            pumpNotReachedAtEpochMs = System.currentTimeMillis()
+        }
         result.snapshot?.let { lastSnapshot = it }
         files.write(RESULT_FILE, result.toJson())
         publish(result)
@@ -423,7 +429,9 @@ internal class ControllerHost private constructor(context: Context) {
             heldPump = held,
             phoneHeardEpochMs = phoneLastHeardEpochMs,
             leaseLive = lease?.liveAt(now) == true,
-            pumpReachable = pumpReachable,
+            // "Answers" means read within the last quarter of an hour and not failed to reach since;
+            // the in-memory flag alone would say "no" after every restart until the next read.
+            pumpReachable = pump?.readAtEpochMs?.let { readAt -> now - readAt < PUMP_ANSWERED_WITHIN_MS && pumpNotReachedAtEpochMs < readAt } == true,
             pumpReadAtEpochMs = pump?.readAtEpochMs,
             tbr = tbr,
             reservoirUnits = pump?.reservoirUnits,
@@ -524,6 +532,9 @@ internal class ControllerHost private constructor(context: Context) {
         const val REHEARSAL_FILE = "autonomy-rehearsal.json"
         private const val PHONE_HEARD_FILE = "controller-phone-heard.json"
         private const val CARBS_CHANNEL = "combo-autonomy-carbs"
+
+        /** For the face: a pump read this recently, with no failure since, counts as answering. */
+        private const val PUMP_ANSWERED_WITHIN_MS = 15 * 60_000L
 
         /** The longest the pump is held back for the sensor; a window and a session, with room to spare. */
         private const val MAX_SENSOR_WAIT_MS = 2 * 60_000L
