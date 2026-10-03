@@ -62,6 +62,10 @@ import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.overview.OverviewMenus
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PluginBase
+import app.aaps.core.data.plugin.PluginType
+import app.aaps.core.interfaces.pump.PumpSync
+import app.aaps.core.interfaces.pump.Pump
+import app.aaps.core.interfaces.configuration.ConfigBuilder
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.profile.ProfileUtil
@@ -180,6 +184,8 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     @Inject lateinit var automation: Automation
     @Inject lateinit var bgQualityCheck: BgQualityCheck
     @Inject lateinit var uiInteraction: UiInteraction
+    @Inject lateinit var configBuilder: ConfigBuilder
+    @Inject lateinit var pumpSync: PumpSync
     @Inject lateinit var decimalFormatter: DecimalFormatter
     @Inject lateinit var graphDataProvider: Provider<GraphData>
     @Inject lateinit var commandQueue: CommandQueue
@@ -258,6 +264,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             binding.nsclientCard.setBackgroundColor(Color.argb(80, 0x0F, 0xBB, 0xE0))
 
         overview.setVersionView(binding.infoLayout.version)
+        setupComboModeRow()
         if (config.APS || config.PUMPCONTROL) {
             binding.infoLayout.version.setOnClickListener {
                 activity?.let { OKDialog.show(it, rh.gs(R.string.overview_release_title), rh.gs(R.string.overview_release_changes)) }
@@ -336,6 +343,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
     override fun onResume() {
         super.onResume()
+        updateComboModeRow()
         disposable += activePlugin.activeOverview.overviewBus
             .toObservable(EventUpdateOverviewCalcProgress::class.java)
             .observeOn(aapsSchedulers.main)
@@ -788,6 +796,60 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     wizard.confirmAndExecute(it, quickWizardEntry)
                 }
             }
+        }
+    }
+
+    // ---- which device drives the Accu-Chek Combo ---------------------------------------------------
+    //
+    // Two drivers for the same pump can be in the build: the one that has always driven it from the
+    // phone, and the one that drives it through the watch. The owner must be able to go back to the
+    // first from the main screen, in one move, whatever happens with the second. Switching is what
+    // the Config Builder does when a pump driver is chosen there; the old driver itself is not
+    // touched. The drivers are told apart by class name so that this screen depends on neither.
+
+    private val comboDrivers: List<PluginBase>
+        get() = activePlugin.getSpecificPluginsListByInterface(Pump::class.java)
+            .filter { (it as? Pump)?.pumpDescription?.pumpType == PumpType.ACCU_CHEK_COMBO }
+
+    private val comboDirectDriver: PluginBase? get() = comboDrivers.firstOrNull { it.javaClass.simpleName == COMBO_DIRECT_DRIVER }
+    private val comboWatchDriver: PluginBase? get() = comboDrivers.firstOrNull { it.javaClass.simpleName != COMBO_DIRECT_DRIVER }
+
+    private fun setupComboModeRow() {
+        binding.comboModeSwitch.setOnClickListener {
+            val toWatch = binding.comboModeSwitch.isChecked
+            val target = (if (toWatch) comboWatchDriver else comboDirectDriver) ?: run { updateComboModeRow(); return@setOnClickListener }
+            val activity = activity ?: return@setOnClickListener
+            OKDialog.showConfirmation(
+                activity, rh.gs(R.string.combo_mode_title),
+                rh.gs(if (toWatch) R.string.combo_mode_confirm_watch else R.string.combo_mode_confirm_direct),
+                {
+                    aapsLogger.info(LTag.UI, "combo mode: switching pump driver to ${target.name}")
+                    configBuilder.performPluginSwitch(target, true, PluginType.PUMP)
+                    // As the Config Builder does: a pump chosen anew keeps its records from now on.
+                    pumpSync.connectNewPump()
+                    updateComboModeRow()
+                    OKDialog.show(activity, rh.gs(R.string.combo_mode_title), rh.gs(if (toWatch) R.string.combo_mode_next_watch else R.string.combo_mode_next_direct))
+                },
+                { updateComboModeRow() }
+            )
+        }
+    }
+
+    private fun updateComboModeRow() {
+        val binding = _binding ?: return
+        val direct = comboDirectDriver
+        val watch = comboWatchDriver
+        if (direct == null || watch == null) {
+            binding.comboModeRow.visibility = View.GONE
+            return
+        }
+        val active = activePlugin.activePump
+        binding.comboModeRow.visibility = View.VISIBLE
+        binding.comboModeSwitch.isChecked = active === watch
+        binding.comboModeText.text = when {
+            active === watch  -> rh.gs(R.string.combo_mode_watch)
+            active === direct -> rh.gs(R.string.combo_mode_direct)
+            else              -> rh.gs(R.string.combo_mode_other, (active as? PluginBase)?.name ?: "?")
         }
     }
 
@@ -2100,5 +2162,11 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                 }
             }
         }
+    }
+
+    companion object {
+
+        /** The driver that has always driven the Combo from the phone. */
+        private const val COMBO_DIRECT_DRIVER = "ComboV2Plugin"
     }
 }

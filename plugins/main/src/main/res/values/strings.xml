@@ -407,4 +407,14 @@
     <string name="overview_release_title">1.4 - Basal safety</string>
     <string name="overview_release_open_changes">%1$s. Show changes</string>
     <string name="overview_release_changes">1.4: Basal and safety threshold\nThe low-glucose safety threshold is calculated from the lower target and LGS setting, not from current or predicted glucose. Rising glucose no longer raises this threshold. The final forecast safety margin is retained.\n\nA slight decline above target no longer automatically stops basal when microboluses are blocked. Basal is checked separately against the forecast, capped by the profile and activity setting. A trend reaching target within the temporary basal duration, an unsafe forecast, or missing forecast data still prevents restoration. Microbolus restrictions remain in place.\n\nISF, carbohydrate ratio, profile settings and stored ISF states are not reset or strengthened. These changes can change subsequent dosing decisions. Offline tests do not establish clinical outcomes.\n\nIncluded from 1.3\nThe selected AAPS insulin model and profile duration determine the effect of proposed insulin. Temporary basal is spread over its delivery time.\n\nIncluded from 1.2\nType-aware minimum carbohydrate absorption and history-quality checks for adaptive ISF. Illness is not detected automatically.</string>
+    <!-- Which device drives the Accu-Chek Combo -->
+    <string name="combo_mode_title">Pump mode</string>
+    <string name="combo_mode_watch">Pump: through the watch</string>
+    <string name="combo_mode_direct">Pump: directly from the phone (as before)</string>
+    <string name="combo_mode_other">Pump: %1$s</string>
+    <string name="combo_mode_switch_label">via watch</string>
+    <string name="combo_mode_confirm_watch">Switch to «Combo through the watch»?\n\nAfterwards pair the pump with the watch: Combo app on the watch → «Pair pump». The phone\'s pairing key stops working.</string>
+    <string name="combo_mode_confirm_direct">Switch to «Accu-Chek Combo» (directly from the phone, as before)?\n\nAfterwards pair the pump with the phone: Combo tab → «Pair». The watch\'s pairing key stops working.</string>
+    <string name="combo_mode_next_watch">Switched. Now pair the pump with the watch: Combo app on the watch → «Pair pump».</string>
+    <string name="combo_mode_next_direct">Switched. Now pair the pump with the phone: Combo tab → «Pair».</string>
 </resources>
