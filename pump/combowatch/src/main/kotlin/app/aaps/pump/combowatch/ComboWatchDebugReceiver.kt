@@ -8,6 +8,7 @@ import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.CommandKind
+import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.TbrKind
 import dagger.android.DaggerBroadcastReceiver
 import kotlinx.coroutines.CoroutineScope
@@ -39,11 +40,17 @@ import javax.inject.Inject
  *   ... --es cmd BOLUS --ei tenths 1
  *   ... --es cmd REVOKE
  *
+ * One more thing it does, and this one with the active driver: `--es cmd EVENT --es json '{...}'`
+ * puts a pump event (as the watch would send it) through the driver's own filing, for records
+ * the phone missed - say, boluses the pump reported while AAPS was turning its history away.
+ * Records are keyed on the pump's own ids, so one filed twice is filed once.
+ *
  * The answer is written to files/combowatch-debug.json.
  */
 class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
 
     @Inject lateinit var link: ComboWatchLink
+    @Inject lateinit var plugin: ComboWatchPlugin
     @Inject lateinit var aapsLogger: AAPSLogger
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -52,6 +59,21 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
         val cmd = intent.getStringExtra("cmd") ?: return
         val tag = intent.getStringExtra("tag") ?: System.currentTimeMillis().toString()
         val out = File(context.filesDir, OUTPUT_FILE)
+        if (cmd == "EVENT") {
+            val json = intent.getStringExtra("json") ?: return
+            scope.launch {
+                val answer = JSONObject().put("tag", tag).put("cmd", cmd)
+                try {
+                    plugin.handlePumpEvent(PumpEvent.fromJson(JSONObject(json)))
+                    answer.put("filed", true)
+                } catch (t: Throwable) {
+                    answer.put("error", "${t.javaClass.simpleName}: ${t.message}")
+                }
+                runCatching { out.writeText(answer.toString()) }
+                aapsLogger.info(LTag.PUMP, "combowatch debug: $answer")
+            }
+            return
+        }
         // The broadcast is not held open: a command takes about a minute, far beyond what a
         // receiver may keep the system waiting, and this runs inside the app that drives the loop.
         // The work continues in the app's own process, which its foreground service keeps alive.

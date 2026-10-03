@@ -17,4 +17,22 @@
     <string name="combowatch_other_pump">Часы привязаны к помпе %1$s, а AAPS ведёт записи для %2$s. Команды на помпу не передаются. Чтобы работать с %1$s, выберите в конфигураторе другой драйвер помпы и затем снова «Combo через часы»</string>
     <string name="combowatch_bolus_of_other_pump">Часы сообщили о болюсе %1$.1f ЕД на помпе %2$s. AAPS ведёт записи для %3$s, поэтому этот болюс в расчёт не вошёл</string>
     <string name="combowatch_cannot_set_absolute_tbr_if_basal_zero">Нельзя задать абсолютный временный базал при нулевой базальной скорости</string>
+    <string name="combomode_plugin_name">Режим помпы</string>
+    <string name="combomode_plugin_shortname">Режим</string>
+    <string name="combomode_plugin_description">Переключатель: Combo через часы или напрямую с телефона</string>
+    <string name="combomode_title">Кто держит помпу</string>
+    <string name="combomode_now_watch">Сейчас: через часы</string>
+    <string name="combomode_now_direct">Сейчас: напрямую с телефона</string>
+    <string name="combomode_now_other">Сейчас: другой драйвер (%1$s)</string>
+    <string name="combomode_switch">Combo через часы</string>
+    <string name="combomode_explain">Через часы — телефон считает, часы держат помпу и исполняют команды; помпа сопряжена с часами. Напрямую — телефон держит помпу сам, как раньше; помпа сопряжена с телефоном. Помпа сопрягается только с одним устройством, поэтому после переключения её нужно сопрячь заново.</string>
+    <string name="combomode_confirm_to_watch">Переключить на «Combo через часы»?
+
+После этого помпу нужно привязать к часам: приложение Combo на часах → «Привязать помпу». Ключ телефона перестанет действовать.</string>
+    <string name="combomode_confirm_to_direct">Переключить на «Accu-Chek Combo» (напрямую с телефона)?
+
+После этого помпу нужно сопрячь с телефоном: вкладка Combo → «Сопряжение». Ключ часов перестанет действовать.</string>
+    <string name="combomode_next_watch">Переключено. Теперь привяжите помпу к часам: приложение Combo на часах → «Привязать помпу».</string>
+    <string name="combomode_next_direct">Переключено. Теперь сопрягите помпу с телефоном: вкладка Combo → «Сопряжение».</string>
+    <string name="combomode_no_direct_driver">Прямой драйвер Accu-Chek Combo в этой сборке не найден</string>
 </resources>

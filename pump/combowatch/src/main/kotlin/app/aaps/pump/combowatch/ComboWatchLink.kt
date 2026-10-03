@@ -1,6 +1,7 @@
 package app.aaps.pump.combowatch
 
 import android.content.Context
+import android.content.Intent
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.pump.combowatch.protocol.BolusKind
@@ -108,6 +109,20 @@ class ComboWatchLink @Inject constructor(
             snapshot?.let { runCatching { it.toJson() }.getOrNull() }?.let { put(RegulationSnapshot.KEY_IN_LEASE, it) }
         }
         return send(ComboWatchProtocol.PATH_LEASE, message).also { if (it) lastLeaseSentEpochMs = now }
+    }
+
+    /**
+     * Keep the listener service alive between messages. Bound only for a message, it is created
+     * and destroyed every few minutes, and each discarded instance is held a while longer by the
+     * service library - which, in a debuggable build, the leak detector reports and dumps the heap
+     * over, pausing the app each time. Started as well, one instance stays.
+     */
+    fun keepListenerAlive() {
+        runCatching { context.startService(Intent(context, ComboWatchListenerService::class.java)) }
+    }
+
+    fun releaseListener() {
+        runCatching { context.stopService(Intent(context, ComboWatchListenerService::class.java)) }
     }
 
     /** Revoke at once, so a watch in contact stands down now instead of when the lease runs out. */

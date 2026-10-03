@@ -1,5 +1,6 @@
 package app.aaps.pump.combowatch.di
 
+import app.aaps.pump.combowatch.ComboModeFragment
 import app.aaps.pump.combowatch.ComboWatchDebugReceiver
 import app.aaps.pump.combowatch.ComboWatchListenerService
 import dagger.Module
@@ -11,4 +12,5 @@ abstract class ComboWatchModule {
 
     @ContributesAndroidInjector abstract fun contributesComboWatchListenerService(): ComboWatchListenerService
     @ContributesAndroidInjector abstract fun contributesComboWatchDebugReceiver(): ComboWatchDebugReceiver
+    @ContributesAndroidInjector abstract fun contributesComboModeFragment(): ComboModeFragment
 }

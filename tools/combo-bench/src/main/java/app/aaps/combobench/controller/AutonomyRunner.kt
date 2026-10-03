@@ -34,6 +34,8 @@ internal class AutonomyRunner(
     private val askForCarbs: (grams: Int, why: String) -> Unit,
     /** Something else on this watch holds the pump's Bluetooth link right now - the bench's own screens. */
     private val pumpInOtherUse: () -> Boolean = { false },
+    /** Called right before the pump is used; may wait, for the glucose sensor's window. */
+    private val beforePumpSession: () -> Unit = {},
     /** The hour of the pump's day at a moment. */
     private val hourOfDay: (Long) -> Int = { at -> Calendar.getInstance().apply { timeInMillis = at }.get(Calendar.HOUR_OF_DAY) },
     private val nowEpochMs: () -> Long = System::currentTimeMillis
@@ -186,6 +188,7 @@ internal class AutonomyRunner(
     private fun runOwn(action: WatchRegulator.Action.SetTbr): ComboResult? {
         val held = heldPump() ?: return null
         val own = policy.ownTemporaryBasal("auto-${UUID.randomUUID()}", action.percent, action.durationMinutes, held)
+        beforePumpSession()
         ownCommandInFlight = true
         return try {
             executor.execute(own.command, own.lease)

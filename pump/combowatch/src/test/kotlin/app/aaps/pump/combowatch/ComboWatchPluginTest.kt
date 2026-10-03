@@ -1,10 +1,13 @@
 package app.aaps.pump.combowatch
 
 import app.aaps.core.data.model.BS
+import app.aaps.core.data.model.IDs
 import app.aaps.core.data.pump.defs.PumpType
+import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.ui.UiInteraction
+import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.StringNonKey
 import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.ComboResult
@@ -14,6 +17,7 @@ import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.PumpSnapshot
 import app.aaps.shared.tests.TestBaseWithProfile
 import com.google.common.truth.Truth.assertThat
+import io.reactivex.rxjava3.core.Single
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -22,6 +26,7 @@ import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mock
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
+import org.mockito.kotlin.argThat
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.inOrder
@@ -46,6 +51,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
     @Mock lateinit var link: ComboWatchLink
     @Mock lateinit var uiInteraction: UiInteraction
     @Mock lateinit var snapshots: RegulationSnapshotBuilder
+    @Mock lateinit var persistenceLayer: PersistenceLayer
 
     private lateinit var plugin: ComboWatchPlugin
 
@@ -59,7 +65,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         doReturn("another pump on the watch").whenever(rh).gs(eq(R.string.combowatch_other_pump), anyString(), anyString())
         doReturn("bolus of another pump").whenever(rh).gs(eq(R.string.combowatch_bolus_of_other_pump), anyDouble(), anyString(), anyString())
         plugin = ComboWatchPlugin(
-            aapsLogger, rh, preferences, commandQueue, link, pumpSync, constraintsChecker, uiInteraction, pumpEnactResultProvider, snapshots
+            aapsLogger, rh, preferences, commandQueue, link, pumpSync, constraintsChecker, uiInteraction, pumpEnactResultProvider, snapshots, persistenceLayer
         )
     }
 
@@ -120,6 +126,65 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         plugin.handlePumpEvent(bolus(pumpB))
         verifyNoInteractions(pumpSync)
         verify(uiInteraction).addNotification(any(), eq("bolus of another pump"), any())
+    }
+
+    // ---- history from before AAPS registered the pump anew ----------------------------------------
+
+    private fun aapsRegisteredThePumpAt(epochMs: Long) {
+        whenever(preferences.get(LongNonKey.ActivePumpChangeTimestamp)).thenReturn(epochMs)
+        whenever(pumpSync.syncBolusWithPumpId(1_000L, 0.3, BS.Type.SMB, 77L, PumpType.ACCU_CHEK_COMBO, pumpA)).thenReturn(false)
+        whenever(persistenceLayer.syncPumpBolus(any(), any())).thenReturn(Single.just(PersistenceLayer.TransactionResult()))
+    }
+
+    private fun recordsOf(pump: String?) {
+        whenever(persistenceLayer.getBolusesFromTimeToTime(any(), any(), any())).thenReturn(
+            listOfNotNull(pump?.let { BS(timestamp = 400L, amount = 1.0, type = BS.Type.NORMAL, ids = IDs(pumpSerial = it)) })
+        )
+        whenever(persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(any(), any(), any())).thenReturn(emptyList())
+    }
+
+    @Test
+    fun `a bolus from before AAPS registered the pump anew is filed when the pump was in use before`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        aapsRegisteredThePumpAt(5_000L)
+        recordsOf(pumpA)
+        plugin.handlePumpEvent(bolus(pumpA))
+        verify(persistenceLayer).syncPumpBolus(
+            argThat { timestamp == 1_000L && amount == 0.3 && type == BS.Type.SMB && ids.pumpId == 77L && ids.pumpSerial == pumpA && ids.pumpType == PumpType.ACCU_CHEK_COMBO },
+            eq(BS.Type.SMB)
+        )
+    }
+
+    @Test
+    fun `the old history of a pump never seen before is left to AAPS's rule`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        aapsRegisteredThePumpAt(5_000L)
+        recordsOf(null)
+        plugin.handlePumpEvent(bolus(pumpA))
+        verify(persistenceLayer, never()).syncPumpBolus(any(), any())
+    }
+
+    @Test
+    fun `records of another pump do not vouch for this one`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        aapsRegisteredThePumpAt(5_000L)
+        recordsOf(pumpB)
+        plugin.handlePumpEvent(bolus(pumpA))
+        verify(persistenceLayer, never()).syncPumpBolus(any(), any())
+    }
+
+    @Test
+    fun `a bolus AAPS turned away for some other reason is not forced in`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        // Registered before the bolus: whatever AAPS did not like about it, it was not its age.
+        aapsRegisteredThePumpAt(500L)
+        recordsOf(pumpA)
+        plugin.handlePumpEvent(bolus(pumpA))
+        verify(persistenceLayer, never()).syncPumpBolus(any(), any())
     }
 
     @Test

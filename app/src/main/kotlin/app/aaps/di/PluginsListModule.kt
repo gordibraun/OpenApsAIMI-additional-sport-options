@@ -77,6 +77,7 @@ import dagger.Binds
 import dagger.Module
 import dagger.multibindings.IntKey
 import dagger.multibindings.IntoMap
+import app.aaps.pump.combowatch.ComboModePlugin
 import app.aaps.pump.combowatch.ComboWatchPlugin
 import info.nightscout.pump.combov2.ComboV2Plugin
 import javax.inject.Qualifier
@@ -192,6 +193,12 @@ abstract class PluginsListModule {
     @IntoMap
     @IntKey(141)
     abstract fun bindComboWatchPlugin(plugin: ComboWatchPlugin): PluginBase
+
+    @Binds
+    @PumpDriver
+    @IntoMap
+    @IntKey(142)
+    abstract fun bindComboModePlugin(plugin: ComboModePlugin): PluginBase
 
     @Binds
     @PumpDriver

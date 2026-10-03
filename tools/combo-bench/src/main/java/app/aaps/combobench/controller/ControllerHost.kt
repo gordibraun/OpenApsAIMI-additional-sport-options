@@ -95,8 +95,29 @@ internal class ControllerHost private constructor(context: Context) {
         note = { text, at -> outbox.append(PumpEvent(0, PumpEvent.Type.WATCH_NOTE, at, pumpSerial = heldPump(), note = text)) },
         askForCarbs = ::notifyCarbs,
         // The bench's own manual sessions use the same pump and pairing; never overlap with them.
-        pumpInOtherUse = { ManualPumpRuntime.get(this.context).usingBluetoothNow() }
+        pumpInOtherUse = { ManualPumpRuntime.get(this.context).usingBluetoothNow() },
+        beforePumpSession = ::leaveTheSensorItsWindow
     )
+
+    /**
+     * Hold the pump back while the glucose sensor is due to speak; see [SensorWindows]. Called
+     * with the pump turn held, so nothing else reaches the pump meanwhile. A reading arriving
+     * during the wait means the window is over, and the wait ends with it.
+     */
+    private fun leaveTheSensorItsWindow() {
+        val started = System.currentTimeMillis()
+        var announced = false
+        while (true) {
+            val now = System.currentTimeMillis()
+            val until = SensorWindows.waitUntil(now, autonomy.readings()) ?: return
+            if (now - started >= MAX_SENSOR_WAIT_MS) return
+            if (!announced) {
+                announced = true
+                android.util.Log.i("ComboController", "pump waits ${(until - now) / 1000}s: the sensor's window comes first")
+            }
+            android.os.SystemClock.sleep(minOf(until - now, SENSOR_WAIT_SLICE_MS).coerceAtLeast(250L))
+        }
+    }
 
     /** A notification that vibrates: the one thing the watch asks of its wearer by itself. */
     private fun notifyCarbs(grams: Int, why: String) {
@@ -261,6 +282,7 @@ internal class ControllerHost private constructor(context: Context) {
             return ComboResult(command.id, Outcome.REFUSED, System.currentTimeMillis(), reason = "the bench is using the pump")
                 .also { publish(it) }
 
+        leaveTheSensorItsWindow()
         val result = executor.execute(command, lease)
         if (result.outcome == Outcome.FAILED && result.reason?.startsWith("pump not reached") == true) pumpReachable = false
         result.snapshot?.let { lastSnapshot = it }
@@ -277,6 +299,7 @@ internal class ControllerHost private constructor(context: Context) {
     /** Settle an unclear ending by reading the pump; see [ComboExecutor.reconcileNow]. */
     fun healIfNeeded(): Boolean = synchronized(pumpTurn) {
         if (!executor.awaitingReconciliation) return true
+        leaveTheSensorItsWindow()
         val healed = executor.reconcileNow()
         sendEvents()
         sendHeartbeat()
@@ -447,6 +470,10 @@ internal class ControllerHost private constructor(context: Context) {
         const val REHEARSAL_FILE = "autonomy-rehearsal.json"
         private const val PHONE_HEARD_FILE = "controller-phone-heard.json"
         private const val CARBS_CHANNEL = "combo-autonomy-carbs"
+
+        /** The longest the pump is held back for the sensor; a window and a session, with room to spare. */
+        private const val MAX_SENSOR_WAIT_MS = 2 * 60_000L
+        private const val SENSOR_WAIT_SLICE_MS = 5_000L
         private const val CARBS_NOTIFICATION_ID = 42
 
         /** Written by the driver session each time it reads the profile off the pump. */

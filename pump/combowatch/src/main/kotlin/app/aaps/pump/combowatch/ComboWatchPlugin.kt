@@ -1,12 +1,19 @@
 package app.aaps.pump.combowatch
 
 import app.aaps.core.data.model.BS
+import app.aaps.core.data.model.GlucoseUnit
+import app.aaps.core.data.model.IDs
+import app.aaps.core.data.model.TB
 import app.aaps.core.data.model.TE
+import app.aaps.core.data.ue.Action
+import app.aaps.core.data.ue.Sources
+import app.aaps.core.data.ue.ValueWithUnit
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.data.pump.defs.ManufacturerType
 import app.aaps.core.data.pump.defs.PumpDescription
 import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
+import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.notifications.Notification
@@ -21,6 +28,7 @@ import app.aaps.core.interfaces.pump.defs.fillFor
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.ui.UiInteraction
+import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.constraints.ConstraintObject
@@ -73,7 +81,8 @@ class ComboWatchPlugin @Inject constructor(
     private val constraintChecker: ConstraintsChecker,
     private val uiInteraction: UiInteraction,
     private val pumpEnactResultProvider: Provider<PumpEnactResult>,
-    private val snapshots: RegulationSnapshotBuilder
+    private val snapshots: RegulationSnapshotBuilder,
+    private val persistenceLayer: PersistenceLayer
 ) : PumpPluginBase(
     pluginDescription = PluginDescription()
         .mainType(PluginType.PUMP)
@@ -126,6 +135,7 @@ class ComboWatchPlugin @Inject constructor(
         super.onStart()
         scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
         link.eventHandler = ::handlePumpEvent
+        link.keepListenerAlive()
         // Renewed well inside the lease's life so that a lost message changes nothing, while a
         // phone that stops running lets the lease lapse and the watch stand down by itself.
         leaseJob = scope.launch {
@@ -143,6 +153,7 @@ class ComboWatchPlugin @Inject constructor(
         // Tell a watch that is in contact to stand down now rather than at lease expiry. If the
         // message does not get through, the lapsing lease does the same thing a little later.
         runCatching { runBlocking { link.revokeLease(pumpSerial) } }
+        link.releaseListener()
         scope.cancel()
         super.onStop()
     }
@@ -411,43 +422,55 @@ class ComboWatchPlugin @Inject constructor(
         when (event.type) {
             PumpEvent.Type.BOLUS_INFUSED        -> {
                 val amount = checkNotNull(event.bolusTenthsIU) / 10.0
-                pumpSync.syncBolusWithPumpId(
-                    event.timestampEpochMs,
-                    amount,
-                    when (event.bolusKind) {
-                        BolusKind.SMB     -> BS.Type.SMB
-                        BolusKind.PRIMING -> BS.Type.PRIMING
-                        else              -> BS.Type.NORMAL
-                    },
-                    checkNotNull(event.bolusId),
-                    PumpType.ACCU_CHEK_COMBO,
-                    serial
-                )
+                val type = when (event.bolusKind) {
+                    BolusKind.SMB     -> BS.Type.SMB
+                    BolusKind.PRIMING -> BS.Type.PRIMING
+                    else              -> BS.Type.NORMAL
+                }
+                val bolusId = checkNotNull(event.bolusId)
+                val filed = pumpSync.syncBolusWithPumpId(event.timestampEpochMs, amount, type, bolusId, PumpType.ACCU_CHEK_COMBO, serial)
+                if (!filed && historyOfAKnownPump(serial, event.timestampEpochMs)) {
+                    persistenceLayer.syncPumpBolus(
+                        BS(timestamp = event.timestampEpochMs, amount = amount, type = type, ids = IDs(pumpId = bolusId, pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial)),
+                        type
+                    ).blockingGet()
+                    aapsLogger.info(LTag.PUMP, "combowatch: bolus $bolusId of $amount U, from before AAPS registered $serial anew, filed all the same")
+                }
                 lastBolus = event.timestampEpochMs to amount
             }
 
-            PumpEvent.Type.TBR_STARTED          -> pumpSync.syncTemporaryBasalWithPumpId(
-                timestamp = event.timestampEpochMs,
-                rate = checkNotNull(event.tbrPercentage).toDouble(),
-                duration = checkNotNull(event.tbrDurationMinutes).toLong() * 60 * 1000,
-                isAbsolute = false,
-                type = when (event.tbrType) {
+            PumpEvent.Type.TBR_STARTED          -> {
+                val rate = checkNotNull(event.tbrPercentage).toDouble()
+                val duration = checkNotNull(event.tbrDurationMinutes).toLong() * 60 * 1000
+                val type = when (event.tbrType) {
                     "superbolus"        -> PumpSync.TemporaryBasalType.SUPERBOLUS
                     "emulatedComboStop" -> PumpSync.TemporaryBasalType.EMULATED_PUMP_SUSPEND
                     "comboStopped"      -> PumpSync.TemporaryBasalType.PUMP_SUSPEND
                     else                -> PumpSync.TemporaryBasalType.NORMAL
-                },
-                pumpId = event.timestampEpochMs,
-                pumpType = PumpType.ACCU_CHEK_COMBO,
-                pumpSerial = serial
-            )
+                }
+                val filed = pumpSync.syncTemporaryBasalWithPumpId(
+                    timestamp = event.timestampEpochMs, rate = rate, duration = duration, isAbsolute = false, type = type,
+                    pumpId = event.timestampEpochMs, pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial
+                )
+                if (!filed && historyOfAKnownPump(serial, event.timestampEpochMs)) {
+                    persistenceLayer.syncPumpTemporaryBasal(
+                        TB(
+                            timestamp = event.timestampEpochMs, rate = rate, duration = duration, type = type.toDbType(), isAbsolute = false,
+                            ids = IDs(pumpId = event.timestampEpochMs, pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial)
+                        ),
+                        type.toDbType()
+                    ).blockingGet()
+                    aapsLogger.info(LTag.PUMP, "combowatch: TBR ${rate.toInt()} % from before AAPS registered $serial anew, filed all the same")
+                }
+            }
 
-            PumpEvent.Type.TBR_ENDED            -> pumpSync.syncStopTemporaryBasalWithPumpId(
-                timestamp = event.timestampEpochMs,
-                endPumpId = event.timestampEpochMs,
-                pumpType = PumpType.ACCU_CHEK_COMBO,
-                pumpSerial = serial
-            )
+            PumpEvent.Type.TBR_ENDED            -> {
+                val filed = pumpSync.syncStopTemporaryBasalWithPumpId(
+                    timestamp = event.timestampEpochMs, endPumpId = event.timestampEpochMs, pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial
+                )
+                if (!filed && historyOfAKnownPump(serial, event.timestampEpochMs))
+                    persistenceLayer.syncPumpCancelTemporaryBasalIfAny(event.timestampEpochMs, event.timestampEpochMs, PumpType.ACCU_CHEK_COMBO, serial).blockingGet()
+            }
 
             PumpEvent.Type.UNKNOWN_TBR_DETECTED -> uiInteraction.addNotification(
                 Notification.COMBO_UNKNOWN_TBR,
@@ -466,17 +489,47 @@ class ComboWatchPlugin @Inject constructor(
             // What the watch decided by itself while the phone was away, kept with the treatments
             // so that the stops it made can be read next to the glucose curve.
             PumpEvent.Type.WATCH_NOTE           -> event.note?.let { note ->
-                pumpSync.insertTherapyEventIfNewWithTimestamp(
+                val filed = pumpSync.insertTherapyEventIfNewWithTimestamp(
                     timestamp = event.timestampEpochMs,
                     type = TE.Type.NOTE,
                     note = note,
                     pumpType = PumpType.ACCU_CHEK_COMBO,
                     pumpSerial = serial
                 )
+                if (!filed && historyOfAKnownPump(serial, event.timestampEpochMs))
+                    persistenceLayer.insertPumpTherapyEventIfNewByTimestamp(
+                        therapyEvent = TE(
+                            timestamp = event.timestampEpochMs, type = TE.Type.NOTE, duration = 0, note = note, glucoseUnit = GlucoseUnit.MGDL,
+                            ids = IDs(pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial)
+                        ),
+                        timestamp = event.timestampEpochMs, action = Action.CAREPORTAL, source = Sources.Pump, note = note,
+                        listValues = listOf(ValueWithUnit.Timestamp(event.timestampEpochMs), ValueWithUnit.TEType(TE.Type.NOTE))
+                    ).blockingGet()
             }
 
             PumpEvent.Type.UNKNOWN              -> aapsLogger.debug(LTag.PUMP, "combowatch: event ${event.seq} is of a kind this build does not know")
         }
+    }
+
+    /**
+     * AAPS files a pump's records only from the moment it registered that pump, so that the old
+     * history of a newly chosen pump is not taken for insulin given under the loop. That moment
+     * moves whenever the pump is registered anew - after a restored configuration, a change of
+     * driver and back, a reinstall - and from then on AAPS turns away everything older, including
+     * what this very pump delivered in the hours before: the boluses the owner gave on it while
+     * the phone was away, which are the whole point of carrying the pump's history. When the
+     * records already hold this pump's insulin from before that moment, the pump was plainly in
+     * use with this phone, and such a record is filed by the same path AAPS itself takes once its
+     * gate is passed. A pump never seen before is left to AAPS's rule.
+     */
+    private fun historyOfAKnownPump(serial: String, timestamp: Long): Boolean {
+        val registeredAt = preferences.get(LongNonKey.ActivePumpChangeTimestamp)
+        if (registeredAt <= 0L || timestamp >= registeredAt) return false
+        val from = timestamp - KNOWN_PUMP_LOOKBACK_MS
+        return runCatching {
+            persistenceLayer.getBolusesFromTimeToTime(from, registeredAt, true).any { it.ids.pumpSerial == serial } ||
+                persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(from, registeredAt, true).any { it.ids.pumpSerial == serial }
+        }.getOrDefault(false)
     }
 
     /**
@@ -600,6 +653,9 @@ class ComboWatchPlugin @Inject constructor(
         private const val LEASE_RENEW_INTERVAL_MS = 4 * 60_000L
 
         private const val WATCH_STALE_MS = 20 * 60_000L
+
+        /** How far back records of the pump are looked for to tell a pump in use from one newly chosen. */
+        private const val KNOWN_PUMP_LOOKBACK_MS = 7 * 24 * 60 * 60_000L
 
         // A command older than this is dropped by the watch instead of applied: a change that
         // lands this late is a dosing error, not a slow success. A session on the watch takes
