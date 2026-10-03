@@ -194,10 +194,11 @@ abstract class PluginsListModule {
     @IntKey(141)
     abstract fun bindComboWatchPlugin(plugin: ComboWatchPlugin): PluginBase
 
+    // Right after the owner's own first tabs, so the switch is on the main screen without scrolling.
     @Binds
     @PumpDriver
     @IntoMap
-    @IntKey(142)
+    @IntKey(9)
     abstract fun bindComboModePlugin(plugin: ComboModePlugin): PluginBase
 
     @Binds
