@@ -1,6 +1,8 @@
 package app.aaps.pump.combowatch
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
@@ -21,6 +23,9 @@ import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.ui.dialogs.OKDialog
 import dagger.android.support.DaggerFragment
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import javax.inject.Inject
 
 /**
@@ -30,6 +35,10 @@ import javax.inject.Inject
  * and AAPS is told a new pump is connected, exactly as when the choice is made there. What this
  * screen adds is a place to do it in one move and a plain statement of what has to follow: the
  * pump holds one pairing, so after the switch it is paired anew with the device that now drives it.
+ *
+ * Below the switch, the link as the phone sees it: when the watch was last heard, what it said of
+ * the pump, and the last lines of what passed between them - every command and its outcome, every
+ * change the pump reported. The same things the direct driver's tab shows, for the watch.
  */
 class ComboModeFragment : DaggerFragment() {
 
@@ -39,10 +48,22 @@ class ComboModeFragment : DaggerFragment() {
     @Inject lateinit var configBuilder: ConfigBuilder
     @Inject lateinit var pumpSync: PumpSync
     @Inject lateinit var watchDriver: ComboWatchPlugin
+    @Inject lateinit var link: ComboWatchLink
 
     private lateinit var state: TextView
     private lateinit var switch: SwitchCompat
     private lateinit var next: TextView
+    private lateinit var linkState: TextView
+    private lateinit var linkLog: TextView
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val refreshLink = object : Runnable {
+        override fun run() {
+            renderLink()
+            handler.postDelayed(this, LINK_REFRESH_MS)
+        }
+    }
+    private val timeOfDay = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         val context = requireContext()
@@ -67,6 +88,9 @@ class ComboModeFragment : DaggerFragment() {
             addView(switch)
             next = text(16f, bold = true).apply { visibility = View.GONE }; addView(next)
             addView(text(14f).apply { setText(R.string.combomode_explain) })
+            addView(text(18f, bold = true).apply { setText(R.string.combomode_link_title) })
+            linkState = text(14f); addView(linkState)
+            linkLog = text(12f).apply { typeface = android.graphics.Typeface.MONOSPACE }; addView(linkLog)
         }
         return ScrollView(context).apply { addView(column) }
     }
@@ -74,6 +98,44 @@ class ComboModeFragment : DaggerFragment() {
     override fun onResume() {
         super.onResume()
         render()
+        handler.post(refreshLink)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(refreshLink)
+        super.onPause()
+    }
+
+    private fun renderLink() {
+        val now = System.currentTimeMillis()
+        val onWatch = activePlugin.activePump === watchDriver
+        val lines = mutableListOf<String>()
+        if (!onWatch) lines += rh.gs(R.string.combomode_link_inactive)
+        else {
+            val heard = link.lastContactEpochMs
+            lines += if (heard == 0L) rh.gs(R.string.combomode_link_never) else rh.gs(R.string.combomode_link_heard, (now - heard) / 60_000L)
+            link.lastHeartbeat?.let { heartbeat ->
+                lines += rh.gs(
+                    R.string.combomode_link_watch,
+                    heartbeat.heldPump ?: "—",
+                    rh.gs(if (heartbeat.pumpReachable) R.string.combomode_pump_answers else R.string.combomode_pump_silent),
+                    heartbeat.watchBatteryPercent ?: 0
+                )
+            }
+            link.lastSnapshot?.let { pump ->
+                lines += rh.gs(
+                    R.string.combomode_link_pump,
+                    timeOfDay.format(Date(pump.readAtEpochMs)),
+                    if (pump.tbrRunning && pump.tbrPercentage != null) "${pump.tbrPercentage} %" else rh.gs(R.string.combomode_profile_basal),
+                    pump.reservoirUnits ?: 0
+                )
+            }
+        }
+        linkState.text = lines.joinToString("\n")
+        val notes = link.recentNotes()
+        linkLog.text =
+            if (notes.isEmpty()) rh.gs(R.string.combomode_link_log_empty)
+            else notes.asReversed().joinToString("\n") { "${timeOfDay.format(Date(it.atEpochMs))} ${it.text}" }
     }
 
     private val directDriver: PluginBase?
@@ -112,5 +174,10 @@ class ComboModeFragment : DaggerFragment() {
             },
             { render() }
         )
+    }
+
+    private companion object {
+
+        const val LINK_REFRESH_MS = 5_000L
     }
 }

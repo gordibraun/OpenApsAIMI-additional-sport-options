@@ -25,6 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -79,6 +80,29 @@ class ComboWatchLink @Inject constructor(
     @Volatile
     private var lastLeaseSentEpochMs = 0L
 
+    /** Whether the last lease got through; a line is written only when this changes. */
+    @Volatile
+    private var leaseReaching: Boolean? = null
+
+    /** What the last heartbeat said about the pump; a line is written only when it changes. */
+    @Volatile
+    private var notedHeartbeat: Pair<Boolean, String?>? = null
+
+    /** One line of the link's log: what went to the watch, what came back, what the pump did. */
+    class Note(val atEpochMs: Long, val text: String)
+
+    private val notes = ArrayDeque<Note>()
+
+    /** The last lines of the link's log, oldest first. For the owner's screen; nothing reads them back. */
+    fun recentNotes(): List<Note> = synchronized(notes) { notes.toList() }
+
+    fun note(text: String) {
+        synchronized(notes) {
+            notes.addLast(Note(System.currentTimeMillis(), text))
+            while (notes.size > MAX_NOTES) notes.removeFirst()
+        }
+    }
+
     /**
      * Set by the watch-backed driver while it is the active pump driver. Events are handed to it
      * and only then acknowledged; with no handler they are left with the watch, which keeps them.
@@ -93,14 +117,15 @@ class ComboWatchLink @Inject constructor(
      * driving the pump directly does not depend on a message getting through - it only depends
      * on one no longer being sent.
      */
-    suspend fun renewLease(pumpSerial: String, validForMs: Long, snapshot: RegulationSnapshot? = null): Boolean {
+    suspend fun renewLease(pumpSerial: String, validForMs: Long, snapshot: RegulationSnapshot? = null, maxBolusTenthsIU: Int? = null): Boolean {
         val now = System.currentTimeMillis()
         val next = ControlLease(
             generation = lease?.generation ?: now,
             issuedAtEpochMs = now,
             expiresAtEpochMs = now + validForMs,
             pumpSerial = pumpSerial,
-            controllerIsWatch = true
+            controllerIsWatch = true,
+            maxBolusTenthsIU = maxBolusTenthsIU
         )
         lease = next
         // What the watch needs if this turns out to be the last renewal for a while rides along.
@@ -108,7 +133,13 @@ class ComboWatchLink @Inject constructor(
         val message = next.toJson().apply {
             snapshot?.let { runCatching { it.toJson() }.getOrNull() }?.let { put(RegulationSnapshot.KEY_IN_LEASE, it) }
         }
-        return send(ComboWatchProtocol.PATH_LEASE, message).also { if (it) lastLeaseSentEpochMs = now }
+        return send(ComboWatchProtocol.PATH_LEASE, message).also { sent ->
+            if (sent) lastLeaseSentEpochMs = now
+            if (sent != leaseReaching) {
+                leaseReaching = sent
+                note(if (sent) "аренда доходит до часов, предел болюса ${maxBolusTenthsIU?.let { "%.1f ЕД".format(Locale.getDefault(), it / 10.0) } ?: "часов"}" else "аренда не доходит: часы не на связи")
+            }
+        }
     }
 
     /**
@@ -159,14 +190,15 @@ class ComboWatchLink @Inject constructor(
         force100Percent: Boolean? = null,
         bolusTenthsIU: Int? = null,
         bolusKind: BolusKind? = null,
-        snapshot: RegulationSnapshot? = null
+        snapshot: RegulationSnapshot? = null,
+        maxBolusTenthsIU: Int? = null
     ): ComboResult {
         // A command is refused without a live lease naming the pump it is meant for, so make
         // sure the watch holds a current one. A command that changes delivery comes straight
         // after a loop run, so it also brings the watch that run's snapshot.
         if ((lease?.pumpSerial != pumpSerial) || (snapshot != null && kind != CommandKind.STATUS) ||
             (System.currentTimeMillis() - lastLeaseSentEpochMs > LEASE_REFRESH_BEFORE_COMMAND_MS)
-        ) renewLease(pumpSerial, leaseValidForMs, snapshot)
+        ) renewLease(pumpSerial, leaseValidForMs, snapshot, maxBolusTenthsIU)
 
         val now = System.currentTimeMillis()
         val command = ComboCommand(
@@ -187,13 +219,40 @@ class ComboWatchLink @Inject constructor(
         try {
             if (!send(ComboWatchProtocol.PATH_COMMAND, command.toJson())) {
                 // Nothing left the phone, so the pump was certainly not touched.
+                note("→ ${describe(command)}: не отправлено, часы не на связи")
                 return ComboResult(command.id, Outcome.REFUSED, System.currentTimeMillis(), reason = "watch unreachable")
             }
-            return withTimeoutOrNull(timeoutMs) { waiter.await() }
+            note("→ ${describe(command)}")
+            val result = withTimeoutOrNull(timeoutMs) { waiter.await() }
                 ?: ComboResult(command.id, Outcome.UNKNOWN, System.currentTimeMillis(), reason = "no answer from the watch")
+            note("← ${describe(result, System.currentTimeMillis() - now)}")
+            return result
         } finally {
             pending.remove(command.id)
         }
+    }
+
+    private fun describe(command: ComboCommand): String = when (command.kind) {
+        CommandKind.STATUS        -> "чтение помпы"
+        CommandKind.CANCEL_TBR    -> "отмена временного базала"
+        CommandKind.SET_TBR       -> "временный базал ${command.percentage} % на ${command.durationMinutes} мин"
+        CommandKind.DELIVER_BOLUS -> "болюс %.1f ЕД".format(Locale.getDefault(), (command.bolusTenthsIU ?: 0) / 10.0)
+    }
+
+    private fun describe(result: ComboResult, elapsedMs: Long): String {
+        val pump = result.snapshot?.let { ", помпа: ${describe(it)}" } ?: ""
+        return when (result.outcome) {
+            Outcome.DONE    -> "выполнено за ${elapsedMs / 1000} с$pump"
+            Outcome.REFUSED -> "отказ: ${result.reason}"
+            Outcome.FAILED  -> "не удалось: ${result.reason}$pump"
+            Outcome.UNKNOWN -> "исход не выяснен: ${result.reason}"
+        }
+    }
+
+    private fun describe(snapshot: PumpSnapshot): String = buildString {
+        if (snapshot.tbrRunning && snapshot.tbrPercentage != null) append("временный базал ${snapshot.tbrPercentage} %, ещё ${snapshot.tbrRemainingMinutes ?: 0} мин")
+        else append("базал профиля")
+        snapshot.reservoirUnits?.let { append(", резервуар $it ЕД") }
     }
 
     // ---- called by the listener service ------------------------------------------------------
@@ -215,6 +274,17 @@ class ComboWatchLink @Inject constructor(
     fun onHeartbeat(heartbeat: WatchHeartbeat) {
         lastContactEpochMs = System.currentTimeMillis()
         lastHeartbeat = heartbeat
+        val state = heartbeat.pumpReachable to heartbeat.heldPump
+        if (state != notedHeartbeat) {
+            notedHeartbeat = state
+            note(
+                when {
+                    heartbeat.heldPump == null -> "часы: помпа не привязана"
+                    heartbeat.pumpReachable    -> "часы: помпа ${heartbeat.heldPump} отвечает"
+                    else                       -> "часы: помпа ${heartbeat.heldPump} не отвечает"
+                }
+            )
+        }
         watchPump = heartbeat.heldPump
         watchPumpKnown = true
         heartbeat.snapshot?.let { lastSnapshot = it }
@@ -263,5 +333,8 @@ class ComboWatchLink @Inject constructor(
 
         /** A lease sent this recently is taken to be current; older than this, it is renewed first. */
         private const val LEASE_REFRESH_BEFORE_COMMAND_MS = 2 * 60_000L
+
+        /** About two hours of a loop's traffic. */
+        private const val MAX_NOTES = 150
     }
 }

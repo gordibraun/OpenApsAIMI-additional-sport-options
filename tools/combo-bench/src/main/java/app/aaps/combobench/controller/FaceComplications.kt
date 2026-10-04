@@ -43,9 +43,10 @@ object FaceComplications {
 
     internal fun plain(text: String): ComplicationText = PlainComplicationText.Builder(text).build()
 
-    internal fun sinceMinutes(epochMs: Long): ComplicationText =
+    /** Minutes since [epochMs], counted by the face; [text] wraps it, with `^1` where the minutes go. */
+    internal fun sinceMinutes(epochMs: Long, text: String? = null): ComplicationText =
         TimeDifferenceComplicationText.Builder(TimeDifferenceStyle.SHORT_SINGLE_UNIT, CountUpTimeReference(Instant.ofEpochMilli(epochMs)))
-            .setMinimumTimeUnit(TimeUnit.MINUTES).build()
+            .setMinimumTimeUnit(TimeUnit.MINUTES).apply { text?.let { setText(it) } }.build()
 
     internal fun untilMinutes(epochMs: Long): ComplicationText =
         TimeDifferenceComplicationText.Builder(TimeDifferenceStyle.SHORT_SINGLE_UNIT, CountDownTimeReference(Instant.ofEpochMilli(epochMs)))
@@ -95,33 +96,40 @@ class PumpComplicationService : FactsComplicationService() {
     override fun preview(): ComplicationData = short("120%", FaceComplications.plain("12м"), "Временный базал")
 }
 
-/** How long since the phone was heard, and whether the pump answered - or "ОДНИ" when the watch is on its own. */
+/**
+ * Who is in charge and whether the pump answers, over how long since the phone was heard: "помпа ✓"
+ * above "тел 2м" while the phone commands; "часы ✓" above "тел 12м" while the watch, with the phone
+ * away, keeps basal by itself. The text is the first line, the title the second.
+ */
 class LinkComplicationService : FactsComplicationService() {
 
     override fun build(facts: FaceFacts?): ComplicationData {
         if (facts == null) return short("—", FaceComplications.plain("связь"), "Состояние связи неизвестно")
-        val phone: ComplicationText = if (facts.phoneHeardEpochMs > 0L) FaceComplications.sinceMinutes(facts.phoneHeardEpochMs) else FaceComplications.plain("нет")
-        val title = when {
-            facts.alone                         -> "ОДНИ" + if (facts.mode == AutonomyPolicy.Mode.ACTIVE) " ✓" else ""
-            facts.heldPump == null              -> "нет помпы"
-            facts.pumpReachable                 -> "помпа ✓"
-            else                                -> "помпа ✗"
+        val phone: ComplicationText =
+            if (facts.phoneHeardEpochMs > 0L) FaceComplications.sinceMinutes(facts.phoneHeardEpochMs, "тел ^1") else FaceComplications.plain("тел нет")
+        // Alone with the mode off, the watch does nothing of its own; the pump's state is the news then.
+        val watchInCharge = facts.alone && facts.mode != AutonomyPolicy.Mode.OFF
+        val text = when {
+            watchInCharge && facts.mode == AutonomyPolicy.Mode.ACTIVE -> "часы ✓"
+            watchInCharge                                             -> "наблюд."
+            facts.heldPump == null                                    -> "нет помпы"
+            facts.pumpReachable                                       -> "помпа ✓"
+            else                                                      -> "помпа ✗"
         }
-        val text = if (facts.alone) "тел" else "тел"
-        return ShortTextComplicationData.Builder(FaceComplications.plain(text), FaceComplications.plain("Телефон и помпа: $title"))
-            .setTitle(if (facts.alone) FaceComplications.plain(title) else phone)
-            .setTapAction(FaceComplications.openController(this))
-            .build().let { if (facts.alone) it else withSecondLine(it, title) }
-    }
-
-    /** SHORT_TEXT has one text and one title; the phone's age goes in the title, the pump's state in the text. */
-    private fun withSecondLine(data: ComplicationData, pumpState: String): ComplicationData =
-        ShortTextComplicationData.Builder(FaceComplications.plain(pumpState), (data as ShortTextComplicationData).contentDescription ?: FaceComplications.plain(""))
-            .setTitle(data.title ?: FaceComplications.plain(""))
+        val description = when {
+            watchInCharge && facts.mode == AutonomyPolicy.Mode.ACTIVE -> "Телефона нет: часы сами ведут базал"
+            watchInCharge                                             -> "Телефона нет: часы только наблюдают"
+            facts.heldPump == null                                    -> "Помпа к часам не привязана"
+            facts.pumpReachable                                       -> "Командует телефон, помпа отвечает"
+            else                                                      -> "Командует телефон, помпа не отвечает"
+        }
+        return ShortTextComplicationData.Builder(FaceComplications.plain(text), FaceComplications.plain(description))
+            .setTitle(phone)
             .setTapAction(FaceComplications.openController(this))
             .build()
+    }
 
-    override fun preview(): ComplicationData = short("помпа ✓", FaceComplications.plain("2м"), "Телефон и помпа")
+    override fun preview(): ComplicationData = short("помпа ✓", FaceComplications.plain("тел 2м"), "Телефон и помпа")
 }
 
 /** The four-hour forecast: lowest and last value, and whose forecast it is. */

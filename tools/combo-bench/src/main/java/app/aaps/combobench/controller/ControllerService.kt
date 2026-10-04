@@ -267,7 +267,7 @@ class ControllerDebugReceiver : BroadcastReceiver() {
         }
         // Everything below stands in for the phone, which is allowed on the bench's test pump only.
         val lease = try {
-            host.grantDebugLease(validForMs = 10 * 60_000L)
+            host.grantDebugLease(validForMs = 5 * 60_000L)
         } catch (e: IllegalStateException) {
             Log.w("ComboController", "debug command ignored: ${e.message}")
             return

@@ -96,7 +96,7 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
                     val result = link.execute(
                         kind = kind,
                         pumpSerial = DEBUG_SERIAL,
-                        leaseValidForMs = 10 * 60_000L,
+                        leaseValidForMs = 5 * 60_000L,
                         validForMs = 4 * 60_000L,
                         timeoutMs = 8 * 60_000L,
                         percentage = if (kind == CommandKind.SET_TBR) intent.getIntExtra("percent", -1) else null,

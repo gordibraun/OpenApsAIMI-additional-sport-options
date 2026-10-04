@@ -105,9 +105,10 @@ class AutonomyPolicy(private val nowEpochMs: () -> Long) {
 
         /**
          * How long the phone has to have been silent before the watch counts itself alone. The
-         * phone's lease lasts as long, so normally the two run out together.
+         * phone's lease lasts as long, so normally the two run out together. Five minutes: one
+         * sensor reading without the phone, and the second is the watch's to act on.
          */
-        const val MIN_PHONE_SILENCE_MS = 10 * 60_000L
+        const val MIN_PHONE_SILENCE_MS = 5 * 60_000L
 
         /** Just under profile; the pump has no "100 %" temporary basal. */
         const val MAX_OWN_PERCENT = 90

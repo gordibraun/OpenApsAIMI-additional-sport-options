@@ -141,7 +141,7 @@ class ComboWatchPlugin @Inject constructor(
         // phone that stops running lets the lease lapse and the watch stand down by itself.
         leaseJob = scope.launch {
             while (isActive) {
-                runCatching { link.renewLease(pumpSerial, LEASE_VALID_MS, snapshots.current(pumpSerial)) }
+                runCatching { link.renewLease(pumpSerial, LEASE_VALID_MS, snapshots.current(pumpSerial), watchBolusLimitTenths()) }
                     .onFailure { aapsLogger.debug(LTag.PUMP, "combowatch: lease renewal failed: ${it.message}") }
                 delay(LEASE_RENEW_INTERVAL_MS)
             }
@@ -420,6 +420,7 @@ class ComboWatchPlugin @Inject constructor(
             return
         }
         val serial: String = bound
+        describe(event)?.let { link.note(it) }
         when (event.type) {
             PumpEvent.Type.BOLUS_INFUSED        -> {
                 val amount = checkNotNull(event.bolusTenthsIU) / 10.0
@@ -523,6 +524,21 @@ class ComboWatchPlugin @Inject constructor(
 
             PumpEvent.Type.UNKNOWN              -> aapsLogger.debug(LTag.PUMP, "combowatch: event ${event.seq} is of a kind this build does not know")
         }
+    }
+
+    /** One line for the link's log on the owner's screen; null for an event not worth one. */
+    private fun describe(event: PumpEvent): String? = when (event.type) {
+        PumpEvent.Type.BOLUS_INFUSED        -> "помпа: болюс %.1f ЕД%s".format(
+            (event.bolusTenthsIU ?: 0) / 10.0, if (event.bolusKind == BolusKind.SMB) " (SMB)" else ""
+        )
+        PumpEvent.Type.TBR_STARTED          -> "помпа: временный базал ${event.tbrPercentage} % на ${event.tbrDurationMinutes} мин"
+        PumpEvent.Type.TBR_ENDED            -> "помпа: временный базал закончился"
+        PumpEvent.Type.UNKNOWN_TBR_DETECTED -> "помпа: неизвестный временный базал ${event.tbrPercentage} %"
+        PumpEvent.Type.BATTERY_LOW          -> "помпа: батарея разряжена"
+        PumpEvent.Type.RESERVOIR_LOW        -> "помпа: мало инсулина"
+        PumpEvent.Type.WATCH_NOTE           -> "часы сами: ${event.note}"
+        PumpEvent.Type.CARBS                -> "часы: углеводы ${event.carbsGrams} г"
+        else                                -> null
     }
 
     /**
@@ -630,9 +646,19 @@ class ComboWatchPlugin @Inject constructor(
             force100Percent = force100Percent,
             bolusTenthsIU = bolusTenthsIU,
             bolusKind = bolusKind,
-            snapshot = snapshots.current(pumpSerial)
+            snapshot = snapshots.current(pumpSerial),
+            maxBolusTenthsIU = watchBolusLimitTenths()
         )
     }
+
+    /**
+     * The owner's "max bolus" from the phone's safety settings, in tenths of a unit, for the
+     * watch's gate. Every bolus above is held to it before it is asked for, so this only tells the
+     * watch what the phone already keeps to. Without it the watch's own 3 U would stand, which is
+     * meant for the loop's microboluses and once turned a 4 U meal bolus away.
+     */
+    private fun watchBolusLimitTenths(): Int? =
+        runCatching { (constraintChecker.getMaxBolusAllowed().value() * 10).roundToInt() }.getOrNull()?.takeIf { it > 0 }
 
     private fun refuse(): PumpEnactResult = pumpEnactResultProvider.get().apply {
         success = false
@@ -661,10 +687,10 @@ class ComboWatchPlugin @Inject constructor(
 
         private const val UNKNOWN_SERIAL = "неизвестна"
 
-        // Ten minutes after the phone was last heard from, the watch takes basal into its own
-        // care; renewing every four leaves room for one lost renewal without that happening.
-        private const val LEASE_VALID_MS = 10 * 60_000L
-        private const val LEASE_RENEW_INTERVAL_MS = 4 * 60_000L
+        // Five minutes after the phone was last heard from, the watch takes basal into its own
+        // care; renewing every two leaves room for one lost renewal without that happening.
+        private const val LEASE_VALID_MS = 5 * 60_000L
+        private const val LEASE_RENEW_INTERVAL_MS = 2 * 60_000L
 
         private const val WATCH_STALE_MS = 20 * 60_000L
 

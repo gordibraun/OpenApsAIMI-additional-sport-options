@@ -40,9 +40,9 @@ class AutonomyPolicyTest {
         assertInstanceOf(Standing.NotAlone::class.java, standing(lease = lease(expiredAgoMs = -60_000)))
     }
 
-    @Test fun `a phone heard from in the last ten minutes is in charge, whatever its lease's clock says`() {
-        // The lease reads as expired - say the phone's clock is behind - but the phone spoke four minutes ago.
-        assertInstanceOf(Standing.NotAlone::class.java, standing(heardAgoMs = 4 * 60_000L))
+    @Test fun `a phone heard from in the last five minutes is in charge, whatever its lease's clock says`() {
+        // The lease reads as expired - say the phone's clock is behind - but the phone spoke three minutes ago.
+        assertInstanceOf(Standing.NotAlone::class.java, standing(heardAgoMs = 3 * 60_000L))
         assertInstanceOf(Standing.NotAlone::class.java, standing(heardAgoMs = AutonomyPolicy.MIN_PHONE_SILENCE_MS - 1))
         assertEquals(Standing.Alone, standing(heardAgoMs = AutonomyPolicy.MIN_PHONE_SILENCE_MS))
     }

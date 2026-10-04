@@ -75,7 +75,14 @@ data class ControlLease(
     val expiresAtEpochMs: Long,
     val pumpSerial: String,
     /** False revokes immediately rather than waiting for [expiresAtEpochMs]. */
-    val controllerIsWatch: Boolean
+    val controllerIsWatch: Boolean,
+    /**
+     * The largest single bolus the phone may ask for under this lease, in tenths of a unit: the
+     * owner's own "max bolus" from the phone's safety settings, which every bolus is held to
+     * before it is asked for. The watch lets nothing larger through whatever a message says; a
+     * lease without it leaves the watch's own, smaller limit in force.
+     */
+    val maxBolusTenthsIU: Int? = null
 ) {
     fun liveAt(nowEpochMs: Long): Boolean = controllerIsWatch && nowEpochMs < expiresAtEpochMs
 
@@ -86,6 +93,7 @@ data class ControlLease(
         .put("expiresAt", expiresAtEpochMs)
         .put("pumpSerial", pumpSerial)
         .put("controllerIsWatch", controllerIsWatch)
+        .apply { maxBolusTenthsIU?.let { put("maxBolusTenthsIU", it) } }
 
     companion object {
 
@@ -94,7 +102,8 @@ data class ControlLease(
             issuedAtEpochMs = json.getLong("issuedAt"),
             expiresAtEpochMs = json.getLong("expiresAt"),
             pumpSerial = json.getString("pumpSerial"),
-            controllerIsWatch = json.getBoolean("controllerIsWatch")
+            controllerIsWatch = json.getBoolean("controllerIsWatch"),
+            maxBolusTenthsIU = json.optIntOrNull("maxBolusTenthsIU")
         )
     }
 }

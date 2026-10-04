@@ -118,6 +118,34 @@ class CommandGateTest {
         assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = command(duration = null)))
     }
 
+    // ---- how large a bolus may be ----------------------------------------------------------------
+
+    private fun bolus(tenths: Int) =
+        ComboCommand("b1", 7L, CommandKind.DELIVER_BOLUS, now, now + 30_000, bolusTenthsIU = tenths, bolusKind = BolusKind.NORMAL)
+
+    private fun leaseAllowing(maxBolusTenthsIU: Int?) = ControlLease(7L, now - 1_000, now + 60_000, "10392647", true, maxBolusTenthsIU)
+
+    @Test fun `with no limit from the phone the watch's own small one holds`() {
+        assertInstanceOf(CommandGate.Admission.Run::class.java, admit(command = bolus(CommandGate.DEFAULT_MAX_BOLUS_TENTHS_IU)))
+        val refused = assertInstanceOf(
+            CommandGate.Admission.Refused::class.java, admit(command = bolus(CommandGate.DEFAULT_MAX_BOLUS_TENTHS_IU + 1))
+        )
+        assertTrue(refused.reason.contains("watch's limit"))
+    }
+
+    @Test fun `the owner's max bolus from the phone travels in the lease and is what counts`() {
+        assertInstanceOf(CommandGate.Admission.Run::class.java, admit(command = bolus(70), lease = leaseAllowing(70)))
+        val refused = assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = bolus(71), lease = leaseAllowing(70)))
+        assertTrue(refused.reason.contains("phone's limit of 70"))
+        // Downwards as well: an owner who allows less on the phone than the watch's own default is obeyed.
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = bolus(20), lease = leaseAllowing(10)))
+    }
+
+    @Test fun `no lease raises the limit past the pump's own largest bolus`() {
+        assertInstanceOf(CommandGate.Admission.Run::class.java, admit(command = bolus(250), lease = leaseAllowing(10_000)))
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = bolus(251), lease = leaseAllowing(10_000)))
+    }
+
     // ---- the lease has to name the pump this watch holds ---------------------------------------
 
     private fun holding(pump: String?) = CommandGate({ now }, heldPump = { pump })

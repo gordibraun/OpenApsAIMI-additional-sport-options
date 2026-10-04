@@ -403,6 +403,9 @@ internal class ControllerHost private constructor(context: Context) {
         return granted
     }
 
+    /** The last commands that reached this watch and what came of them, oldest first; for the owner's journal. */
+    fun recentCommands(limit: Int): List<CommandJournal.Entry> = journal.entries().takeLast(limit)
+
     /** The face's view of things; see [FaceFacts]. */
     fun faceFacts(): FaceFacts {
         val now = System.currentTimeMillis()

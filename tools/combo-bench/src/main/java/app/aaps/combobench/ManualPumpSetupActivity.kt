@@ -20,6 +20,9 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import app.aaps.pump.combowatch.executor.CommandJournal
+import app.aaps.pump.combowatch.protocol.CommandKind
+import app.aaps.pump.combowatch.protocol.Outcome
 import java.util.concurrent.Executors
 
 /**
@@ -108,7 +111,7 @@ class ManualPumpSetupActivity : Activity() {
         label("Без телефона", 18f).setPadding(0, (resources.displayMetrics.density * 14).toInt(), 0, 0)
         alone = label("", 12f).apply { id = R.id.manual_alone_status }
         aloneMode = button("") { onAloneModeTapped() }.apply { id = R.id.manual_alone_mode }
-        button("Журнал") { showAloneJournal() }.apply { id = R.id.manual_alone_journal }
+        button("Журнал помпы") { showJournal() }.apply { id = R.id.manual_alone_journal }
         val scroll = ScrollView(this).apply {
             addView(column); isFocusableInTouchMode = true
             setOnGenericMotionListener { _, event ->
@@ -242,21 +245,50 @@ class ManualPumpSetupActivity : Activity() {
         render()
     }
 
-    private fun showAloneJournal() {
+    /**
+     * Everything that happened between this watch and the pump, newest first: every command the
+     * phone or the watch itself gave and what came of it, and the decisions the watch made alone.
+     */
+    private fun showJournal() {
         val time = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
-        val entries = runCatching { host.autonomy.journal() }.getOrDefault(emptyList()).takeLast(JOURNAL_LINES).reversed()
-        val text = if (entries.isEmpty()) "Часы ещё ни разу не оставались одни" else entries.joinToString("\n\n") { entry ->
+        fun stamp(at: Long) = time.format(java.util.Date(at))
+        val decisions = runCatching { host.autonomy.journal() }.getOrDefault(emptyList()).map { entry ->
             val done = when {
                 entry.optString("action") == "LEAVE" -> ""
                 entry.optBoolean("done")             -> " ✓"
                 entry.optString("mode") == "OBSERVE" -> " (не выполнялось)"
                 else                                 -> " ✗ ${entry.optString("reason")}"
             }
-            "${time.format(java.util.Date(entry.optLong("at")))} ${entry.optString("text")}$done"
+            entry.optLong("at") to "${stamp(entry.optLong("at"))} сами: ${entry.optString("text")}$done"
         }
+        val commands = runCatching { host.recentCommands(JOURNAL_LINES) }.getOrDefault(emptyList()).map { entry ->
+            entry.startedAtEpochMs to "${stamp(entry.startedAtEpochMs)} ${describe(entry)}"
+        }
+        val lines = (decisions + commands).sortedByDescending { it.first }.take(JOURNAL_LINES).map { it.second }
+        val text = if (lines.isEmpty()) "Команд помпе ещё не было" else lines.joinToString("\n\n")
         val body = TextView(this).apply { this.text = text; textSize = 12f; setPadding(24, 8, 24, 8) }
-        android.app.AlertDialog.Builder(this).setTitle("Без телефона").setView(ScrollView(this).apply { addView(body) })
+        android.app.AlertDialog.Builder(this).setTitle("Журнал помпы").setView(ScrollView(this).apply { addView(body) })
             .setPositiveButton("Закрыть", null).show()
+    }
+
+    /** One command to the pump: whose it was, what it asked, what came of it. */
+    private fun describe(entry: CommandJournal.Entry): String {
+        val who = if (entry.id.startsWith("auto-")) "часы" else "телефон"
+        val what = when (entry.kind) {
+            CommandKind.STATUS        -> "чтение помпы"
+            CommandKind.SET_TBR       -> "базал ${entry.tbrPercentage ?: "?"} %"
+            CommandKind.CANCEL_TBR    -> "отмена временного базала"
+            CommandKind.DELIVER_BOLUS -> "болюс ${(entry.bolusTenthsIU ?: 0) / 10.0} ЕД"
+            null                      -> "команда"
+        }
+        val outcome = when (entry.outcome) {
+            Outcome.DONE    -> "выполнено"
+            Outcome.REFUSED -> "отказ: ${entry.reason}"
+            Outcome.FAILED  -> "не удалось: ${entry.reason}"
+            Outcome.UNKNOWN -> "исход не выяснен"
+            null            -> if (entry.abandoned) "брошено" else "выполняется"
+        }
+        return "$who: $what — $outcome"
     }
 
     private fun openPairing() {

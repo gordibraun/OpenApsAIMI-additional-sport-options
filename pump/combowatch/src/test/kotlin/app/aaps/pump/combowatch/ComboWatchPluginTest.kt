@@ -88,15 +88,14 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
 
     private fun commandsAnswer(result: ComboResult) = link.stub {
         onBlocking {
-            execute(any(), any(), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(any(), any(), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         } doReturn result
     }
 
     private fun verifyNothingSentExceptStatus() = verifyBlocking(link, never()) {
         execute(
             org.mockito.kotlin.argThat { this != CommandKind.STATUS }, any(), any(), any(), any(),
-            anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull()
-        )
+            anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
     }
 
     // ---- records --------------------------------------------------------------------------------
@@ -249,7 +248,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         commandsAnswer(ComboResult("s", Outcome.DONE, 1L))
         plugin.getPumpStatus("test")
         verifyBlocking(link) {
-            execute(eq(CommandKind.STATUS), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(eq(CommandKind.STATUS), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         }
     }
 
@@ -289,7 +288,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         val order = inOrder(pumpSync, link)
         order.verify(pumpSync).syncStopTemporaryBasalWithPumpId(any(), any(), eq(PumpType.ACCU_CHEK_COMBO), eq(pumpA), any())
         order.verifyBlocking(link) {
-            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         }
     }
 
@@ -353,7 +352,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         assertThat(tbr.success).isTrue()
         assertThat(tbr.enacted).isTrue()
         verifyBlocking(link) {
-            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), eq(0), eq(30), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), eq(0), eq(30), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         }
         assertThat(plugin.isInitialized()).isTrue()
     }

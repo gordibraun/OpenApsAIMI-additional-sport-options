@@ -16,9 +16,11 @@ import app.aaps.pump.combowatch.protocol.Outcome
 class CommandGate(
     private val nowEpochMs: () -> Long,
     /**
-     * The largest single bolus this watch will pass on, in tenths of a unit. The phone applies
-     * its own constraints before it asks; this one is held on the watch so that no message,
-     * however it came to be, can make the watch deliver more than its owner allowed it to.
+     * The largest single bolus this watch will pass on when the phone's lease does not say, in
+     * tenths of a unit. The phone's lease normally carries the owner's own "max bolus" setting
+     * ([ControlLease.maxBolusTenthsIU]) and that is what counts, within [HARD_MAX_BOLUS_TENTHS_IU];
+     * this one stands in for a lease without it, so that no message of unknown origin can make
+     * the watch deliver more than its owner allowed it to.
      */
     private val maxBolusTenthsIU: () -> Int = { DEFAULT_MAX_BOLUS_TENTHS_IU },
     /**
@@ -91,20 +93,24 @@ class CommandGate(
             CommandKind.STATUS        -> Admission.Run
             CommandKind.CANCEL_TBR    -> Admission.Run
             CommandKind.SET_TBR       -> admitTbr(command)
-            CommandKind.DELIVER_BOLUS -> admitBolus(command)
+            CommandKind.DELIVER_BOLUS -> admitBolus(command, lease)
         }
     }
 
-    private fun admitBolus(command: ComboCommand): Admission {
+    private fun admitBolus(command: ComboCommand, lease: ControlLease): Admission {
         val amount = command.bolusTenthsIU
             ?: return Admission.Refused("DELIVER_BOLUS without an amount")
         if (command.bolusKind == null)
             return Admission.Refused("DELIVER_BOLUS without a kind")
         if (amount < 1)
             return Admission.Refused("bolus of $amount tenths is not a deliverable amount")
-        val limit = maxBolusTenthsIU()
+        // The owner's own limit, set on the phone, where every bolus is held to it before it is
+        // asked for. It may also be smaller than the watch's. Nothing moves the ceiling: it is
+        // the most the pump itself delivers in one bolus.
+        val phoneLimit = lease.maxBolusTenthsIU?.coerceIn(1, HARD_MAX_BOLUS_TENTHS_IU)
+        val limit = phoneLimit ?: maxBolusTenthsIU()
         if (amount > limit)
-            return Admission.Refused("bolus of $amount tenths exceeds the watch's limit of $limit")
+            return Admission.Refused("bolus of $amount tenths exceeds the ${if (phoneLimit != null) "phone's" else "watch's"} limit of $limit")
         return Admission.Run
     }
 
@@ -132,5 +138,8 @@ class CommandGate(
 
         /** 3.0 U: room for the loop's microboluses, and deliberately not for a meal bolus. */
         const val DEFAULT_MAX_BOLUS_TENTHS_IU = 30
+
+        /** 25.0 U, the largest bolus the Combo itself delivers; no lease raises the limit past it. */
+        const val HARD_MAX_BOLUS_TENTHS_IU = 250
     }
 }
