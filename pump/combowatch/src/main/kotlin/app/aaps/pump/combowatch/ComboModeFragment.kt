@@ -20,7 +20,9 @@ import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.pump.Pump
 import app.aaps.core.interfaces.pump.PumpSync
+import app.aaps.core.interfaces.notifications.Notification
 import app.aaps.core.interfaces.resources.ResourceHelper
+import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.ui.dialogs.OKDialog
 import dagger.android.support.DaggerFragment
 import java.text.SimpleDateFormat
@@ -49,6 +51,7 @@ class ComboModeFragment : DaggerFragment() {
     @Inject lateinit var pumpSync: PumpSync
     @Inject lateinit var watchDriver: ComboWatchPlugin
     @Inject lateinit var link: ComboWatchLink
+    @Inject lateinit var uiInteraction: UiInteraction
 
     private lateinit var state: TextView
     private lateinit var switch: SwitchCompat
@@ -168,6 +171,12 @@ class ComboModeFragment : DaggerFragment() {
                 configBuilder.performPluginSwitch(target, true, PluginType.PUMP)
                 // As the Config Builder does: a pump chosen anew keeps its records from now on.
                 pumpSync.connectNewPump()
+                // The steps that have to follow stay on the main screen until dismissed.
+                uiInteraction.addNotification(
+                    COMBO_MODE_REMINDER_NOTIFICATION,
+                    rh.gs(if (toWatch) R.string.combomode_reminder_watch else R.string.combomode_reminder_direct),
+                    Notification.NORMAL
+                )
                 next.setText(if (toWatch) R.string.combomode_next_watch else R.string.combomode_next_direct)
                 next.visibility = View.VISIBLE
                 render()
@@ -179,5 +188,8 @@ class ComboModeFragment : DaggerFragment() {
     private companion object {
 
         const val LINK_REFRESH_MS = 5_000L
+
+        /** The same id the Overview's switch uses, so the newer switch replaces the older reminder. */
+        const val COMBO_MODE_REMINDER_NOTIFICATION = 9731
     }
 }

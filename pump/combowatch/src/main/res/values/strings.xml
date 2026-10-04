@@ -34,7 +34,9 @@
 
 После этого помпу нужно сопрячь с телефоном: вкладка Combo → «Сопряжение». Ключ часов перестанет действовать.</string>
     <string name="combomode_next_watch">Переключено. Теперь привяжите помпу к часам: приложение Combo на часах → «Привязать помпу».</string>
-    <string name="combomode_next_direct">Переключено. Теперь сопрягите помпу с телефоном: вкладка Combo → «Сопряжение».</string>
+    <string name="combomode_next_direct">Переключено. Теперь: 1) xDrip → Настройки → Источник данных → «G6 Native (OB1)», чтобы телефон сам получал глюкозу; 2) вкладка Combo → «Сопряжение» — сопрягите помпу с телефоном.</string>
+    <string name="combomode_reminder_direct">Помпа теперь ведётся с телефона. Сделайте: 1) xDrip → Настройки → Источник данных → «G6 Native (OB1)» — телефон сам получает глюкозу; 2) вкладка Combo → «Сопряжение» — сопрягите помпу с телефоном. Пока помпа не сопряжена, цикл её не ведёт, помпа идёт по профилю.</string>
+    <string name="combomode_reminder_watch">Помпа теперь ведётся через часы. Сделайте: 1) приложение Combo на часах → «Привязать помпу»; 2) xDrip → Настройки → Источник данных → «xDrip+ Sync Follower» — телефон не мешает часам читать сенсор; глюкозу в AAPS приносит мост WearTester.</string>
     <string name="combomode_no_direct_driver">Прямой драйвер Accu-Chek Combo в этой сборке не найден</string>
     <string name="combomode_link_title">Связь с часами и помпой</string>
     <string name="combomode_link_inactive">Режим «Combo через часы» сейчас не активен: журнал связи не ведётся.</string>

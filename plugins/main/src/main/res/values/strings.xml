@@ -416,5 +416,7 @@
     <string name="combo_mode_confirm_watch">Switch to «Combo through the watch»?\n\nAfterwards pair the pump with the watch: Combo app on the watch → «Pair pump». The phone\'s pairing key stops working.</string>
     <string name="combo_mode_confirm_direct">Switch to «Accu-Chek Combo» (directly from the phone, as before)?\n\nAfterwards pair the pump with the phone: Combo tab → «Pair». The watch\'s pairing key stops working.</string>
     <string name="combo_mode_next_watch">Switched. Now pair the pump with the watch: Combo app on the watch → «Pair pump».</string>
-    <string name="combo_mode_next_direct">Switched. Now pair the pump with the phone: Combo tab → «Pair».</string>
+    <string name="combo_mode_next_direct">Switched. Now: 1) xDrip → Settings → Hardware Data Source → «G6 Native (OB1)», so the phone collects glucose itself; 2) Combo tab → «Pair» — pair the pump with the phone. A reminder stays on this screen.</string>
+    <string name="combo_mode_reminder_direct">Pump driven from the phone now. To do: 1) xDrip → Settings → Hardware Data Source → «G6 Native (OB1)» — the phone collects glucose itself; 2) Combo tab → «Pair» — pair the pump with the phone. Until it is paired the loop does not drive it; the pump runs its profile.</string>
+    <string name="combo_mode_reminder_watch">Pump driven through the watch now. To do: 1) Combo app on the watch → «Pair pump»; 2) xDrip → Settings → Hardware Data Source → «xDrip+ Sync Follower» — the phone stops competing with the watch for the sensor; glucose reaches AAPS through the WearTester bridge.</string>
 </resources>

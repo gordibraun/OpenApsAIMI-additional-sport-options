@@ -828,6 +828,14 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     // As the Config Builder does: a pump chosen anew keeps its records from now on.
                     pumpSync.connectNewPump()
                     updateComboModeRow()
+                    // The steps that have to follow stay on the screen until the owner dismisses
+                    // them: the pump has to be paired anew, and the phone's xDrip has to collect
+                    // glucose itself again or leave the transmitter to the watch.
+                    uiInteraction.addNotification(
+                        COMBO_MODE_REMINDER_NOTIFICATION,
+                        rh.gs(if (toWatch) R.string.combo_mode_reminder_watch else R.string.combo_mode_reminder_direct),
+                        app.aaps.core.interfaces.notifications.Notification.NORMAL
+                    )
                     OKDialog.show(activity, rh.gs(R.string.combo_mode_title), rh.gs(if (toWatch) R.string.combo_mode_next_watch else R.string.combo_mode_next_direct))
                 },
                 { updateComboModeRow() }
@@ -2165,6 +2173,9 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     }
 
     companion object {
+
+        /** The checklist after a change of pump driver; one id, so the newer switch replaces the older reminder. */
+        private const val COMBO_MODE_REMINDER_NOTIFICATION = 9731
 
         /** The driver that has always driven the Combo from the phone. */
         private const val COMBO_DIRECT_DRIVER = "ComboV2Plugin"
