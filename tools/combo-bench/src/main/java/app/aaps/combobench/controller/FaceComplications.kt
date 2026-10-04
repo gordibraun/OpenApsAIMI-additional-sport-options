@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.drawable.Icon
 import androidx.wear.watchface.complications.data.ComplicationData
 import androidx.wear.watchface.complications.data.ComplicationText
 import androidx.wear.watchface.complications.data.ComplicationType
@@ -11,6 +12,9 @@ import androidx.wear.watchface.complications.data.CountDownTimeReference
 import androidx.wear.watchface.complications.data.CountUpTimeReference
 import androidx.wear.watchface.complications.data.PlainComplicationText
 import androidx.wear.watchface.complications.data.ShortTextComplicationData
+import androidx.wear.watchface.complications.data.SmallImage
+import androidx.wear.watchface.complications.data.SmallImageComplicationData
+import androidx.wear.watchface.complications.data.SmallImageType
 import androidx.wear.watchface.complications.data.TimeDifferenceComplicationText
 import androidx.wear.watchface.complications.data.TimeDifferenceStyle
 import androidx.wear.watchface.complications.datasource.ComplicationDataSourceService
@@ -33,7 +37,9 @@ import java.util.concurrent.TimeUnit
  */
 object FaceComplications {
 
-    private val services = listOf(PumpComplicationService::class.java, LinkComplicationService::class.java, ForecastComplicationService::class.java)
+    private val services = listOf(
+        PumpComplicationService::class.java, LinkComplicationService::class.java, ForecastComplicationService::class.java, GraphComplicationService::class.java
+    )
 
     fun requestUpdate(context: Context) {
         if (!BuildConfig.MANUAL_TARGET) return
@@ -144,6 +150,29 @@ class LinkComplicationService : FactsComplicationService() {
     }
 
     override fun preview(): ComplicationData = short("помпа ✓", FaceComplications.plain("тел 2 мин"), "Телефон и помпа", FaceComplications.openLog(this))
+}
+
+/**
+ * The graph as a small image: the last hour of readings, the three-hour forecast, insulin on board
+ * and the trend arrow; see [FaceGraph]. A tap opens the log.
+ */
+class GraphComplicationService : FactsComplicationService() {
+
+    override fun onComplicationRequest(request: ComplicationRequest, listener: ComplicationRequestListener) {
+        listener.onComplicationData(if (request.complicationType == ComplicationType.SMALL_IMAGE) build(FaceComplications.facts(this)) else null)
+    }
+
+    override fun getPreviewData(type: ComplicationType): ComplicationData? = if (type == ComplicationType.SMALL_IMAGE) preview() else null
+
+    override fun build(facts: FaceFacts?): ComplicationData {
+        val bitmap = FaceGraph.draw(facts, System.currentTimeMillis())
+        return SmallImageComplicationData.Builder(
+            SmallImage.Builder(Icon.createWithBitmap(bitmap), SmallImageType.PHOTO).build(),
+            FaceComplications.plain(FaceGraph.describe(facts))
+        ).setTapAction(FaceComplications.openLog(this)).build()
+    }
+
+    override fun preview(): ComplicationData = build(null)
 }
 
 /** The four-hour forecast: lowest and last value, and whose forecast it is. */

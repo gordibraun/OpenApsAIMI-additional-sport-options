@@ -38,6 +38,13 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
 
     @Synchronized fun saveSnapshot(snapshot: RegulationSnapshot) = files.write(SNAPSHOT_FILE, snapshot.toJson())
 
+    // ---- what the face draws -----------------------------------------------------------------------
+
+    /** The watch's latest forecast series and insulin on board, written at each decision; see [AutonomyRunner]. */
+    @Synchronized fun faceForecast(): JSONObject? = runCatching { if (files.exists(FORECAST_FILE)) files.read(FORECAST_FILE) else null }.getOrNull()
+
+    @Synchronized fun saveFaceForecast(value: JSONObject) = files.write(FORECAST_FILE, value)
+
     // ---- sensor readings ---------------------------------------------------------------------------
 
     @Synchronized fun readings(): List<GlucoseReading> = runCatching {
@@ -194,6 +201,7 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
         const val DELIVERY_FILE = "autonomy-delivery.json"
         const val CARBS_FILE = "autonomy-carbs.json"
         const val JOURNAL_FILE = "autonomy-journal.json"
+        const val FORECAST_FILE = "autonomy-forecast.json"
 
         const val SAME_SAMPLE_MS = 60_000L
 

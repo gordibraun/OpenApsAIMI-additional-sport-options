@@ -170,6 +170,14 @@ internal class AutonomyRunner(
         if (!rehearsal) {
             if (action == WatchRegulator.Action.Leave) lastObserved = null
             store.addToJournal(entry)
+            // What the face draws while the watch is alone: the forecast with what runs now left to
+            // run its course, and insulin on board by the same model.
+            (decision.forecastAsRunningMgdl ?: decision.forecastMgdl)?.let { series ->
+                store.saveFaceForecast(
+                    JSONObject().put("at", now).put("byWatch", true).put("series", JSONArray(series))
+                        .put("iobU", decision.iobNowU ?: JSONObject.NULL)
+                )
+            }
             decision.carbsHintG?.let { grams ->
                 if (now - lastCarbsHintAtEpochMs >= CARBS_HINT_REPEAT_MS) {
                     lastCarbsHintAtEpochMs = now

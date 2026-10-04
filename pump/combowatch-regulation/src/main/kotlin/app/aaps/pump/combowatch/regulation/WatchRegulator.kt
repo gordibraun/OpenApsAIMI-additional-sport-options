@@ -111,7 +111,9 @@ class WatchRegulator {
          * Why the pump is left as it is although the rules want less basal, in the owner's language.
          * Null when something is set, and when nothing is wanted in the first place.
          */
-        val holdText: String? = null
+        val holdText: String? = null,
+        /** Insulin on board now, units, by the watch's forecast model; null without a usable snapshot. For the face. */
+        val iobNowU: Double? = null
     )
 
     private class Cap(val fraction: Double, val rule: Rule, val text: String)
@@ -293,7 +295,10 @@ class WatchRegulator {
         val asRunning = if (running == null || forecast == null) null else runCatching {
             forecast.series(basalNow * runningPercent / 100.0, ceil(remainingMinutes).toInt().coerceAtLeast(1))
         }.getOrNull()
-        return Decision(action, rule, wantedPercent, text, carbsHint, trend, forecastMin, forecastEnd, atProfile, asRunning, hold)
+        return Decision(
+            action, rule, wantedPercent, text, carbsHint, trend, forecastMin, forecastEnd, atProfile, asRunning, hold,
+            forecast?.let { runCatching { it.iobNowU() }.getOrNull()?.takeIf { iob -> iob.isFinite() } }
+        )
     }
 
     /** The phone's first-stage basal guard, run on the watch's own glucose. */

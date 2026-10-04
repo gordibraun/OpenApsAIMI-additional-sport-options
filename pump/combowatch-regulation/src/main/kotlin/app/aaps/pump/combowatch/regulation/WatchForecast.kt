@@ -166,6 +166,22 @@ internal class WatchForecast(
         ).map { it.roundToInt() }
     }
 
+    /**
+     * Insulin on board now, in units: what is left of the insulin the snapshot knew of, plus what
+     * the pump has given since, net of what the snapshot assumed - the forecast's own corrections,
+     * summed instead of spread over the coming hours. For the face; nothing is decided on it.
+     */
+    fun iobNowU(): Double {
+        var left = 0.0
+        val end = snapshot.madeAtEpochMs + snapshot.insulinActivity.lastIndex * 300_000L
+        var at = nowEpochMs
+        while (at <= end) {
+            left += snapshotActivityAt(at) * 5.0
+            at += 300_000L
+        }
+        return left + unaccounted.sum()
+    }
+
     companion object {
 
         /** Four hours in five-minute steps, the horizon of the phone's forecast. */

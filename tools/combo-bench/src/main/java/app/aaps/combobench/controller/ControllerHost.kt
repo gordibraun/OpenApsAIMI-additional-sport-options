@@ -26,6 +26,7 @@ import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import app.aaps.pump.combowatch.protocol.WatchHeartbeat
 import app.aaps.pump.combowatch.regulation.CarbsRecord
 import app.aaps.pump.combowatch.regulation.GlucoseReading
+import app.aaps.pump.combowatch.regulation.GlucoseTrend
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -448,16 +449,21 @@ internal class ControllerHost private constructor(context: Context) {
         observeLeadership()
         val led = leadership.current()
         // The phone's forecast travels with every lease; the watch's own stands only while it is alone.
+        val phoneSnapshot = autonomy.snapshot()
+        val own = if (alone) autonomy.faceForecast() else null
         val forecast = if (alone) {
-            autonomy.journal().lastOrNull()?.let { entry ->
+            val series = own?.optJSONArray("series")?.let { array -> List(array.length()) { array.getInt(it) } }.orEmpty()
+            if (series.isNotEmpty()) FaceFacts.Forecast(series.min(), series.last(), own?.optLong("at", now) ?: now, byWatch = true, series = series)
+            else autonomy.journal().lastOrNull()?.let { entry ->
                 val min = entry.optInt("forecastMin", -1); val end = entry.optInt("forecastEnd", -1)
                 if (min > 0 && end > 0) FaceFacts.Forecast(min, end, entry.optLong("at", now), byWatch = true) else null
             }
         } else {
-            autonomy.snapshot()?.let { snapshot ->
-                snapshot.phoneForecast?.takeIf { it.isNotEmpty() }?.let { FaceFacts.Forecast(it.min(), it.last(), snapshot.madeAtEpochMs, byWatch = false) }
-            }
+            phoneSnapshot?.phoneForecast?.takeIf { it.isNotEmpty() }
+                ?.let { FaceFacts.Forecast(it.min(), it.last(), phoneSnapshot.madeAtEpochMs, byWatch = false, series = it) }
         }
+        val allReadings = autonomy.readings()
+        val iob = if (alone) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneSnapshot?.iobU
         return FaceFacts(
             heldPump = held,
             phoneHeardEpochMs = phoneLastHeardEpochMs,
@@ -473,7 +479,12 @@ internal class ControllerHost private constructor(context: Context) {
             alone = alone,
             leader = led?.leader ?: if (alone) LeadershipLog.Leader.WATCH else LeadershipLog.Leader.PHONE,
             leaderSinceEpochMs = led?.atEpochMs ?: 0L,
-            forecast = forecast
+            forecast = forecast,
+            readings = allReadings.filter { it.atEpochMs >= now - FACE_HISTORY_MS },
+            deltaPer5Min = GlucoseTrend.from(allReadings, now)?.takeIf { it.known }?.delta,
+            iobU = iob,
+            cobG = if (alone) null else phoneSnapshot?.cobG,
+            targetMgdl = phoneSnapshot?.targetMgdl?.takeIf { it.isFinite() && it > 0 }
         )
     }
 
@@ -568,6 +579,9 @@ internal class ControllerHost private constructor(context: Context) {
         const val REHEARSAL_FILE = "autonomy-rehearsal.json"
         private const val PHONE_HEARD_FILE = "controller-phone-heard.json"
         private const val LEADERSHIP_FILE = "leadership-log.json"
+
+        /** How far back the face's graph reaches. */
+        private const val FACE_HISTORY_MS = 90 * 60_000L
         private const val CARBS_CHANNEL = "combo-autonomy-carbs"
 
 
