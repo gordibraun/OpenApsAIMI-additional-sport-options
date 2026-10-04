@@ -89,6 +89,15 @@ internal class ControllerHost private constructor(context: Context) {
         journal, session
     ) { System.currentTimeMillis() }
 
+    /** Who leads the basal and when that changed; see [LeadershipLog]. */
+    private val leadership = LeadershipLog(
+        load = {
+            if (!files.exists(LEADERSHIP_FILE)) emptyList()
+            else files.read(LEADERSHIP_FILE).getJSONArray("entries").let { array -> List(array.length()) { array.getJSONObject(it) } }
+        },
+        save = { entries -> files.write(LEADERSHIP_FILE, JSONObject().put("entries", JSONArray(entries))) }
+    )
+
     private val runner: AutonomyRunner = AutonomyRunner(
         store = autonomy,
         executor = executor,
@@ -244,10 +253,26 @@ internal class ControllerHost private constructor(context: Context) {
         JSONObject(payload).optJSONObject(RegulationSnapshot.KEY_IN_LEASE)?.let { saved ->
             runCatching { autonomy.saveSnapshot(RegulationSnapshot.fromJson(saved)) }
         }
+        observeLeadership()
         // The phone is here: whatever the watch noted and did meanwhile goes to it now.
         sendEvents()
         sendHeartbeat()
     }
+
+    /** Note who leads now; a line is written to the log when that changed since the last look. */
+    private fun observeLeadership(): LeadershipLog.Entry? {
+        val current = lease
+        return runCatching {
+            leadership.observe(
+                standing = runner.standing(), mode = autonomy.mode(), nowEpochMs = System.currentTimeMillis(),
+                phoneHeardEpochMs = phoneLastHeardEpochMs, leaseExpiresEpochMs = current?.expiresAtEpochMs,
+                leaseRevoked = current?.controllerIsWatch == false
+            )
+        }.getOrNull()
+    }
+
+    /** The lines of the leadership log, oldest first; for the owner's screen. */
+    fun leadershipEntries(): List<LeadershipLog.Entry> = leadership.entries()
 
     // ---- the watch on its own ----------------------------------------------------------------------
 
@@ -258,6 +283,8 @@ internal class ControllerHost private constructor(context: Context) {
      */
     fun keepReading(mgdl: Int, sampledAtEpochMs: Long): Boolean {
         if (!autonomy.addReading(GlucoseReading(sampledAtEpochMs, mgdl.toDouble()))) return false
+        // A reading is also when the phone's silence is found to have grown long enough.
+        if (observeLeadership() != null) refreshFace()
         return runner.wantsToRun() || runner.needsSettling()
     }
 
@@ -293,6 +320,7 @@ internal class ControllerHost private constructor(context: Context) {
 
     fun onCommand(payload: String): ComboResult = synchronized(pumpTurn) {
         phoneHeard()
+        observeLeadership()
         val command = ComboCommand.fromJson(JSONObject(payload))
         // The bench's own manual sessions use the same pump and pairing; never overlap with them.
         if (ManualPumpRuntime.get(context).usingBluetoothNow())
@@ -417,6 +445,8 @@ internal class ControllerHost private constructor(context: Context) {
                 ?.let { FaceFacts.Tbr(it.tbrPercentage!!, it.readAtEpochMs + it.tbrRemainingMinutes!! * 60_000L) }
                 ?.takeIf { it.endsAtEpochMs > now }
         val alone = runner.standing() == AutonomyPolicy.Standing.Alone
+        observeLeadership()
+        val led = leadership.current()
         // The phone's forecast travels with every lease; the watch's own stands only while it is alone.
         val forecast = if (alone) {
             autonomy.journal().lastOrNull()?.let { entry ->
@@ -432,14 +462,17 @@ internal class ControllerHost private constructor(context: Context) {
             heldPump = held,
             phoneHeardEpochMs = phoneLastHeardEpochMs,
             leaseLive = lease?.liveAt(now) == true,
-            // "Answers" means read within the last quarter of an hour and not failed to reach since;
-            // the in-memory flag alone would say "no" after every restart until the next read.
-            pumpReachable = pump?.readAtEpochMs?.let { readAt -> now - readAt < PUMP_ANSWERED_WITHIN_MS && pumpNotReachedAtEpochMs < readAt } == true,
+            // "Answers" means the last reading of it succeeded and no attempt has failed since. No age
+            // limit: alone, the watch may rightly leave the pump untouched for hours, and a cross
+            // would then only say that nobody asked. A failed attempt flips it at once.
+            pumpReachable = pump?.readAtEpochMs?.let { readAt -> pumpNotReachedAtEpochMs < readAt } == true,
             pumpReadAtEpochMs = pump?.readAtEpochMs,
             tbr = tbr,
             reservoirUnits = pump?.reservoirUnits,
             mode = autonomy.mode(),
             alone = alone,
+            leader = led?.leader ?: if (alone) LeadershipLog.Leader.WATCH else LeadershipLog.Leader.PHONE,
+            leaderSinceEpochMs = led?.atEpochMs ?: 0L,
             forecast = forecast
         )
     }
@@ -534,10 +567,9 @@ internal class ControllerHost private constructor(context: Context) {
         const val HEARTBEAT_FILE = "controller-heartbeat.json"
         const val REHEARSAL_FILE = "autonomy-rehearsal.json"
         private const val PHONE_HEARD_FILE = "controller-phone-heard.json"
+        private const val LEADERSHIP_FILE = "leadership-log.json"
         private const val CARBS_CHANNEL = "combo-autonomy-carbs"
 
-        /** For the face: a pump read this recently, with no failure since, counts as answering. */
-        private const val PUMP_ANSWERED_WITHIN_MS = 15 * 60_000L
 
         /** The longest the pump is held back for the sensor; a window and a session, with room to spare. */
         private const val MAX_SENSOR_WAIT_MS = 2 * 60_000L

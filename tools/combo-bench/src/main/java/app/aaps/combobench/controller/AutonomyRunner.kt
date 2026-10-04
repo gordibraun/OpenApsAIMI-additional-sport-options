@@ -129,7 +129,7 @@ internal class AutonomyRunner(
         }
 
         when (action) {
-            WatchRegulator.Action.Leave     -> entry.put("action", "LEAVE")
+            WatchRegulator.Action.Leave     -> entry.put("action", "LEAVE").put("hold", decision.holdText ?: JSONObject.NULL)
 
             is WatchRegulator.Action.SetTbr -> {
                 entry.put("action", "TBR ${action.percent} % ${action.durationMinutes} min")

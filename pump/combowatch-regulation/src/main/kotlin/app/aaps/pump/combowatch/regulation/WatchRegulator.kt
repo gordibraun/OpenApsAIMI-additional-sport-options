@@ -106,7 +106,12 @@ class WatchRegulator {
          * hold against the phone's own forecast, which counts the basal it has just set. Null when
          * no temporary basal runs: then it is [forecastMgdl].
          */
-        val forecastAsRunningMgdl: List<Int>? = null
+        val forecastAsRunningMgdl: List<Int>? = null,
+        /**
+         * Why the pump is left as it is although the rules want less basal, in the owner's language.
+         * Null when something is set, and when nothing is wanted in the first place.
+         */
+        val holdText: String? = null
     )
 
     private class Cap(val fraction: Double, val rule: Rule, val text: String)
@@ -268,10 +273,27 @@ class WatchRegulator {
                 ) set else Action.Leave
         }
 
+        // The rule that held the watch back, for the owner's journal, next to the one that asked.
+        val remainingText = "ещё ${ceil(remainingMinutes).toInt()} мин"
+        val whose = if (running?.byWatch == true) "от часов" else "от телефона"
+        val hold: String? = if (action != Action.Leave) null else when {
+            wantedPercent >= 100                               -> when {
+                running == null || runningPercent == 100 -> null
+                runningPercent > 100                     -> "на помпе $runningPercent % $whose ($remainingText): прогноз это выдерживает"
+                else                                     -> "на помпе уже $runningPercent % $whose, $remainingText: пусть доработает"
+            }
+            wantedPercent >= NEAR_PROFILE_PERCENT              -> "$wantedPercent % вместо профиля не стоят соединения с помпой"
+            wantedPercent < runningPercent                     -> "шаг вниз с $runningPercent % до $wantedPercent % меньше $MIN_LOWER_PERCENT %: ждём конца текущего базала ($remainingText)"
+            wantedPercent == runningPercent                    -> "на помпе уже $runningPercent %, $remainingText"
+            running?.byWatch != true                           -> "на помпе $runningPercent % $whose ($remainingText): это меньше нужного, а поднимать чужой базал часы не станут"
+            wantedPercent - runningPercent < MIN_RAISE_PERCENT -> "подъём с $runningPercent % до $wantedPercent % меньше $MIN_RAISE_PERCENT %: не стоит соединения"
+            else                                               -> "базал $runningPercent % держится меньше $MIN_MINUTES_BEFORE_RAISE мин: поднимать рано"
+        }
+
         val asRunning = if (running == null || forecast == null) null else runCatching {
             forecast.series(basalNow * runningPercent / 100.0, ceil(remainingMinutes).toInt().coerceAtLeast(1))
         }.getOrNull()
-        return Decision(action, rule, wantedPercent, text, carbsHint, trend, forecastMin, forecastEnd, atProfile, asRunning)
+        return Decision(action, rule, wantedPercent, text, carbsHint, trend, forecastMin, forecastEnd, atProfile, asRunning, hold)
     }
 
     /** The phone's first-stage basal guard, run on the watch's own glucose. */

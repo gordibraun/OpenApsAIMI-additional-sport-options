@@ -20,6 +20,9 @@ class FaceFacts(
     val mode: AutonomyPolicy.Mode,
     /** True while the watch is on its own with the pump. */
     val alone: Boolean,
+    /** Who leads the basal now, and since when; see [LeadershipLog]. */
+    val leader: LeadershipLog.Leader,
+    val leaderSinceEpochMs: Long,
     val forecast: Forecast?
 ) {
 

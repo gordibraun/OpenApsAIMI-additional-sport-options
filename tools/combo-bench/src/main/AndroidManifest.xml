@@ -17,6 +17,7 @@
         <activity android:name=".ManualPairingActivity" android:exported="false"
             android:taskAffinity="${applicationId}" android:windowSoftInputMode="adjustResize" />
         <activity android:name=".ManualPumpSetupActivity" android:exported="false" />
+        <activity android:name=".ControlLogActivity" android:exported="false" />
         <service android:name="app.aaps.combobench.PairingForegroundService" android:exported="false" android:foregroundServiceType="connectedDevice" />
         <service android:name=".BenchListener" android:exported="true">
             <intent-filter>

@@ -17,6 +17,7 @@ import androidx.wear.watchface.complications.datasource.ComplicationDataSourceSe
 import androidx.wear.watchface.complications.datasource.ComplicationDataSourceUpdateRequester
 import androidx.wear.watchface.complications.datasource.ComplicationRequest
 import app.aaps.combobench.BuildConfig
+import app.aaps.combobench.ControlLogActivity
 import app.aaps.combobench.ManualPumpSetupActivity
 import app.aaps.pump.combowatch.executor.AutonomyPolicy
 import java.time.Instant
@@ -44,9 +45,11 @@ object FaceComplications {
     internal fun plain(text: String): ComplicationText = PlainComplicationText.Builder(text).build()
 
     /** Minutes since [epochMs], counted by the face; [text] wraps it, with `^1` where the minutes go. */
-    internal fun sinceMinutes(epochMs: Long, text: String? = null): ComplicationText =
-        TimeDifferenceComplicationText.Builder(TimeDifferenceStyle.SHORT_SINGLE_UNIT, CountUpTimeReference(Instant.ofEpochMilli(epochMs)))
-            .setMinimumTimeUnit(TimeUnit.MINUTES).apply { text?.let { setText(it) } }.build()
+    internal fun sinceMinutes(epochMs: Long, text: String? = null, words: Boolean = false): ComplicationText =
+        TimeDifferenceComplicationText.Builder(
+            if (words) TimeDifferenceStyle.WORDS_SINGLE_UNIT else TimeDifferenceStyle.SHORT_SINGLE_UNIT,
+            CountUpTimeReference(Instant.ofEpochMilli(epochMs))
+        ).setMinimumTimeUnit(TimeUnit.MINUTES).apply { text?.let { setText(it) } }.build()
 
     internal fun untilMinutes(epochMs: Long): ComplicationText =
         TimeDifferenceComplicationText.Builder(TimeDifferenceStyle.SHORT_SINGLE_UNIT, CountDownTimeReference(Instant.ofEpochMilli(epochMs)))
@@ -55,6 +58,12 @@ object FaceComplications {
     /** Opens the controller's screen: pump, mode, journal. */
     internal fun openController(context: Context): PendingIntent = PendingIntent.getActivity(
         context, 7, Intent(context, ManualPumpSetupActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    /** Opens the log of who led the basal when, and what the watch decided by itself. */
+    internal fun openLog(context: Context): PendingIntent = PendingIntent.getActivity(
+        context, 8, Intent(context, ControlLogActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
@@ -73,10 +82,10 @@ abstract class FactsComplicationService : ComplicationDataSourceService() {
     abstract fun build(facts: FaceFacts?): ComplicationData
     abstract fun preview(): ComplicationData
 
-    protected fun short(text: String, title: ComplicationText?, description: String): ComplicationData =
+    protected fun short(text: String, title: ComplicationText?, description: String, tap: PendingIntent = FaceComplications.openController(this)): ComplicationData =
         ShortTextComplicationData.Builder(FaceComplications.plain(text), FaceComplications.plain(description))
             .apply { title?.let { setTitle(it) } }
-            .setTapAction(FaceComplications.openController(this))
+            .setTapAction(tap)
             .build()
 }
 
@@ -97,39 +106,44 @@ class PumpComplicationService : FactsComplicationService() {
 }
 
 /**
- * Who is in charge and whether the pump answers, over how long since the phone was heard: "помпа ✓"
- * above "тел 2м" while the phone commands; "часы ✓" above "тел 12м" while the watch, with the phone
- * away, keeps basal by itself. The text is the first line, the title the second.
+ * The pump's state over who leads the basal and for how long: "помпа ✓" above "тел 2 мин" while the
+ * phone leads (two minutes since it was heard); "помпа ✓" above "часы 12 мин" while the watch, with
+ * the phone away, has been keeping basal by itself for twelve. The first line never changes its
+ * meaning. A tap opens the log that explains the changes of lead and the watch's decisions.
  */
 class LinkComplicationService : FactsComplicationService() {
 
     override fun build(facts: FaceFacts?): ComplicationData {
-        if (facts == null) return short("—", FaceComplications.plain("связь"), "Состояние связи неизвестно")
-        val phone: ComplicationText =
-            if (facts.phoneHeardEpochMs > 0L) FaceComplications.sinceMinutes(facts.phoneHeardEpochMs, "тел ^1") else FaceComplications.plain("тел нет")
-        // Alone with the mode off, the watch does nothing of its own; the pump's state is the news then.
-        val watchInCharge = facts.alone && facts.mode != AutonomyPolicy.Mode.OFF
-        val text = when {
-            watchInCharge && facts.mode == AutonomyPolicy.Mode.ACTIVE -> "часы ✓"
-            watchInCharge                                             -> "наблюд."
-            facts.heldPump == null                                    -> "нет помпы"
-            facts.pumpReachable                                       -> "помпа ✓"
-            else                                                      -> "помпа ✗"
+        if (facts == null) return short("—", FaceComplications.plain("связь"), "Состояние связи неизвестно", FaceComplications.openLog(this))
+        val pump = when {
+            facts.heldPump == null -> "нет помпы"
+            facts.pumpReachable    -> "помпа ✓"
+            else                   -> "помпа ✗"
         }
-        val description = when {
-            watchInCharge && facts.mode == AutonomyPolicy.Mode.ACTIVE -> "Телефона нет: часы сами ведут базал"
-            watchInCharge                                             -> "Телефона нет: часы только наблюдают"
-            facts.heldPump == null                                    -> "Помпа к часам не привязана"
-            facts.pumpReachable                                       -> "Командует телефон, помпа отвечает"
-            else                                                      -> "Командует телефон, помпа не отвечает"
+        val watchLeads = facts.leader == LeadershipLog.Leader.WATCH || facts.leader == LeadershipLog.Leader.WATCH_OBSERVING
+        val who: ComplicationText = when {
+            watchLeads && facts.leaderSinceEpochMs > 0L -> FaceComplications.sinceMinutes(facts.leaderSinceEpochMs, "часы ^1", words = true)
+            facts.phoneHeardEpochMs > 0L                -> FaceComplications.sinceMinutes(facts.phoneHeardEpochMs, "тел ^1", words = true)
+            else                                        -> FaceComplications.plain("тел нет")
         }
-        return ShortTextComplicationData.Builder(FaceComplications.plain(text), FaceComplications.plain(description))
-            .setTitle(phone)
-            .setTapAction(FaceComplications.openController(this))
+        val lead = when (facts.leader) {
+            LeadershipLog.Leader.WATCH           -> "Телефона нет: базал ведут часы"
+            LeadershipLog.Leader.WATCH_OBSERVING -> "Телефона нет: часы только наблюдают"
+            LeadershipLog.Leader.NOBODY          -> "Телефона нет, часы базал не ведут"
+            LeadershipLog.Leader.PHONE           -> "Ведёт телефон"
+        }
+        val pumpState = when {
+            facts.heldPump == null -> "помпа к часам не привязана"
+            facts.pumpReachable    -> "помпа отвечает"
+            else                   -> "помпа не отвечает"
+        }
+        return ShortTextComplicationData.Builder(FaceComplications.plain(pump), FaceComplications.plain("$lead; $pumpState"))
+            .setTitle(who)
+            .setTapAction(FaceComplications.openLog(this))
             .build()
     }
 
-    override fun preview(): ComplicationData = short("помпа ✓", FaceComplications.plain("тел 2м"), "Телефон и помпа")
+    override fun preview(): ComplicationData = short("помпа ✓", FaceComplications.plain("тел 2 мин"), "Телефон и помпа", FaceComplications.openLog(this))
 }
 
 /** The four-hour forecast: lowest and last value, and whose forecast it is. */
@@ -143,7 +157,7 @@ class ForecastComplicationService : FactsComplicationService() {
             FaceComplications.plain("Прогноз: минимум ${forecast.minMgdl}, через четыре часа ${forecast.endMgdl}; расчёт: $whose")
         )
             .setTitle(FaceComplications.plain(whose))
-            .setTapAction(FaceComplications.openController(this))
+            .setTapAction(FaceComplications.openLog(this))
             .build()
     }
 

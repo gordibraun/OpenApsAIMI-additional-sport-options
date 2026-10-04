@@ -306,6 +306,20 @@ class WatchRegulatorTest {
         assertThat(fixture.decide().action).isEqualTo(Action.SetTbr(90, 30))
     }
 
+    @Test fun `when the pump is left as it is, the journal is told which rule held the watch back`() {
+        // 4 Oct 12:18: 92 and falling asked for 50 %, the phone's 40 % ran on; the owner saw "LEAVE" and no why.
+        val fixture = Fixture().glucose(95.0, per5 = -1.5)
+        fixture.tbrs = listOf(TbrSegment(fixture.minutesAgo(8.0), 40, 30, byWatch = false))
+        val decision = fixture.decide()
+        assertThat(decision.wantedPercent).isEqualTo(50)
+        assertThat(decision.action).isEqualTo(Action.Leave)
+        assertThat(decision.holdText).contains("40 %")
+        assertThat(decision.holdText).contains("от телефона")
+
+        fixture.tbrs = listOf(TbrSegment(fixture.minutesAgo(8.0), 20, 30, byWatch = true))
+        assertThat(fixture.decide().holdText).contains("меньше 15 мин")
+    }
+
     @Test fun `a reduction the phone left behind is never raised by the watch`() {
         val fixture = Fixture().glucose(125.0, per5 = +2.0)
         fixture.tbrs = listOf(TbrSegment(fixture.minutesAgo(12.0), 0, 30, byWatch = false))
