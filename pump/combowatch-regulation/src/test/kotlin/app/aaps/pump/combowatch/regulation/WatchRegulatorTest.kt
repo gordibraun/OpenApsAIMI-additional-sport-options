@@ -320,6 +320,21 @@ class WatchRegulatorTest {
         assertThat(fixture.decide().holdText).contains("меньше 15 мин")
     }
 
+    @Test fun `a walk entered on the watch keeps basal at eighty per cent, sport at seventy, from an hour before`() {
+        val fixture = Fixture().glucose(140.0, per5 = 0.0)
+        assertThat(fixture.decide().action).isEqualTo(Action.Leave)
+        fixture.activities = listOf(ActivityRecord(fixture.now + 20 * 60_000L, 30, "WALK"))
+        val walk = fixture.decide()
+        assertThat(walk.rule).isEqualTo(Rule.ACTIVITY)
+        assertThat(walk.action).isEqualTo(Action.SetTbr(80, 30))
+        assertThat(walk.explanation).contains("прогулка")
+        fixture.activities = listOf(ActivityRecord(fixture.now, 50, "SPORT"))
+        assertThat(fixture.decide().action).isEqualTo(Action.SetTbr(70, 30))
+        // Two hours after a half-hour walk nothing is left of it.
+        fixture.activities = listOf(ActivityRecord(fixture.now - 150 * 60_000L, 30, "WALK"))
+        assertThat(fixture.decide().action).isEqualTo(Action.Leave)
+    }
+
     @Test fun `a reduction the phone left behind is never raised by the watch`() {
         val fixture = Fixture().glucose(125.0, per5 = +2.0)
         fixture.tbrs = listOf(TbrSegment(fixture.minutesAgo(12.0), 0, 30, byWatch = false))

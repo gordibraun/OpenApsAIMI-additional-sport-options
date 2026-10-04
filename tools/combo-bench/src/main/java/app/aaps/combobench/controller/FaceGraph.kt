@@ -54,6 +54,16 @@ internal object FaceGraph {
         fun x(minutesFromNow: Double) = (PLOT_LEFT + (minutesFromNow + HISTORY_MIN) / total * (PLOT_RIGHT - PLOT_LEFT)).toFloat()
         fun y(mgdl: Double) = (PLOT_BOTTOM - ((mgdl - low) / (high - low)).coerceIn(0.0, 1.0) * (PLOT_BOTTOM - PLOT_TOP)).toFloat()
 
+        // The activity's time as a band: the session itself, and its fading tail lighter.
+        facts?.activity?.let { activity ->
+            fun minutes(epochMs: Long) = ((epochMs - nowEpochMs) / 60_000.0).coerceIn(-HISTORY_MIN.toDouble(), FORECAST_MIN.toDouble())
+            val from = minutes(activity.startEpochMs); val activeTo = minutes(activity.activeEndEpochMs); val tailTo = minutes(activity.tailEndEpochMs)
+            paint.color = 0x334DD0E1
+            if (activeTo > from) canvas.drawRect(x(from), PLOT_TOP, x(activeTo), PLOT_BOTTOM, paint)
+            paint.color = 0x1A4DD0E1
+            if (tailTo > activeTo) canvas.drawRect(x(activeTo), PLOT_TOP, x(tailTo), PLOT_BOTTOM, paint)
+        }
+
         // Guides: the target and the 80 line, each with its value at the left end, and now.
         val label = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 11f }
         paint.strokeWidth = 1f

@@ -1,6 +1,7 @@
 package app.aaps.combobench.controller
 
 import app.aaps.pump.combowatch.executor.AutonomyPolicy
+import app.aaps.pump.combowatch.regulation.ActivityRecord
 import app.aaps.pump.combowatch.regulation.GlucoseReading
 
 /**
@@ -34,7 +35,9 @@ class FaceFacts(
     /** Carbohydrates on board, grams, when known. */
     val cobG: Double? = null,
     /** The phone's glucose target, mg/dL, when known. */
-    val targetMgdl: Double? = null
+    val targetMgdl: Double? = null,
+    /** The walk or sport session entered on the watch that matters now, if any. */
+    val activity: ActivityRecord? = null
 ) {
 
     /** The temporary basal running now, as far as the controller knows. */

@@ -82,6 +82,9 @@ class WatchRegulator {
         /** Basal has been at zero for an hour with glucose no longer low: a minimum is restored. */
         ZERO_LIMIT,
 
+        /** A walk or a sport session the owner entered: basal is kept down for it and the hour before. */
+        ACTIVITY,
+
         /** Nothing calls for less basal than the profile. */
         ALL_CLEAR
     }
@@ -218,6 +221,19 @@ class WatchRegulator {
                     floorFraction, Rule.FORECAST_LOW,
                     "$glucoseText: прогноз опускается до ${forecastMin ?: "?"}, ниже ${n(mustStayAbove)} — базал ${percentOf(floorFraction)} %"
                 )
+            }
+        }
+
+        // ---- a walk or a sport session the owner entered on the watch ----
+        // The phone keeps the pump at 80 % for a walk and 70 % for sport, from an hour before the
+        // start to the end, fading over the tail; the forecast above already counts the glucose
+        // the activity uses. The same cap here, so that the watch alone treats it the same way.
+        ActivityEffect.current(inputs.delivery.activities, now)?.let { activity ->
+            val factor = ActivityEffect.newInsulinFactor(activity, now)
+            if (factor < 1.0 - 1e-3) {
+                val startsIn = ((activity.startEpochMs - now) / 60_000.0).roundToInt()
+                val phase = if (startsIn > 0) "через $startsIn мин" else "идёт"
+                caps += Cap(factor, Rule.ACTIVITY, "$glucoseText: нагрузка (${ActivityEffect.name(activity.mode)} ${activity.durationMinutes} мин, $phase) — базал не выше ${percentOf(factor)} %")
             }
         }
 

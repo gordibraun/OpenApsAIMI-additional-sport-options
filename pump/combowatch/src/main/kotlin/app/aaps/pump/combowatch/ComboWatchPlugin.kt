@@ -32,6 +32,7 @@ import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.interfaces.Preferences
+import app.aaps.core.objects.activity.ActivityPlanCalculator
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.ComboResult
@@ -522,6 +523,33 @@ class ComboWatchPlugin @Inject constructor(
                 aapsLogger.info(LTag.PUMP, "combowatch: $grams g of carbohydrates entered on the watch filed")
             }
 
+            // A walk or a sport session entered on the watch. Filed as the phone files one entered
+            // through it - an EXERCISE event with the algorithm's own note - so that the loop counts
+            // it from its next run. No carbohydrates are planned here: the watch asks for those
+            // itself when its forecast needs them.
+            PumpEvent.Type.ACTIVITY             -> {
+                val mode = event.activityMode?.takeIf { it == "WALK" || it == "SPORT" }
+                val duration = event.activityDurationMinutes?.takeIf { it in 5..240 }
+                if (mode == null || duration == null) {
+                    aapsLogger.warn(LTag.PUMP, "combowatch: activity event ${event.seq} without a mode or a duration, skipped")
+                } else {
+                    val start = event.timestampEpochMs - event.timestampEpochMs % 1000
+                    val note = ActivityPlanCalculator.note(
+                        mode, ActivityPlanCalculator.effectPercent(mode), event.activityStartOffsetMinutes ?: 0, duration,
+                        ActivityPlanCalculator.tailMinutes(mode, duration), 0, event.note
+                    )
+                    persistenceLayer.insertPumpTherapyEventIfNewByTimestamp(
+                        therapyEvent = TE(
+                            timestamp = start, type = TE.Type.EXERCISE, duration = duration * 60_000L, note = note, glucoseUnit = GlucoseUnit.MGDL,
+                            ids = IDs(pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial)
+                        ),
+                        timestamp = start, action = Action.CAREPORTAL, source = Sources.Pump, note = note,
+                        listValues = listOf(ValueWithUnit.Timestamp(start), ValueWithUnit.TEType(TE.Type.EXERCISE), ValueWithUnit.Minute(duration))
+                    ).blockingGet()
+                    aapsLogger.info(LTag.PUMP, "combowatch: activity $mode $duration min entered on the watch filed")
+                }
+            }
+
             PumpEvent.Type.UNKNOWN              -> aapsLogger.debug(LTag.PUMP, "combowatch: event ${event.seq} is of a kind this build does not know")
         }
     }
@@ -538,6 +566,7 @@ class ComboWatchPlugin @Inject constructor(
         PumpEvent.Type.RESERVOIR_LOW        -> "помпа: мало инсулина"
         PumpEvent.Type.WATCH_NOTE           -> "часы сами: ${event.note}"
         PumpEvent.Type.CARBS                -> "часы: углеводы ${event.carbsGrams} г"
+        PumpEvent.Type.ACTIVITY             -> "часы: нагрузка ${if (event.activityMode == "SPORT") "спорт" else "прогулка"} ${event.activityDurationMinutes} мин"
         else                                -> null
     }
 

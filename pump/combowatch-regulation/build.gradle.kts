@@ -39,6 +39,7 @@ val sharedAlgorithmSources = tasks.register<Sync>("sharedAlgorithmSources") {
     }
     from(rootProject.file("core/objects/src/main/kotlin")) {
         include("app/aaps/core/objects/aps/MealAbsorptionSchedule.kt")
+        include("app/aaps/core/objects/activity/ActivityPlanCalculator.kt")
     }
     into(sharedAlgorithmDir)
 }

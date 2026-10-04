@@ -24,6 +24,8 @@ import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.PumpSnapshot
 import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import app.aaps.pump.combowatch.protocol.WatchHeartbeat
+import app.aaps.pump.combowatch.regulation.ActivityEffect
+import app.aaps.pump.combowatch.regulation.ActivityRecord
 import app.aaps.pump.combowatch.regulation.CarbsRecord
 import app.aaps.pump.combowatch.regulation.GlucoseReading
 import app.aaps.pump.combowatch.regulation.GlucoseTrend
@@ -304,6 +306,34 @@ internal class ControllerHost private constructor(context: Context) {
         refreshFace()
     }
 
+    /**
+     * A walk or a sport session the owner entered on the watch. Kept for the watch's own forecast
+     * and basal, and put in the queue for the phone, which records it as it would one entered
+     * through it, as soon as it is in touch. Nobody waits for the phone.
+     *
+     * @return true when the watch is on its own and should regulate now rather than at the next
+     *   reading; the caller does that on a worker thread, since it may be a pump session.
+     */
+    fun keepActivity(mode: String, durationMinutes: Int, startOffsetMinutes: Int, carbType: String?, atEpochMs: Long): Boolean {
+        val start = atEpochMs + startOffsetMinutes * 60_000L
+        val activity = ActivityRecord(start, durationMinutes, mode)
+        autonomy.addActivity(activity)
+        outbox.append(
+            PumpEvent(
+                0, PumpEvent.Type.ACTIVITY, start, pumpSerial = heldPump(), note = carbType,
+                activityMode = mode, activityDurationMinutes = durationMinutes, activityStartOffsetMinutes = startOffsetMinutes
+            )
+        )
+        val cap = (ActivityEffect.newInsulinFactor(activity, atEpochMs) * 100).toInt()
+        val text = "Нагрузка с часов: ${ActivityEffect.name(mode)} $durationMinutes мин, " +
+            (if (startOffsetMinutes > 0) "начало через $startOffsetMinutes мин" else "начало сейчас") +
+            ". Часы считают её в прогнозе и держат базал не выше $cap %; телефон запишет её, как только будет на связи"
+        autonomy.addToJournal(JSONObject().put("at", atEpochMs).put("action", "ACTIVITY").put("text", text).put("mode", autonomy.mode().name))
+        sendEvents()
+        refreshFace()
+        return runner.wantsToRun()
+    }
+
     /** Let the regulator look at the newest reading; see [AutonomyRunner.onReading]. */
     fun regulate(rehearsal: Boolean = false): JSONObject? = synchronized(pumpTurn) {
         val entry = runner.onReading(rehearsal)
@@ -463,6 +493,7 @@ internal class ControllerHost private constructor(context: Context) {
                 ?.let { FaceFacts.Forecast(it.min(), it.last(), phoneSnapshot.madeAtEpochMs, byWatch = false, series = it) }
         }
         val allReadings = autonomy.readings()
+        val activity = ActivityEffect.current(autonomy.activities(), now)
         val iob = if (alone) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneSnapshot?.iobU
         return FaceFacts(
             heldPump = held,
@@ -484,7 +515,8 @@ internal class ControllerHost private constructor(context: Context) {
             deltaPer5Min = GlucoseTrend.from(allReadings, now)?.takeIf { it.known }?.delta,
             iobU = iob,
             cobG = if (alone) null else phoneSnapshot?.cobG,
-            targetMgdl = phoneSnapshot?.targetMgdl?.takeIf { it.isFinite() && it > 0 }
+            targetMgdl = phoneSnapshot?.targetMgdl?.takeIf { it.isFinite() && it > 0 },
+            activity = activity
         )
     }
 

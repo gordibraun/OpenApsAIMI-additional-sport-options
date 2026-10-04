@@ -12,6 +12,7 @@ internal class Fixture(val now: Long = 1_800_000_000_000L) {
     var snapshot: RegulationSnapshot? = snapshot()
     var tbrs: List<TbrSegment> = emptyList()
     var boluses: List<BolusRecord> = emptyList()
+    var activities: List<ActivityRecord> = emptyList()
 
     fun minutesAgo(minutes: Double): Long = now - (minutes * 60_000).toLong()
 
@@ -55,7 +56,7 @@ internal class Fixture(val now: Long = 1_800_000_000_000L) {
         readings = readings,
         snapshot = snapshot,
         pumpBasalUph = basal,
-        delivery = DeliveryLog(tbrs, boluses),
+        delivery = DeliveryLog(tbrs, boluses, activities = activities),
         hourOfDay = { 12 }
     )
 

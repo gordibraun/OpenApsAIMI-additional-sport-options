@@ -28,7 +28,13 @@ data class CarbsRecord(val atEpochMs: Long, val grams: Int)
  * What the pump actually delivered lately, kept by the watch from its own driver's events.
  * It is the one thing about insulin the watch knows better than the phone's last snapshot.
  */
-class DeliveryLog(tbrs: List<TbrSegment> = emptyList(), val boluses: List<BolusRecord> = emptyList(), val carbs: List<CarbsRecord> = emptyList()) {
+class DeliveryLog(
+    tbrs: List<TbrSegment> = emptyList(),
+    val boluses: List<BolusRecord> = emptyList(),
+    val carbs: List<CarbsRecord> = emptyList(),
+    /** Walks and sport sessions the owner entered on the watch; see [ActivityEffect]. */
+    val activities: List<ActivityRecord> = emptyList()
+) {
 
     val tbrs: List<TbrSegment> = tbrs.sortedBy { it.startEpochMs }
 

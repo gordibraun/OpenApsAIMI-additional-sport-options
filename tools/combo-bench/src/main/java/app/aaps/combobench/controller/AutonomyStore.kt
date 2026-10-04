@@ -4,6 +4,7 @@ import app.aaps.combobench.JsonFiles
 import app.aaps.pump.combowatch.executor.AutonomyPolicy
 import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.RegulationSnapshot
+import app.aaps.pump.combowatch.regulation.ActivityRecord
 import app.aaps.pump.combowatch.regulation.BolusRecord
 import app.aaps.pump.combowatch.regulation.CarbsRecord
 import app.aaps.pump.combowatch.regulation.DeliveryLog
@@ -70,7 +71,7 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
     // ---- what the pump delivered -------------------------------------------------------------------
 
     @Synchronized fun delivery(): DeliveryLog = runCatching {
-        if (!files.exists(DELIVERY_FILE)) DeliveryLog(carbs = carbs())
+        if (!files.exists(DELIVERY_FILE)) DeliveryLog(carbs = carbs(), activities = activities())
         else files.read(DELIVERY_FILE).let { saved ->
             val tbrs = saved.getJSONArray("tbrs").let { array ->
                 List(array.length()) {
@@ -85,9 +86,33 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
             val boluses = saved.getJSONArray("boluses").let { array ->
                 List(array.length()) { array.getJSONObject(it).let { item -> BolusRecord(item.getLong("at"), item.getDouble("units")) } }
             }
-            DeliveryLog(tbrs, boluses, carbs())
+            DeliveryLog(tbrs, boluses, carbs(), activities())
         }
-    }.getOrDefault(DeliveryLog(carbs = carbs()))
+    }.getOrDefault(DeliveryLog(carbs = carbs(), activities = activities()))
+
+    // ---- walks and sport sessions entered on the watch -------------------------------------------------
+
+    @Synchronized fun activities(): List<ActivityRecord> = runCatching {
+        if (!files.exists(ACTIVITY_FILE)) emptyList()
+        else files.read(ACTIVITY_FILE).getJSONArray("activities").let { array ->
+            List(array.length()) {
+                array.getJSONObject(it).let { item -> ActivityRecord(item.getLong("start"), item.getInt("minutes"), item.getString("mode"), item.getInt("tail")) }
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    /** Keep an activity; one entered again for the same start replaces the earlier entry. Kept half a day past its tail. */
+    @Synchronized fun addActivity(activity: ActivityRecord) {
+        val kept = (activities().filter { kotlin.math.abs(it.startEpochMs - activity.startEpochMs) >= 60_000L } + activity)
+            .filter { it.tailEndEpochMs >= nowEpochMs() - KEEP_ACTIVITIES_MS }
+            .sortedBy { it.startEpochMs }
+        files.write(
+            ACTIVITY_FILE,
+            JSONObject().put("activities", JSONArray().apply {
+                kept.forEach { put(JSONObject().put("start", it.startEpochMs).put("minutes", it.durationMinutes).put("mode", it.mode).put("tail", it.tailMinutes)) }
+            })
+        )
+    }
 
     // ---- carbohydrates entered on the watch ---------------------------------------------------------
 
@@ -200,6 +225,8 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
         const val GLUCOSE_FILE = "autonomy-glucose.json"
         const val DELIVERY_FILE = "autonomy-delivery.json"
         const val CARBS_FILE = "autonomy-carbs.json"
+        const val ACTIVITY_FILE = "autonomy-activity.json"
+        const val KEEP_ACTIVITIES_MS = 12 * 60 * 60_000L
         const val JOURNAL_FILE = "autonomy-journal.json"
         const val FORECAST_FILE = "autonomy-forecast.json"
 

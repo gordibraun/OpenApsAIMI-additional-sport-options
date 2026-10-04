@@ -170,6 +170,27 @@ class WatchControlActivity : DaggerActivity() {
                     handler.postDelayed({ finish() }, 1_500)
                     return@setOnClickListener
                 }
+                // The same for a walk or a sport session: the controller counts it in the watch's
+                // own forecast and basal at once, and the phone records it when it is in touch.
+                if (requestKind == "ACTIVITY" && ComboWatchMode.isWatchMode(this@WatchControlActivity)) {
+                    buttons.forEach { it.isEnabled = false }
+                    runCatching {
+                        sendBroadcast(
+                            Intent(ComboRelay.ACTION_ACTIVITY)
+                                .setComponent(ComponentName(ComboRelay.CONTROLLER_PACKAGE, ComboRelay.CONTROLLER_ACTIVITY_RECEIVER))
+                                .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
+                                .putExtra("mode", mode)
+                                .putExtra("duration", duration)
+                                .putExtra("startOffset", start)
+                                .putExtra("carbType", carbType)
+                                .putExtra("timestamp", System.currentTimeMillis()),
+                            ComboRelay.PERMISSION_RELAY
+                        )
+                    }
+                    showStatus("Записано на часах: ${if (mode == "WALK") "прогулка" else "спорт"} $duration мин" + if (start > 0) ", через $start мин" else "")
+                    handler.postDelayed({ finish() }, 1_800)
+                    return@setOnClickListener
+                }
                 if (sp.getInt("watch_control_api_version", 0) < if (requestKind == "MEAL") 2 else 1) {
                     showStatus("Нужно обновить AAPS на телефоне и дождаться синхронизации.")
                     rxBus.send(EventWearToMobile(EventData.ActionResendData("Watch controls compatibility")))
@@ -198,7 +219,10 @@ class WatchControlActivity : DaggerActivity() {
                 LinearLayout.LayoutParams(-1, dp(34)).apply {
                     topMargin = dp(2); marginStart = dp(20); marginEnd = dp(20)
                 })
-        } else root.addView(action("Проверить на телефоне", kind), LinearLayout.LayoutParams(-1, -2))
+        } else root.addView(
+            action(if (kind == "ACTIVITY" && ComboWatchMode.isWatchMode(this)) "Записать на часах" else "Проверить на телефоне", kind),
+            LinearLayout.LayoutParams(-1, -2)
+        )
         root.addView(status)
         scroll.requestFocus()
     }

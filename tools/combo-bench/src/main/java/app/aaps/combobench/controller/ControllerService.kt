@@ -228,6 +228,31 @@ class ControllerCarbsReceiver : BroadcastReceiver() {
     }
 }
 
+/**
+ * A walk or a sport session entered on this watch - the AAPS watch app's activity screen, in the
+ * mode where the pump is driven through the watch. The watch keeps it and tells the phone when it
+ * can; see [ControllerHost.keepActivity]. The same choices the phone offers, nothing else.
+ */
+class ControllerActivityReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (!BuildConfig.MANUAL_TARGET) return
+        val mode = intent.getStringExtra("mode")?.takeIf { it == "WALK" || it == "SPORT" } ?: return
+        val duration = intent.getIntExtra("duration", 0).takeIf { it in ALLOWED_DURATIONS } ?: return
+        val startOffset = intent.getIntExtra("startOffset", 0).takeIf { it in ALLOWED_START_OFFSETS } ?: return
+        val at = intent.getLongExtra("timestamp", 0L).takeIf { it > 0L } ?: System.currentTimeMillis()
+        val regulateNow = runCatching { ControllerHost.get(context).keepActivity(mode, duration, startOffset, intent.getStringExtra("carbType"), at) }
+            .onFailure { Log.e("ComboController", "activity not kept: ${it.javaClass.simpleName}") }
+            .getOrDefault(false)
+        // With the phone away the basal is adjusted now, not at the next reading - on the service's thread, not here.
+        if (regulateNow) ControllerService.start(context, ControllerService.PATH_GLUCOSE, null)
+    }
+
+    private companion object {
+        val ALLOWED_DURATIONS = setOf(30, 50, 90)
+        val ALLOWED_START_OFFSETS = setOf(0, 20, 30, 50, 60)
+    }
+}
+
 /** Messages from the phone, handed over by the relay in the AAPS watch app. */
 class ControllerInboundReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {

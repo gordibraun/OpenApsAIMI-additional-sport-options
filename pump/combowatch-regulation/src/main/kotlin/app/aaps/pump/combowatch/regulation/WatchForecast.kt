@@ -132,7 +132,13 @@ internal class WatchForecast(
         remainingCarbsCap = REMAINING_CARBS_CAP_G
     )
 
-    private val profile = profileForForecast(snapshot.carbRatioGPerU, snapshot.sensitivityMgdlPerU, snapshot.targetMgdl)
+    /** The walk or sport session that matters now, if the owner entered one on the watch. */
+    private val activity: ActivityRecord? = ActivityEffect.current(delivery.activities, nowEpochMs)
+
+    /** Insulin works better during an activity; the phone multiplies its sensitivity the same way. */
+    private val sensitivity: Double = snapshot.sensitivityMgdlPerU * (activity?.let { ActivityEffect.isfMultiplier(it, nowEpochMs) } ?: 1.0)
+
+    private val profile = profileForForecast(snapshot.carbRatioGPerU, sensitivity, snapshot.targetMgdl)
 
     /**
      * Glucose every five minutes for the next four hours if the pump runs at [rateUph] for
@@ -146,10 +152,10 @@ internal class WatchForecast(
             IobTotal(time = at, activity = snapshotActivityAt(at) + extra)
         }
         val basalNow = pumpBasalUphAt(nowEpochMs)
-        return AdvancedPredictionEngine.predict(
+        val predicted = AdvancedPredictionEngine.predict(
             currentBG = trend.mgdl,
             iobArray = entries,
-            finalSensitivity = snapshot.sensitivityMgdlPerU,
+            finalSensitivity = sensitivity,
             cobG = cobNowG,
             profile = profile,
             delta = trend.delta,
@@ -164,6 +170,8 @@ internal class WatchForecast(
             targetBG = snapshot.targetMgdl,
             plannedInsulinAction = action
         ).map { it.roundToInt() }
+        // What the activity uses comes off afterwards, as the phone takes it off its predictions.
+        return activity?.let { ActivityEffect.adjust(predicted, it, nowEpochMs, basalNow, snapshot.sensitivityMgdlPerU) } ?: predicted
     }
 
     /**
