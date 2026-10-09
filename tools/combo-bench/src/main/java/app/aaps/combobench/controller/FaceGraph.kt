@@ -30,7 +30,11 @@ internal object FaceGraph {
     /** Forecast dots this far apart; the series itself is five minutes apart. */
     private const val FORECAST_STEP_MIN = 10
     private const val PLOT_TOP = 23f
-    private const val PLOT_BOTTOM = HEIGHT - 5f
+
+    /** The band under the plot holds the two lines the owner reads most: what to eat and the forecast's lowest point. */
+    private const val PLOT_BOTTOM = HEIGHT - 24f
+    private const val BOTTOM_BASELINE = HEIGHT - 5f
+    private const val BOTTOM_TEXT_SIZE = 19f
     private const val PLOT_LEFT = 4f
     private const val PLOT_RIGHT = WIDTH - 4f
 
@@ -93,15 +97,15 @@ internal object FaceGraph {
             canvas.drawText("${arrow(delta)} ${if (delta > 0) "+" else ""}${delta.roundToInt()}", PLOT_RIGHT, 17f, text)
         }
         facts?.forecast?.let { f ->
-            text.textSize = 13f; text.typeface = Typeface.DEFAULT; text.textAlign = Paint.Align.RIGHT
-            text.color = if (f.minMgdl < 80) 0xFFFF7043.toInt() else 0xFF9AA5AE.toInt()
-            canvas.drawText("мин ${f.minMgdl} · ${if (f.byWatch) "часы" else "тел"}", PLOT_RIGHT, PLOT_BOTTOM - 2f, text)
+            text.textSize = BOTTOM_TEXT_SIZE; text.typeface = Typeface.DEFAULT_BOLD; text.textAlign = Paint.Align.RIGHT
+            text.color = if (f.minMgdl < 80) 0xFFFF7043.toInt() else 0xFFB0BEC5.toInt()
+            canvas.drawText("мин ${f.minMgdl} · ${if (f.byWatch) "часы" else "тел"}", PLOT_RIGHT, BOTTOM_BASELINE, text)
         }
         // What to eat so that the forecast comes back up to the target; a few grams are not worth a line.
         facts?.carbsNeededG?.takeIf { it >= MIN_CARBS_SHOWN_G }?.let { grams ->
-            text.textSize = 15f; text.typeface = Typeface.DEFAULT_BOLD; text.textAlign = Paint.Align.LEFT
+            text.textSize = BOTTOM_TEXT_SIZE; text.typeface = Typeface.DEFAULT_BOLD; text.textAlign = Paint.Align.LEFT
             text.color = 0xFFFFB74D.toInt()
-            canvas.drawText("нужно $grams г", PLOT_LEFT, PLOT_BOTTOM - 2f, text)
+            canvas.drawText("нужно $grams г", PLOT_LEFT, BOTTOM_BASELINE, text)
         }
         return bitmap
     }
