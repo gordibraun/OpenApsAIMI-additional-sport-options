@@ -22,6 +22,9 @@ internal object FaceGraph {
     const val HEIGHT = 89
 
     private const val HISTORY_MIN = 60
+
+    /** Under this the shortfall to the target is not worth eating for. */
+    private const val MIN_CARBS_SHOWN_G = 5
     private const val FORECAST_MIN = 90
 
     /** Forecast dots this far apart; the series itself is five minutes apart. */
@@ -94,8 +97,8 @@ internal object FaceGraph {
             text.color = if (f.minMgdl < 80) 0xFFFF7043.toInt() else 0xFF9AA5AE.toInt()
             canvas.drawText("мин ${f.minMgdl} · ${if (f.byWatch) "часы" else "тел"}", PLOT_RIGHT, PLOT_BOTTOM - 2f, text)
         }
-        // What to eat so that the forecast comes back up to the target.
-        facts?.carbsNeededG?.takeIf { it > 0 }?.let { grams ->
+        // What to eat so that the forecast comes back up to the target; a few grams are not worth a line.
+        facts?.carbsNeededG?.takeIf { it >= MIN_CARBS_SHOWN_G }?.let { grams ->
             text.textSize = 15f; text.typeface = Typeface.DEFAULT_BOLD; text.textAlign = Paint.Align.LEFT
             text.color = 0xFFFFB74D.toInt()
             canvas.drawText("нужно $grams г", PLOT_LEFT, PLOT_BOTTOM - 2f, text)
