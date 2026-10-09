@@ -26,7 +26,9 @@ import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import app.aaps.pump.combowatch.protocol.WatchHeartbeat
 import app.aaps.pump.combowatch.regulation.ActivityEffect
 import app.aaps.pump.combowatch.regulation.ActivityRecord
+import app.aaps.pump.combowatch.regulation.CarbsNeeded
 import app.aaps.pump.combowatch.regulation.CarbsRecord
+import app.aaps.pump.combowatch.regulation.WatchRegulator
 import app.aaps.pump.combowatch.regulation.GlucoseReading
 import app.aaps.pump.combowatch.regulation.GlucoseTrend
 import org.json.JSONArray
@@ -112,7 +114,8 @@ internal class ControllerHost private constructor(context: Context) {
         askForCarbs = ::notifyCarbs,
         // The bench's own manual sessions use the same pump and pairing; never overlap with them.
         pumpInOtherUse = { ManualPumpRuntime.get(this.context).usingBluetoothNow() },
-        beforePumpSession = ::leaveTheSensorItsWindow
+        beforePumpSession = ::leaveTheSensorItsWindow,
+        lastPumpReadEpochMs = { savedSnapshot()?.readAtEpochMs }
     )
 
     /**
@@ -334,6 +337,38 @@ internal class ControllerHost private constructor(context: Context) {
         return runner.wantsToRun()
     }
 
+    /** The owner's bolus limit as the phone last said it, even under a lease that has since run out. */
+    private fun ownerBolusLimitTenths(): Int = lease?.maxBolusTenthsIU ?: maxBolusTenthsIU()
+
+    /** The dose for a meal, worked out on the watch; see [WatchRegulator.adviseBolus]. */
+    fun bolusAdvice(carbsG: Int): WatchRegulator.BolusAdvice = runner.adviseBolus(carbsG, ownerBolusLimitTenths())
+
+    /**
+     * The meal the owner confirmed on the watch: the carbohydrates are kept first - they are eaten
+     * whatever the pump does - then the bolus is given under the watch's own lease. A pump session;
+     * never called on the main thread. Returns the pump's answer, or null when no pump is paired.
+     */
+    fun deliverOwnerBolus(carbsG: Int, foodType: String?, tenthsIU: Int): ComboResult? = synchronized(pumpTurn) {
+        val now = System.currentTimeMillis()
+        if (carbsG > 0) keepCarbs(carbsG, now, foodType)
+        if (tenthsIU <= 0) return@synchronized null
+        val result = runner.deliverOwnerBolus(tenthsIU, ownerBolusLimitTenths())
+        val units = String.format(java.util.Locale.getDefault(), "%.1f", tenthsIU / 10.0)
+        val text = when (result?.outcome) {
+            Outcome.DONE    -> "Болюс с часов: $units ЕД на $carbsG г — подан"
+            Outcome.UNKNOWN -> "Болюс с часов: $units ЕД на $carbsG г — исход не выяснен, часы сверяются с помпой"
+            null            -> "Болюс с часов: $units ЕД на $carbsG г — помпа не привязана"
+            else            -> "Болюс с часов: $units ЕД на $carbsG г — ${result.outcome}: ${result.reason}"
+        }
+        autonomy.addToJournal(JSONObject().put("at", now).put("action", "BOLUS").put("text", text).put("mode", autonomy.mode().name))
+        // The phone learns of the bolus from the pump's own receipt; this line tells it why.
+        outbox.append(PumpEvent(0, PumpEvent.Type.WATCH_NOTE, now, pumpSerial = heldPump(), note = text))
+        result?.snapshot?.let { lastSnapshot = it }
+        sendEvents()
+        sendHeartbeat()
+        result
+    }
+
     /** Let the regulator look at the newest reading; see [AutonomyRunner.onReading]. */
     fun regulate(rehearsal: Boolean = false): JSONObject? = synchronized(pumpTurn) {
         val entry = runner.onReading(rehearsal)
@@ -494,6 +529,10 @@ internal class ControllerHost private constructor(context: Context) {
         }
         val allReadings = autonomy.readings()
         val activity = ActivityEffect.current(autonomy.activities(), now)
+        // Grams that would bring the forecast back up to the target: the watch's own number when
+        // alone, the same arithmetic on the phone's forecast and coefficients otherwise.
+        val carbsNeeded = if (alone) own?.optInt("carbsToTargetG", 0)?.takeIf { it > 0 }
+        else phoneSnapshot?.let { s -> forecast?.series?.takeIf { it.isNotEmpty() }?.let { CarbsNeeded.gramsToTarget(it, s.targetMgdl, s.sensitivityMgdlPerU, s.carbRatioGPerU) } }
         val iob = if (alone) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneSnapshot?.iobU
         return FaceFacts(
             heldPump = held,
@@ -516,7 +555,8 @@ internal class ControllerHost private constructor(context: Context) {
             iobU = iob,
             cobG = if (alone) null else phoneSnapshot?.cobG,
             targetMgdl = phoneSnapshot?.targetMgdl?.takeIf { it.isFinite() && it > 0 },
-            activity = activity
+            activity = activity,
+            carbsNeededG = carbsNeeded
         )
     }
 

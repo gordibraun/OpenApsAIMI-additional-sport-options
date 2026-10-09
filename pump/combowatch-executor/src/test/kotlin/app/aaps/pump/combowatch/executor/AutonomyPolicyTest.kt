@@ -32,6 +32,18 @@ class AutonomyPolicyTest {
         busy: Boolean = false, awaiting: Boolean = false, heardAgoMs: Long = 11 * 60_000L
     ) = policy.standing(lease, snapshot, heldPump, busy, awaiting, now - heardAgoMs)
 
+    @Test fun `the owner's bolus runs under the watch's own lease with the phone's limit on it`() {
+        val own = policy.ownerBolus("b1", 32, pump, maxBolusTenthsIU = 70)
+        assertEquals(CommandKind.DELIVER_BOLUS, own.command.kind)
+        assertEquals(32, own.command.bolusTenthsIU)
+        assertEquals(70, own.lease.maxBolusTenthsIU)
+        val gate = CommandGate({ now }, heldPump = { pump })
+        assertInstanceOf(CommandGate.Admission.Run::class.java, gate.admit(own.command, own.lease, SimpleCommandJournal(), false, false))
+        val tooMuch = policy.ownerBolus("b2", 71, pump, maxBolusTenthsIU = 70)
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, gate.admit(tooMuch.command, tooMuch.lease, SimpleCommandJournal(), false, false))
+        assertThrows(IllegalArgumentException::class.java) { policy.ownerBolus("b3", 0, pump, 70) }
+    }
+
     @Test fun `the phone's lease ran out and it left a snapshot, so the watch is on its own`() {
         assertEquals(Standing.Alone, standing())
     }

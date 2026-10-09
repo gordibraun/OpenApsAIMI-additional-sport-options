@@ -1,5 +1,6 @@
 package app.aaps.pump.combowatch.executor
 
+import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.ComboCommand
 import app.aaps.pump.combowatch.protocol.CommandKind
 import app.aaps.pump.combowatch.protocol.ControlLease
@@ -76,6 +77,35 @@ class AutonomyPolicy(private val nowEpochMs: () -> Long) {
     class OwnCommand(val command: ComboCommand, val lease: ControlLease)
 
     /**
+     * A bolus the owner asked for on the watch with the phone away. Not the watch's own decision -
+     * the regulator never gives insulin - but the owner's, carried out under the watch's own lease,
+     * with the owner's bolus limit from the phone's last lease on it so that the gate holds the
+     * watch to the same limit the phone would.
+     */
+    fun ownerBolus(id: String, tenthsIU: Int, heldPump: String, maxBolusTenthsIU: Int?): OwnCommand {
+        require(tenthsIU >= 1) { "a bolus of $tenthsIU tenths is not a deliverable amount" }
+        val now = nowEpochMs()
+        val lease = ControlLease(
+            generation = OWN_GENERATION, issuedAtEpochMs = now, expiresAtEpochMs = now + OWNER_BOLUS_VALID_MS,
+            pumpSerial = heldPump, controllerIsWatch = true, maxBolusTenthsIU = maxBolusTenthsIU
+        )
+        val command = ComboCommand(
+            id = id, leaseGeneration = OWN_GENERATION, kind = CommandKind.DELIVER_BOLUS,
+            issuedAtEpochMs = now, expiresAtEpochMs = now + OWNER_BOLUS_VALID_MS,
+            bolusTenthsIU = tenthsIU, bolusKind = BolusKind.NORMAL
+        )
+        return OwnCommand(command, lease)
+    }
+
+    /** A reading of the pump the watch gives itself: to learn of boluses given on the pump while the phone is away. */
+    fun ownRead(id: String, heldPump: String): OwnCommand {
+        val now = nowEpochMs()
+        val lease = ControlLease(OWN_GENERATION, now, now + OWN_COMMAND_VALID_MS, heldPump, true)
+        val command = ComboCommand(id, OWN_GENERATION, CommandKind.STATUS, now, now + OWN_COMMAND_VALID_MS)
+        return OwnCommand(command, lease)
+    }
+
+    /**
      * The only command the watch ever gives itself: a temporary basal at or under profile.
      *
      * Not a bolus, not a rate above profile, not a cancellation that the pump would turn into
@@ -119,5 +149,8 @@ class AutonomyPolicy(private val nowEpochMs: () -> Long) {
 
         /** Decided and done within the minute; if the pump session cannot start by then, the reading is old. */
         const val OWN_COMMAND_VALID_MS = 2 * 60_000L
+
+        /** The owner is waiting at the screen; the sensor's window may make the pump wait two minutes first. */
+        const val OWNER_BOLUS_VALID_MS = 4 * 60_000L
     }
 }

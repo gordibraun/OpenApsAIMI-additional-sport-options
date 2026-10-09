@@ -37,7 +37,9 @@ class FaceFacts(
     /** The phone's glucose target, mg/dL, when known. */
     val targetMgdl: Double? = null,
     /** The walk or sport session entered on the watch that matters now, if any. */
-    val activity: ActivityRecord? = null
+    val activity: ActivityRecord? = null,
+    /** Grams of carbohydrate that would bring the forecast back up to the target; null when none are needed. */
+    val carbsNeededG: Int? = null
 ) {
 
     /** The temporary basal running now, as far as the controller knows. */

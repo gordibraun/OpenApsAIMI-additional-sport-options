@@ -40,6 +40,9 @@ internal object ComboRelay {
     /** A walk or a sport session entered on this watch, for the controller to keep and the phone to record later. */
     const val ACTION_ACTIVITY = "app.aaps.combo.action.ACTIVITY"
     const val CONTROLLER_ACTIVITY_RECEIVER = "app.aaps.combobench.controller.ControllerActivityReceiver"
+
+    /** The controller's meal screen: the dose worked out on the watch when the phone is away. */
+    const val CONTROLLER_BOLUS_ACTIVITY = "app.aaps.combobench.WatchBolusActivity"
     const val PATH_LEASE = "/combowatch/lease"
 
     const val TAG = "ComboRelay"

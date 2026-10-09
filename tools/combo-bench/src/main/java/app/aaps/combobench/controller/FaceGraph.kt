@@ -94,6 +94,12 @@ internal object FaceGraph {
             text.color = if (f.minMgdl < 80) 0xFFFF7043.toInt() else 0xFF9AA5AE.toInt()
             canvas.drawText("мин ${f.minMgdl} · ${if (f.byWatch) "часы" else "тел"}", PLOT_RIGHT, PLOT_BOTTOM - 2f, text)
         }
+        // What to eat so that the forecast comes back up to the target.
+        facts?.carbsNeededG?.takeIf { it > 0 }?.let { grams ->
+            text.textSize = 15f; text.typeface = Typeface.DEFAULT_BOLD; text.textAlign = Paint.Align.LEFT
+            text.color = 0xFFFFB74D.toInt()
+            canvas.drawText("нужно $grams г", PLOT_LEFT, PLOT_BOTTOM - 2f, text)
+        }
         return bitmap
     }
 
@@ -117,6 +123,7 @@ internal object FaceGraph {
     fun describe(facts: FaceFacts?): String {
         val f = facts?.forecast ?: return "График глюкозы: данных нет"
         return "График: последний час и прогноз на полтора часа, минимум ${f.minMgdl}, через четыре часа ${f.endMgdl}; " +
-            (facts.iobU?.let { "активный инсулин %.1f ЕД".format(Locale.getDefault(), it) } ?: "активный инсулин неизвестен")
+            (facts.iobU?.let { "активный инсулин %.1f ЕД".format(Locale.getDefault(), it) } ?: "активный инсулин неизвестен") +
+            (facts.carbsNeededG?.takeIf { it > 0 }?.let { "; до цели не хватает $it г углеводов" } ?: "")
     }
 }

@@ -36,6 +36,8 @@ internal class AutonomyRunner(
     private val pumpInOtherUse: () -> Boolean = { false },
     /** Called right before the pump is used; may wait, for the glucose sensor's window. */
     private val beforePumpSession: () -> Unit = {},
+    /** When the pump was last read, by any session; null if never. Alone, the watch reads it now and then. */
+    private val lastPumpReadEpochMs: () -> Long? = { null },
     /** The hour of the pump's day at a moment. */
     private val hourOfDay: (Long) -> Int = { at -> Calendar.getInstance().apply { timeInMillis = at }.get(Calendar.HOUR_OF_DAY) },
     private val nowEpochMs: () -> Long = System::currentTimeMillis
@@ -83,18 +85,14 @@ internal class AutonomyRunner(
         val standing = standing()
         if (!rehearsal && (mode == AutonomyPolicy.Mode.OFF || standing != AutonomyPolicy.Standing.Alone)) return null
 
+        // A bolus given on the pump itself is known to the watch only once it has read the pump
+        // (9 Oct: 3 U at 09:21, seen at 09:31, with insulin on board shown wrong until then). With
+        // the phone away nobody else reads it, so the watch does, every half hour.
+        if (!rehearsal) readPumpIfStale()
+
         val now = nowEpochMs()
         val snapshot = store.snapshot()
-        val decision = regulator.decide(
-            WatchRegulator.Inputs(
-                nowEpochMs = now,
-                readings = store.readings(),
-                snapshot = snapshot,
-                pumpBasalUph = pumpBasalUph(),
-                delivery = store.delivery(),
-                hourOfDay = hourOfDay
-            )
-        )
+        val decision = regulator.decide(inputs(now))
         val action = decision.action
         val entry = JSONObject()
             .put("at", now)
@@ -176,6 +174,7 @@ internal class AutonomyRunner(
                 store.saveFaceForecast(
                     JSONObject().put("at", now).put("byWatch", true).put("series", JSONArray(series))
                         .put("iobU", decision.iobNowU ?: JSONObject.NULL)
+                        .put("carbsToTargetG", decision.carbsToTargetG ?: JSONObject.NULL)
                 )
             }
             decision.carbsHintG?.let { grams ->
@@ -193,6 +192,44 @@ internal class AutonomyRunner(
         return entry
     }
 
+    private fun inputs(now: Long) = WatchRegulator.Inputs(
+        nowEpochMs = now,
+        readings = store.readings(),
+        snapshot = store.snapshot(),
+        pumpBasalUph = pumpBasalUph(),
+        delivery = store.delivery(),
+        hourOfDay = hourOfDay
+    )
+
+    private fun readPumpIfStale() {
+        val held = heldPump() ?: return
+        // Never read at all means no session has happened yet; the first command will read it.
+        val lastRead = lastPumpReadEpochMs() ?: return
+        if (nowEpochMs() - lastRead < PUMP_READ_WHEN_ALONE_MS || executor.isBusy || pumpInOtherUse()) return
+        val own = policy.ownRead("auto-read-${UUID.randomUUID()}", held)
+        beforePumpSession()
+        runCatching { executor.execute(own.command, own.lease) }
+    }
+
+    /** The dose for a meal the owner is about to eat, worked out here because the phone is away; see [WatchRegulator.adviseBolus]. */
+    fun adviseBolus(carbsG: Int, maxTenthsIU: Int): WatchRegulator.BolusAdvice = regulator.adviseBolus(inputs(nowEpochMs()), carbsG, maxTenthsIU)
+
+    /**
+     * Give the bolus the owner confirmed on the watch. The pump's own receipt comes back as a
+     * pump event, which the watch records and the phone files when it is in touch.
+     */
+    fun deliverOwnerBolus(tenthsIU: Int, maxBolusTenthsIU: Int?): ComboResult? {
+        val held = heldPump() ?: return null
+        val own = policy.ownerBolus("owner-bolus-${UUID.randomUUID()}", tenthsIU, held, maxBolusTenthsIU)
+        beforePumpSession()
+        ownCommandInFlight = true
+        return try {
+            executor.execute(own.command, own.lease)
+        } finally {
+            ownCommandInFlight = false
+        }
+    }
+
     private fun runOwn(action: WatchRegulator.Action.SetTbr): ComboResult? {
         val held = heldPump() ?: return null
         val own = policy.ownTemporaryBasal("auto-${UUID.randomUUID()}", action.percent, action.durationMinutes, held)
@@ -208,6 +245,9 @@ internal class AutonomyRunner(
     companion object {
 
         private const val OBSERVED_REPEAT_MS = 30 * 60_000L
+
+        /** Alone, the pump is read at least this often, for boluses given on it. */
+        private const val PUMP_READ_WHEN_ALONE_MS = 30 * 60_000L
         private const val FAILURE_REPEAT_MS = 30 * 60_000L
         private const val CARBS_HINT_REPEAT_MS = 20 * 60_000L
     }

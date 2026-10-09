@@ -27,6 +27,7 @@ import app.aaps.core.interfaces.rx.weardata.EventData
 import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.wear.R
 import app.aaps.wear.interaction.utils.RotaryScrollView
+import com.google.android.gms.wearable.Wearable
 import dagger.android.DaggerActivity
 import java.util.UUID
 import javax.inject.Inject
@@ -138,6 +139,7 @@ class WatchControlActivity : DaggerActivity() {
             textSize = 13f; gravity = Gravity.CENTER; setTextColor(android.graphics.Color.LTGRAY)
             visibility = if (compact) View.GONE else View.VISIBLE
         }
+        statusView = status
         fun showStatus(message: String) { status.text = message; status.visibility = View.VISIBLE }
         val buttons = mutableListOf<Button>()
         fun action(title: String, requestKind: String) = Button(this).apply {
@@ -191,6 +193,34 @@ class WatchControlActivity : DaggerActivity() {
                     handler.postDelayed({ finish() }, 1_800)
                     return@setOnClickListener
                 }
+                // A meal with the pump driven through this watch: is the phone here at all? Three
+                // seconds decide. Without it the dose is worked out on the watch and given from it;
+                // the phone files the bolus and the carbohydrates when it is back. With the phone
+                // here the phone's own wizard is asked as before, and if it does not answer in
+                // time, the watch's own screen is offered.
+                if (requestKind == "MEAL" && amount > 0 && ComboWatchMode.isWatchMode(this@WatchControlActivity)) {
+                    buttons.forEach { it.isEnabled = false }
+                    showStatus("Проверяем, рядом ли телефон…")
+                    val grams = amount
+                    val type = foodType
+                    phoneNearby(PHONE_PROBE_MS) { nearby ->
+                        if (!nearby) {
+                            openWatchMeal(grams, type)
+                            return@phoneNearby
+                        }
+                        showStatus("Телефон рядом: ожидание его расчёта")
+                        rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
+                            UUID.randomUUID().toString(), System.currentTimeMillis(), "MEAL",
+                            carbs = grams, carbType = type
+                        )))
+                        handler.postDelayed({
+                            showStatus("Телефон не ответил. Можно рассчитать на часах.")
+                            watchMealButton.visibility = View.VISIBLE
+                            buttons.forEach { it.isEnabled = true }
+                        }, PHONE_ANSWER_MS)
+                    }
+                    return@setOnClickListener
+                }
                 if (sp.getInt("watch_control_api_version", 0) < if (requestKind == "MEAL") 2 else 1) {
                     showStatus("Нужно обновить AAPS на телефоне и дождаться синхронизации.")
                     rxBus.send(EventWearToMobile(EventData.ActionResendData("Watch controls compatibility")))
@@ -215,6 +245,13 @@ class WatchControlActivity : DaggerActivity() {
         if (kind == "CARBS") {
             root.addView(action("Рассчитать инсулин", "MEAL").apply { id = R.id.watch_control_calculate },
                 LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(4) })
+            watchMealButton = Button(this).apply {
+                text = "Рассчитать на часах"; isAllCaps = false; textSize = 12f; letterSpacing = 0f
+                minHeight = 0; minimumHeight = 0; setPadding(dp(6), 0, dp(6), 0); includeFontPadding = false
+                visibility = View.GONE
+                setOnClickListener { openWatchMeal(amount, foodType) }
+            }
+            root.addView(watchMealButton, LinearLayout.LayoutParams(-1, dp(34)).apply { topMargin = dp(2); marginStart = dp(20); marginEnd = dp(20) })
             root.addView(action("Только углеводы", "CARBS").apply { id = R.id.watch_control_carbs_only; textSize = 12f },
                 LinearLayout.LayoutParams(-1, dp(34)).apply {
                     topMargin = dp(2); marginStart = dp(20); marginEnd = dp(20)
@@ -226,6 +263,35 @@ class WatchControlActivity : DaggerActivity() {
         root.addView(status)
         scroll.requestFocus()
     }
+
+    private lateinit var watchMealButton: Button
+
+    /** Whether the phone is within reach right now: a node connected directly, answered within [timeoutMs]. */
+    private fun phoneNearby(timeoutMs: Long, callback: (Boolean) -> Unit) {
+        var answered = false
+        fun answer(nearby: Boolean) { if (!answered) { answered = true; handler.post { callback(nearby) } } }
+        runCatching {
+            Wearable.getNodeClient(applicationContext).connectedNodes
+                .addOnSuccessListener { nodes -> answer(nodes.any { it.isNearby }) }
+                .addOnFailureListener { answer(false) }
+        }.onFailure { answer(false) }
+        handler.postDelayed({ answer(false) }, timeoutMs)
+    }
+
+    private fun openWatchMeal(grams: Int, type: String) {
+        if (grams <= 0) { showStatus("Укажите количество"); return }
+        runCatching {
+            startActivity(
+                Intent().setClassName(ComboRelay.CONTROLLER_PACKAGE, ComboRelay.CONTROLLER_BOLUS_ACTIVITY)
+                    .putExtra("carbs", grams).putExtra("foodType", type)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            finish()
+        }.onFailure { showStatus("Экран расчёта на часах не открылся: ${it.javaClass.simpleName}") }
+    }
+
+    private fun showStatus(message: String) { statusView?.let { it.text = message; it.visibility = View.VISIBLE } }
+    private var statusView: TextView? = null
 
     private fun label(value: String, size: Float): TextView = TextView(this).apply {
         text = value; textSize = size; setTextColor(android.graphics.Color.WHITE); gravity = Gravity.CENTER
@@ -246,5 +312,11 @@ class WatchControlActivity : DaggerActivity() {
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
+
+    private companion object {
+
+        const val PHONE_PROBE_MS = 3_000L
+        const val PHONE_ANSWER_MS = 12_000L
+    }
     override fun onDestroy() { handler.removeCallbacksAndMessages(null); super.onDestroy() }
 }

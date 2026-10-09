@@ -335,6 +335,56 @@ class WatchRegulatorTest {
         assertThat(fixture.decide().action).isEqualTo(Action.Leave)
     }
 
+    // ---- a meal worked out on the watch ------------------------------------------------------------
+
+    @Test fun `the meal bolus is the phone's wizard arithmetic on the watch's numbers`() {
+        // Fixture: ratio 10 g/U, sensitivity 50 mg/dL/U, target 117, nothing on board.
+        val fixture = Fixture().glucose(167.0, per5 = 0.0)
+        val advice = WatchRegulator().adviseBolus(fixture.inputs(), carbsG = 40, maxTenthsIU = 70)
+        assertThat(advice.refusal).isNull()
+        assertThat(advice.carbsU).isWithin(1e-9).of(4.0)
+        assertThat(advice.correctionU).isWithin(1e-9).of(1.0)
+        assertThat(advice.iobU).isWithin(0.05).of(0.0)
+        assertThat(advice.tenthsIU).isEqualTo(50)
+        assertThat(advice.limitedToTenths).isNull()
+        assertThat(advice.lines.last()).contains("5,0")
+    }
+
+    @Test fun `insulin on board comes off the meal bolus, and the owner's limit caps it`() {
+        val fixture = Fixture().glucose(117.0, per5 = 0.0)
+        fixture.snapshot = fixture.snapshot(bolusUnits = 2.0, bolusAgeAtSnapshot = 10.0)
+        val advice = WatchRegulator().adviseBolus(fixture.inputs(), carbsG = 60, maxTenthsIU = 30)
+        // The fixture's sampled curve covers four of the insulin's five hours: about 1.4 U of the 2 U are left on it.
+        assertThat(advice.iobU).isGreaterThan(1.0)
+        assertThat(advice.rawU).isLessThan(6.0 - 1.0)
+        assertThat(advice.tenthsIU).isEqualTo(30)
+        assertThat(advice.limitedToTenths).isEqualTo(30)
+        // Nothing needed when the insulin on board already covers the meal.
+        val small = WatchRegulator().adviseBolus(fixture.inputs(), carbsG = 10, maxTenthsIU = 70)
+        assertThat(small.tenthsIU).isEqualTo(0)
+    }
+
+    @Test fun `without the phone's snapshot or a fresh reading there is no meal advice, only the reason`() {
+        val noSnapshot = Fixture().glucose(140.0)
+        noSnapshot.snapshot = null
+        assertThat(WatchRegulator().adviseBolus(noSnapshot.inputs(), 30, 70).refusal).contains("телефон")
+        val stale = Fixture()
+        stale.readings = listOf(GlucoseReading(stale.minutesAgo(20.0), 140.0))
+        assertThat(WatchRegulator().adviseBolus(stale.inputs(), 30, 70).refusal).contains("старше")
+        assertThat(WatchRegulator().adviseBolus(Fixture().inputs(), 30, 70).refusal).contains("нет показаний")
+    }
+
+    @Test fun `the carbohydrates the forecast is short of the target are counted for the face`() {
+        // 50 mg/dL per unit over 10 g per unit: 5 mg/dL per gram. Falling steadily, the forecast ends well under 117.
+        val falling = Fixture().glucose(100.0, per5 = -4.0)
+        val decision = falling.decide()
+        assertThat(decision.carbsToTargetG).isNotNull()
+        assertThat(decision.carbsToTargetG!!).isAtLeast(1)
+        assertThat(CarbsNeeded.gramsToTarget(listOf(100, 90, 80), 117.0, 50.0, 10.0)).isEqualTo(8)
+        assertThat(CarbsNeeded.gramsToTarget(listOf(120, 125), 117.0, 50.0, 10.0)).isNull()
+        assertThat(CarbsNeeded.gramsToTarget(listOf(20), 117.0, 50.0, 10.0)).isEqualTo(20)
+    }
+
     @Test fun `a reduction the phone left behind is never raised by the watch`() {
         val fixture = Fixture().glucose(125.0, per5 = +2.0)
         fixture.tbrs = listOf(TbrSegment(fixture.minutesAgo(12.0), 0, 30, byWatch = false))

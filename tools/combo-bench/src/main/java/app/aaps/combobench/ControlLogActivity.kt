@@ -98,7 +98,7 @@ class ControlLogActivity : Activity() {
         val text = entry.optString("text")
         val action = entry.optString("action")
         val outcome = when {
-            action == "ACTIVITY"                     -> ""
+            action == "ACTIVITY" || action == "BOLUS" -> ""
             action == "LEAVE"                        -> {
                 val hold = entry.optString("hold").takeIf { it.isNotBlank() && it != "null" }
                 if (hold != null) " Оставили как есть: $hold." else " Ничего менять не нужно."

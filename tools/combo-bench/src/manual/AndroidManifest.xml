@@ -30,6 +30,9 @@
                 <action android:name="app.aaps.combo.action.CARBS" />
             </intent-filter>
         </receiver>
+        <!-- The meal screen the AAPS watch app opens when the phone is away; only a holder of the relay permission can. -->
+        <activity android:name=".WatchBolusActivity" android:exported="true" android:excludeFromRecents="true"
+            android:permission="app.aaps.combo.permission.RELAY" />
         <receiver android:name=".controller.ControllerActivityReceiver" android:exported="true"
             android:permission="app.aaps.combo.permission.RELAY">
             <intent-filter>
