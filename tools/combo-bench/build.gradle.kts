@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 34
-            versionName = "0.34-meal-on-the-watch"
+            versionCode = 35
+            versionName = "0.35-phone-age"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

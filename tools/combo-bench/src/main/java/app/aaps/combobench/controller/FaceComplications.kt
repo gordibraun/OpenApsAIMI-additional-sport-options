@@ -112,10 +112,10 @@ class PumpComplicationService : FactsComplicationService() {
 }
 
 /**
- * The pump's state over who leads the basal and for how long: "помпа ✓" above "тел 2 мин" while the
- * phone leads (two minutes since it was heard); "помпа ✓" above "часы 12 мин" while the watch, with
- * the phone away, has been keeping basal by itself for twelve. The first line never changes its
- * meaning. A tap opens the log that explains the changes of lead and the watch's decisions.
+ * The pump's state over how long ago the phone was last heard: "помпа ✓" above "тел 2 мин". The
+ * second line means the same whoever leads - "часы 40 мин" read as the pump last reached forty
+ * minutes ago (9 Oct) - and the phone's absence is what tells that the watch leads: after five
+ * minutes it does. A tap opens the log that explains the changes of lead and the watch's decisions.
  */
 class LinkComplicationService : FactsComplicationService() {
 
@@ -126,12 +126,9 @@ class LinkComplicationService : FactsComplicationService() {
             facts.pumpReachable    -> "помпа ✓"
             else                   -> "помпа ✗"
         }
-        val watchLeads = facts.leader == LeadershipLog.Leader.WATCH || facts.leader == LeadershipLog.Leader.WATCH_OBSERVING
-        val who: ComplicationText = when {
-            watchLeads && facts.leaderSinceEpochMs > 0L -> FaceComplications.sinceMinutes(facts.leaderSinceEpochMs, "часы ^1", words = true)
-            facts.phoneHeardEpochMs > 0L                -> FaceComplications.sinceMinutes(facts.phoneHeardEpochMs, "тел ^1", words = true)
-            else                                        -> FaceComplications.plain("тел нет")
-        }
+        val who: ComplicationText =
+            if (facts.phoneHeardEpochMs > 0L) FaceComplications.sinceMinutes(facts.phoneHeardEpochMs, "тел ^1", words = true)
+            else FaceComplications.plain("тел нет")
         val lead = when (facts.leader) {
             LeadershipLog.Leader.WATCH           -> "Телефона нет: базал ведут часы"
             LeadershipLog.Leader.WATCH_OBSERVING -> "Телефона нет: часы только наблюдают"
