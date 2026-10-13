@@ -29,6 +29,7 @@ import app.aaps.wear.R
 import app.aaps.wear.interaction.utils.RotaryScrollView
 import com.google.android.gms.wearable.Wearable
 import dagger.android.DaggerActivity
+import io.reactivex.rxjava3.disposables.Disposable
 import java.util.UUID
 import javax.inject.Inject
 import kotlin.math.roundToInt
@@ -198,15 +199,39 @@ class WatchControlActivity : DaggerActivity() {
                 // the phone files the bolus and the carbohydrates when it is back. With the phone
                 // here the phone's own wizard is asked as before, and if it does not answer in
                 // time, the watch's own screen is offered.
+                // A dose typed in with the pump driven through this watch: the same question to
+                // the phone, and without it the dose is given from the watch after a double press.
+                if (requestKind == "INSULIN" && amount > 0 && ComboWatchMode.isWatchMode(this@WatchControlActivity)) {
+                    buttons.forEach { it.isEnabled = false }
+                    showStatus("Проверяем, рядом ли телефон…")
+                    val tenths = amount
+                    phoneAnswers(PHONE_PROBE_MS) { nearby ->
+                        if (!nearby) {
+                            openWatchBolus(tenths)
+                            return@phoneAnswers
+                        }
+                        showStatus("Телефон рядом: ожидание его подтверждения")
+                        rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
+                            UUID.randomUUID().toString(), System.currentTimeMillis(), "INSULIN",
+                            insulin = tenths / 10.0
+                        )))
+                        handler.postDelayed({
+                            showStatus("Телефон не ответил. Можно подать с часов.")
+                            watchBolusButton.visibility = View.VISIBLE
+                            buttons.forEach { it.isEnabled = true }
+                        }, PHONE_ANSWER_MS)
+                    }
+                    return@setOnClickListener
+                }
                 if (requestKind == "MEAL" && amount > 0 && ComboWatchMode.isWatchMode(this@WatchControlActivity)) {
                     buttons.forEach { it.isEnabled = false }
                     showStatus("Проверяем, рядом ли телефон…")
                     val grams = amount
                     val type = foodType
-                    phoneNearby(PHONE_PROBE_MS) { nearby ->
+                    phoneAnswers(PHONE_PROBE_MS) { nearby ->
                         if (!nearby) {
                             openWatchMeal(grams, type)
-                            return@phoneNearby
+                            return@phoneAnswers
                         }
                         showStatus("Телефон рядом: ожидание его расчёта")
                         rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
@@ -256,26 +281,63 @@ class WatchControlActivity : DaggerActivity() {
                 LinearLayout.LayoutParams(-1, dp(34)).apply {
                     topMargin = dp(2); marginStart = dp(20); marginEnd = dp(20)
                 })
-        } else root.addView(
-            action(if (kind == "ACTIVITY" && ComboWatchMode.isWatchMode(this)) "Записать на часах" else "Проверить на телефоне", kind),
-            LinearLayout.LayoutParams(-1, -2)
-        )
+        } else {
+            root.addView(
+                action(if (kind == "ACTIVITY" && ComboWatchMode.isWatchMode(this)) "Записать на часах" else "Проверить на телефоне", kind),
+                LinearLayout.LayoutParams(-1, -2)
+            )
+            if (kind == "INSULIN") {
+                watchBolusButton = Button(this).apply {
+                    text = "Подать с часов"; isAllCaps = false; textSize = 12f; letterSpacing = 0f
+                    visibility = View.GONE
+                    setOnClickListener { openWatchBolus(amount) }
+                }
+                root.addView(watchBolusButton, LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(2) })
+            }
+        }
         root.addView(status)
         scroll.requestFocus()
     }
 
     private lateinit var watchMealButton: Button
+    private lateinit var watchBolusButton: Button
+    private var pongWatch: Disposable? = null
 
-    /** Whether the phone is within reach right now: a node connected directly, answered within [timeoutMs]. */
-    private fun phoneNearby(timeoutMs: Long, callback: (Boolean) -> Unit) {
+    /**
+     * Whether the phone's AAPS is within reach right now: it is sent a ping and must answer it
+     * within [timeoutMs]. A connected node alone is not enough (the data layer reports one for a
+     * while after the phone has gone, and over Wi-Fi from another room), and no connected node at
+     * all is answered at once.
+     */
+    private fun phoneAnswers(timeoutMs: Long, callback: (Boolean) -> Unit) {
         var answered = false
-        fun answer(nearby: Boolean) { if (!answered) { answered = true; handler.post { callback(nearby) } } }
+        val stamp = System.currentTimeMillis()
+        fun answer(nearby: Boolean) {
+            if (answered) return
+            answered = true
+            pongWatch?.dispose(); pongWatch = null
+            handler.post { callback(nearby) }
+        }
+        pongWatch = rxBus.toObservable(EventData.ActionPong::class.java)
+            .subscribe({ if (it.timeStamp == stamp) answer(true) }, { answer(false) })
         runCatching {
             Wearable.getNodeClient(applicationContext).connectedNodes
-                .addOnSuccessListener { nodes -> answer(nodes.any { it.isNearby }) }
-                .addOnFailureListener { answer(false) }
-        }.onFailure { answer(false) }
+                .addOnSuccessListener { nodes -> if (nodes.none { it.isNearby }) answer(false) }
+        }
+        rxBus.send(EventWearToMobile(EventData.ActionPing(stamp)))
         handler.postDelayed({ answer(false) }, timeoutMs)
+    }
+
+    private fun openWatchBolus(tenths: Int) {
+        if (tenths <= 0) { showStatus("Укажите дозу"); return }
+        runCatching {
+            startActivity(
+                Intent().setClassName(ComboRelay.CONTROLLER_PACKAGE, ComboRelay.CONTROLLER_BOLUS_ACTIVITY)
+                    .putExtra("insulinTenths", tenths)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            finish()
+        }.onFailure { showStatus("Экран подачи на часах не открылся: ${it.javaClass.simpleName}") }
     }
 
     private fun openWatchMeal(grams: Int, type: String) {
@@ -315,8 +377,8 @@ class WatchControlActivity : DaggerActivity() {
 
     private companion object {
 
-        const val PHONE_PROBE_MS = 3_000L
+        const val PHONE_PROBE_MS = 1_500L
         const val PHONE_ANSWER_MS = 12_000L
     }
-    override fun onDestroy() { handler.removeCallbacksAndMessages(null); super.onDestroy() }
+    override fun onDestroy() { handler.removeCallbacksAndMessages(null); pongWatch?.dispose(); super.onDestroy() }
 }

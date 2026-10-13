@@ -219,6 +219,9 @@ internal class AutonomyRunner(
     /** The dose for a meal the owner is about to eat, worked out here because the phone is away; see [WatchRegulator.adviseBolus]. */
     fun adviseBolus(carbsG: Int, maxTenthsIU: Int): WatchRegulator.BolusAdvice = regulator.adviseBolus(inputs(nowEpochMs()), carbsG, maxTenthsIU)
 
+    /** A dose the owner typed in on the watch; see [WatchRegulator.adviseManualBolus]. */
+    fun adviseManualBolus(tenthsIU: Int, maxTenthsIU: Int): WatchRegulator.BolusAdvice = regulator.adviseManualBolus(inputs(nowEpochMs()), tenthsIU, maxTenthsIU)
+
     /**
      * Give the bolus the owner confirmed on the watch. The pump's own receipt comes back as a
      * pump event, which the watch records and the phone files when it is in touch.

@@ -363,6 +363,16 @@ internal class ControllerHost private constructor(context: Context) {
         return advice
     }
 
+    /** A dose typed in on the watch with the phone away; see [WatchRegulator.adviseManualBolus]. Written down either way. */
+    fun manualBolusAdvice(tenthsIU: Int): WatchRegulator.BolusAdvice {
+        val advice = runner.adviseManualBolus(tenthsIU, ownerBolusLimitTenths())
+        fun u(tenths: Int) = String.format(java.util.Locale.getDefault(), "%.1f", tenths / 10.0)
+        val text = advice.refusal?.let { "Доза с часов ${u(tenthsIU)} ЕД не принята: $it" }
+            ?: "Доза с часов: ${u(advice.tenthsIU)} ЕД (${advice.lines.joinToString("; ")})"
+        autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "BOLUS_ADVICE").put("text", text).put("mode", autonomy.mode().name))
+        return advice
+    }
+
     /**
      * While the watch leads, a tick every five minutes keeps it going when the sensor falls
      * silent: the pump still gets read for boluses given on it, and the journal says that
@@ -386,11 +396,12 @@ internal class ControllerHost private constructor(context: Context) {
         if (tenthsIU <= 0) return@synchronized null
         val result = runner.deliverOwnerBolus(tenthsIU, ownerBolusLimitTenths())
         val units = String.format(java.util.Locale.getDefault(), "%.1f", tenthsIU / 10.0)
+        val what = if (carbsG > 0) "$units ЕД на $carbsG г" else "$units ЕД, доза владельца"
         val text = when (result?.outcome) {
-            Outcome.DONE    -> "Болюс с часов: $units ЕД на $carbsG г — подан"
-            Outcome.UNKNOWN -> "Болюс с часов: $units ЕД на $carbsG г — исход не выяснен, часы сверяются с помпой"
-            null            -> "Болюс с часов: $units ЕД на $carbsG г — помпа не привязана"
-            else            -> "Болюс с часов: $units ЕД на $carbsG г — ${result.outcome}: ${result.reason}"
+            Outcome.DONE    -> "Болюс с часов: $what — подан"
+            Outcome.UNKNOWN -> "Болюс с часов: $what — исход не выяснен, часы сверяются с помпой"
+            null            -> "Болюс с часов: $what — помпа не привязана"
+            else            -> "Болюс с часов: $what — ${result.outcome}: ${result.reason}"
         }
         autonomy.addToJournal(JSONObject().put("at", now).put("action", "BOLUS").put("text", text).put("mode", autonomy.mode().name))
         // The phone learns of the bolus from the pump's own receipt; this line tells it why.

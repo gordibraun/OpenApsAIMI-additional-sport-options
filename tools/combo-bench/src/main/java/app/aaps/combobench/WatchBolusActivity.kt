@@ -42,6 +42,9 @@ class WatchBolusActivity : Activity() {
 
     private val carbsG: Int get() = intent.getIntExtra("carbs", 0)
     private val foodType: String? get() = intent.getStringExtra("foodType")
+    /** A dose the owner typed in, instead of a meal to work out. */
+    private val insulinTenths: Int get() = intent.getIntExtra("insulinTenths", 0)
+    private val manual: Boolean get() = insulinTenths > 0 && carbsG <= 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,7 +65,10 @@ class WatchBolusActivity : Activity() {
         }
         setContentView(scroll)
         scroll.requestFocus()
-        advice = runCatching { ControllerHost.get(this).bolusAdvice(carbsG.coerceIn(0, MAX_CARBS_G)) }.getOrNull()
+        advice = runCatching {
+            if (manual) ControllerHost.get(this).manualBolusAdvice(insulinTenths.coerceIn(1, MAX_MANUAL_TENTHS))
+            else ControllerHost.get(this).bolusAdvice(carbsG.coerceIn(0, MAX_CARBS_G))
+        }.getOrNull()
         render()
     }
 
@@ -82,13 +88,13 @@ class WatchBolusActivity : Activity() {
             setOnClickListener { action() }
             column.addView(this, LinearLayout.LayoutParams(-1, (52 * dp).toInt()).apply { topMargin = (6 * dp).toInt() })
         }
-        line("Инсулин на еду (часы, без телефона)", 16f, bold = true)
+        line(if (manual) "Инсулин с часов (без телефона)" else "Инсулин на еду (часы, без телефона)", 16f, bold = true)
         val advice = advice
         when {
             advice == null          -> line("Контроллер часов недоступен", 14f, Color.rgb(255, 140, 130))
             advice.refusal != null  -> {
-                line("Рассчитать нельзя: ${advice.refusal}.", 14f, Color.rgb(255, 140, 130))
-                line("Углеводы можно записать без инсулина кнопкой «Только углеводы».", 12f, Color.GRAY)
+                line("${if (manual) "Подать нельзя" else "Рассчитать нельзя"}: ${advice.refusal}.", 14f, Color.rgb(255, 140, 130))
+                if (!manual) line("Углеводы можно записать без инсулина кнопкой «Только углеводы».", 12f, Color.GRAY)
             }
 
             else                    -> advice.lines.forEachIndexed { index, text -> line(text, if (index == advice.lines.lastIndex) 17f else 13f, bold = index == advice.lines.lastIndex) }
@@ -100,6 +106,7 @@ class WatchBolusActivity : Activity() {
                 when {
                     advice.tenthsIU == 0 -> "Записать $carbsG г без инсулина"
                     confirming           -> "Да, подать $units ЕД"
+                    manual               -> "Подать $units ЕД"
                     else                 -> "Подать $units ЕД и записать $carbsG г"
                 },
                 if (confirming) Color.rgb(150, 40, 30) else Color.rgb(20, 90, 70)
@@ -138,10 +145,10 @@ class WatchBolusActivity : Activity() {
                     onSuccess = { r ->
                         when {
                             tenths == 0            -> "Записано: $grams г без инсулина"
-                            r == null              -> "Помпа не привязана; углеводы записаны"
-                            r.outcome == Outcome.DONE -> "Подано ${String.format(Locale.getDefault(), "%.1f", (r.bolus?.tenthsIU ?: tenths) / 10.0)} ЕД, $grams г записаны"
+                            r == null              -> if (grams > 0) "Помпа не привязана; углеводы записаны" else "Помпа не привязана"
+                            r.outcome == Outcome.DONE -> "Подано ${String.format(Locale.getDefault(), "%.1f", (r.bolus?.tenthsIU ?: tenths) / 10.0)} ЕД" + if (grams > 0) ", $grams г записаны" else ""
                             r.outcome == Outcome.UNKNOWN -> "Исход не выяснен: часы сверятся с помпой при следующем чтении. Болюс не повторять!"
-                            else                   -> "Не подано (${r.outcome}): ${r.reason}. Углеводы записаны"
+                            else                   -> "Не подано (${r.outcome}): ${r.reason}." + if (grams > 0) " Углеводы записаны" else ""
                         }
                     },
                     onFailure = { "Ошибка: ${it.message ?: it.javaClass.simpleName}" }
@@ -165,6 +172,7 @@ class WatchBolusActivity : Activity() {
     private companion object {
 
         const val MAX_CARBS_G = 300
+        const val MAX_MANUAL_TENTHS = 250
         const val CONFIRMATION_WINDOW_MS = 20_000L
         const val DOUBLE_TAP_GUARD_MS = 1_500L
     }

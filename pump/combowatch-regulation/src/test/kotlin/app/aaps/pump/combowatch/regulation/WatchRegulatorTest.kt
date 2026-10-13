@@ -515,3 +515,39 @@ class WatchRegulatorTest {
         }
     }
 }
+
+class ManualBolusAdviceTest {
+
+    @org.junit.jupiter.api.Test fun `a typed-in dose is passed through with the owner's limit and what the watch knows`() {
+        val fixture = Fixture().glucose(167.0, per5 = -4.0)
+        val advice = WatchRegulator().adviseManualBolus(fixture.inputs(), tenthsIU = 12, maxTenthsIU = 70)
+        com.google.common.truth.Truth.assertThat(advice.refusal).isNull()
+        com.google.common.truth.Truth.assertThat(advice.tenthsIU).isEqualTo(12)
+        com.google.common.truth.Truth.assertThat(advice.carbsG).isEqualTo(0)
+        com.google.common.truth.Truth.assertThat(advice.limitedToTenths).isNull()
+        com.google.common.truth.Truth.assertThat(advice.bgMgdl).isWithin(1e-9).of(167.0)
+        com.google.common.truth.Truth.assertThat(advice.lines.first()).contains("1,2")
+        com.google.common.truth.Truth.assertThat(advice.lines.any { it.startsWith("Сахар 167") }).isTrue()
+        com.google.common.truth.Truth.assertThat(advice.lines.any { it.startsWith("Активный инсулин") }).isTrue()
+        com.google.common.truth.Truth.assertThat(advice.lines.last()).isEqualTo("Итого 1,2 ЕД")
+    }
+
+    @org.junit.jupiter.api.Test fun `the owner's limit cuts a typed-in dose and says so`() {
+        val advice = WatchRegulator().adviseManualBolus(Fixture().glucose(120.0).inputs(), tenthsIU = 45, maxTenthsIU = 30)
+        com.google.common.truth.Truth.assertThat(advice.tenthsIU).isEqualTo(30)
+        com.google.common.truth.Truth.assertThat(advice.limitedToTenths).isEqualTo(30)
+        com.google.common.truth.Truth.assertThat(advice.lines.last()).contains("предел 3,0")
+        com.google.common.truth.Truth.assertThat(advice.lines.last()).contains("запрошено 4,5")
+    }
+
+    @org.junit.jupiter.api.Test fun `no dose, no limit, no data are each said plainly`() {
+        com.google.common.truth.Truth.assertThat(WatchRegulator().adviseManualBolus(Fixture().inputs(), 0, 70).refusal).contains("доза")
+        com.google.common.truth.Truth.assertThat(WatchRegulator().adviseManualBolus(Fixture().inputs(), 10, 0).refusal).contains("предел")
+        val blind = Fixture()
+        blind.snapshot = null
+        val advice = WatchRegulator().adviseManualBolus(blind.inputs(), 10, 70)
+        com.google.common.truth.Truth.assertThat(advice.refusal).isNull()
+        com.google.common.truth.Truth.assertThat(advice.tenthsIU).isEqualTo(10)
+        com.google.common.truth.Truth.assertThat(advice.lines.any { it.contains("неизвестен") }).isTrue()
+    }
+}

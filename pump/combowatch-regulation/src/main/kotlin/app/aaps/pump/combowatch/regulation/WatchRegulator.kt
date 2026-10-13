@@ -187,6 +187,39 @@ class WatchRegulator {
         return BolusAdvice(carbsG, carbsU, fresh?.mgdl, correctionU, cob, cobU, iob, raw, tenths, if (limited) maxTenthsIU else null, lines)
     }
 
+    /**
+     * A dose the owner typed in on the watch with the phone away. No arithmetic of the watch's own
+     * goes into it: only the owner's limit, and, for the owner to read before pressing, what the
+     * watch knows of glucose and of the insulin already at work.
+     */
+    fun adviseManualBolus(inputs: Inputs, tenthsIU: Int, maxTenthsIU: Int): BolusAdvice {
+        val now = inputs.nowEpochMs
+        fun u(value: Double) = String.format(java.util.Locale.getDefault(), "%.1f", value)
+        if (tenthsIU <= 0) return BolusAdvice(0, 0.0, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0, null, emptyList(), "доза не указана")
+        if (maxTenthsIU <= 0) return BolusAdvice(0, 0.0, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0, null, emptyList(), "предел болюса не задан")
+        val limited = tenthsIU > maxTenthsIU
+        val tenths = minOf(tenthsIU, maxTenthsIU)
+        val lines = mutableListOf("Доза с часов: ${u(tenthsIU / 10.0)} ЕД")
+        val fresh = GlucoseTrend.from(inputs.readings, now)?.takeIf { (now - it.atEpochMs) / 60_000.0 <= BOLUS_MAX_READING_AGE_MINUTES }
+        lines += if (fresh != null) "Сахар ${fresh.mgdl.roundToInt()}" + (if (fresh.known) ", за 5 мин ${if (fresh.delta >= 0) "+" else "−"}${abs(fresh.delta).roundToInt()}" else "")
+        else "Сахар неизвестен (показаний за ${BOLUS_MAX_READING_AGE_MINUTES.toInt()} мин нет)"
+        var iob = 0.0
+        var cob = 0.0
+        val snapshot = inputs.snapshot?.takeIf { now - it.madeAtEpochMs <= BOLUS_MAX_SNAPSHOT_AGE_MS && now >= it.madeAtEpochMs - WatchForecast.CLOCK_TOLERANCE_MS }
+        if (snapshot != null) {
+            fun basalAt(epochMs: Long): Double = inputs.pumpBasalUph.getOrNull(inputs.hourOfDay(epochMs)) ?: 0.0
+            val trend = fresh ?: GlucoseTrend(snapshot.targetMgdl, now, 0.0, 0.0, 0.0, known = false, fallPerHour = null)
+            val forecast = runCatching { WatchForecast(snapshot, trend, inputs.delivery, ::basalAt, now) }.getOrNull()
+            if (forecast != null) {
+                iob = forecast.iobNowU()
+                cob = forecast.cobNowG
+                lines += "Активный инсулин ${u(iob)} ЕД" + if (cob >= 1.0) ", углеводы в работе ${cob.roundToInt()} г" else ""
+            }
+        } else lines += "Активный инсулин неизвестен: телефон не оставил данных"
+        lines += if (limited) "Итого ${u(tenths / 10.0)} ЕД (предел ${u(maxTenthsIU / 10.0)} ЕД, запрошено ${u(tenthsIU / 10.0)})" else "Итого ${u(tenths / 10.0)} ЕД"
+        return BolusAdvice(0, 0.0, fresh?.mgdl, 0.0, cob, 0.0, iob, tenthsIU / 10.0, tenths, if (limited) maxTenthsIU else null, lines)
+    }
+
     private class Cap(val fraction: Double, val rule: Rule, val text: String)
 
     fun decide(inputs: Inputs): Decision {
