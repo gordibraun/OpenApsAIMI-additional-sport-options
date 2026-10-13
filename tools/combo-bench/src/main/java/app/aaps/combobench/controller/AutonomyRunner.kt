@@ -38,6 +38,8 @@ internal class AutonomyRunner(
     private val beforePumpSession: () -> Unit = {},
     /** When the pump was last read, by any session; null if never. Alone, the watch reads it now and then. */
     private val lastPumpReadEpochMs: () -> Long? = { null },
+    /** Every answer the pump gives to the watch's own commands, for the face's "pump answers" mark. */
+    private val onOwnResult: (ComboResult) -> Unit = {},
     /** The hour of the pump's day at a moment. */
     private val hourOfDay: (Long) -> Int = { at -> Calendar.getInstance().apply { timeInMillis = at }.get(Calendar.HOUR_OF_DAY) },
     private val nowEpochMs: () -> Long = System::currentTimeMillis
@@ -211,7 +213,7 @@ internal class AutonomyRunner(
         if (nowEpochMs() - lastRead < PUMP_READ_WHEN_ALONE_MS || executor.isBusy || pumpInOtherUse()) return
         val own = policy.ownRead("auto-read-${UUID.randomUUID()}", held)
         beforePumpSession()
-        runCatching { executor.execute(own.command, own.lease) }
+        runCatching { executor.execute(own.command, own.lease) }.getOrNull()?.let(onOwnResult)
     }
 
     /** The dose for a meal the owner is about to eat, worked out here because the phone is away; see [WatchRegulator.adviseBolus]. */
@@ -227,7 +229,7 @@ internal class AutonomyRunner(
         beforePumpSession()
         ownCommandInFlight = true
         return try {
-            executor.execute(own.command, own.lease)
+            executor.execute(own.command, own.lease).also(onOwnResult)
         } finally {
             ownCommandInFlight = false
         }
@@ -239,7 +241,7 @@ internal class AutonomyRunner(
         beforePumpSession()
         ownCommandInFlight = true
         return try {
-            executor.execute(own.command, own.lease)
+            executor.execute(own.command, own.lease).also(onOwnResult)
         } finally {
             ownCommandInFlight = false
         }

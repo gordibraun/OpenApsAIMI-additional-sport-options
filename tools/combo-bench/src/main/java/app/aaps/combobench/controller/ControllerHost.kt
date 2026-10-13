@@ -115,8 +115,19 @@ internal class ControllerHost private constructor(context: Context) {
         // The bench's own manual sessions use the same pump and pairing; never overlap with them.
         pumpInOtherUse = { ManualPumpRuntime.get(this.context).usingBluetoothNow() },
         beforePumpSession = ::leaveTheSensorItsWindow,
-        lastPumpReadEpochMs = { savedSnapshot()?.readAtEpochMs }
+        lastPumpReadEpochMs = { savedSnapshot()?.readAtEpochMs },
+        onOwnResult = ::notePumpAnswer
     )
+
+    /** What a command's answer says about the pump being within reach; the face shows it. */
+    private fun notePumpAnswer(result: ComboResult) {
+        if (result.outcome == Outcome.FAILED && result.reason?.startsWith("pump not reached") == true) {
+            pumpReachable = false
+            pumpNotReachedAtEpochMs = System.currentTimeMillis()
+        }
+        result.snapshot?.let { lastSnapshot = it }
+        refreshFace()
+    }
 
     /**
      * Hold the pump back while the glucose sensor is due to speak; see [SensorWindows]. Called
@@ -416,11 +427,7 @@ internal class ControllerHost private constructor(context: Context) {
 
         leaveTheSensorItsWindow()
         val result = executor.execute(command, lease)
-        if (result.outcome == Outcome.FAILED && result.reason?.startsWith("pump not reached") == true) {
-            pumpReachable = false
-            pumpNotReachedAtEpochMs = System.currentTimeMillis()
-        }
-        result.snapshot?.let { lastSnapshot = it }
+        notePumpAnswer(result)
         files.write(RESULT_FILE, result.toJson())
         publish(result)
         result
