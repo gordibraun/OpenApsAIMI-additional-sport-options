@@ -274,7 +274,10 @@ internal class ControllerHost private constructor(context: Context) {
                 phoneHeardEpochMs = phoneLastHeardEpochMs, leaseExpiresEpochMs = current?.expiresAtEpochMs,
                 leaseRevoked = current?.controllerIsWatch == false
             )
-        }.getOrNull()
+        }.getOrNull()?.also { entry ->
+            // The watch has just found itself in charge: from here on it ticks by itself.
+            if (entry.leader == LeadershipLog.Leader.WATCH || entry.leader == LeadershipLog.Leader.WATCH_OBSERVING) scheduleTickIfAlone()
+        }
     }
 
     /** The lines of the leadership log, oldest first; for the owner's screen. */
@@ -340,8 +343,26 @@ internal class ControllerHost private constructor(context: Context) {
     /** The owner's bolus limit as the phone last said it, even under a lease that has since run out. */
     private fun ownerBolusLimitTenths(): Int = lease?.maxBolusTenthsIU ?: maxBolusTenthsIU()
 
-    /** The dose for a meal, worked out on the watch; see [WatchRegulator.adviseBolus]. */
-    fun bolusAdvice(carbsG: Int): WatchRegulator.BolusAdvice = runner.adviseBolus(carbsG, ownerBolusLimitTenths())
+    /** The dose for a meal, worked out on the watch; see [WatchRegulator.adviseBolus]. Written down either way. */
+    fun bolusAdvice(carbsG: Int): WatchRegulator.BolusAdvice {
+        val advice = runner.adviseBolus(carbsG, ownerBolusLimitTenths())
+        val text = advice.refusal?.let { "Расчёт на часах для $carbsG г не сделан: $it" }
+            ?: "Расчёт на часах: $carbsG г → ${String.format(java.util.Locale.getDefault(), "%.1f", advice.tenthsIU / 10.0)} ЕД (${advice.lines.joinToString("; ")})"
+        autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "BOLUS_ADVICE").put("text", text).put("mode", autonomy.mode().name))
+        return advice
+    }
+
+    /**
+     * While the watch leads, a tick every five minutes keeps it going when the sensor falls
+     * silent: the pump still gets read for boluses given on it, and the journal says that
+     * nothing is decided without glucose. Readings reschedule it, so with the sensor present the
+     * tick never fires; a phone back in charge ends the chain.
+     */
+    fun isLeadingAlone(): Boolean = runner.wantsToRun()
+
+    fun scheduleTickIfAlone() {
+        if (runner.wantsToRun()) ControllerService.schedule(context, ControllerService.PATH_TICK, null, ControllerService.TICK_MS)
+    }
 
     /**
      * The meal the owner confirmed on the watch: the carbohydrates are kept first - they are eaten

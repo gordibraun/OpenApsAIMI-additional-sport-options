@@ -88,7 +88,7 @@ class ControllerService : Service() {
 
             PATH_HEAL                          -> heal(host, attempt = payload?.toIntOrNull() ?: 0)
             PATH_STATE                         -> { host.sendEvents(); host.sendHeartbeat() }
-            PATH_GLUCOSE                       -> {
+            PATH_GLUCOSE, PATH_TICK            -> {
                 // Alone with a command whose outcome is not known: nobody else will read the pump
                 // back. One try per reading; while it fails, nothing is decided on top of it.
                 val settled = !host.awaitingReconciliation || host.healIfNeeded()
@@ -96,6 +96,8 @@ class ControllerService : Service() {
                     host.regulate()
                     heal(host, attempt = 0)
                 }
+                // Next look in five minutes unless a reading comes first; see [ControllerHost.scheduleTickIfAlone].
+                host.scheduleTickIfAlone()
             }
             PATH_REHEARSAL                     -> host.regulate(rehearsal = true)
         }
@@ -135,6 +137,10 @@ class ControllerService : Service() {
         internal const val PATH_STATE = "/controller/state"
         internal const val PATH_GLUCOSE = "/controller/glucose"
         internal const val PATH_REHEARSAL = "/controller/rehearsal"
+        internal const val PATH_TICK = "/controller/tick"
+
+        /** How often the watch looks by itself while it leads and the sensor is silent. */
+        internal const val TICK_MS = 5 * 60_000L
 
         /**
          * Start the service for one item. From the background this is allowed only for an app

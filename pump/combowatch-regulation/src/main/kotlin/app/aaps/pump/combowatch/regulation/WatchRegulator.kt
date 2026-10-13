@@ -155,31 +155,36 @@ class WatchRegulator {
         val now = inputs.nowEpochMs
         fun none(why: String) = BolusAdvice(carbsG, 0.0, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0, null, emptyList(), why)
         val snapshot = inputs.snapshot ?: return none("телефон не оставил данных для расчёта")
-        if (!WatchForecast.usable(snapshot, now)) return none("данным телефона больше четырёх часов: считать не из чего")
-        val trend = GlucoseTrend.from(inputs.readings, now) ?: return none("нет показаний сенсора")
-        if ((now - trend.atEpochMs) / 60_000.0 > BOLUS_MAX_READING_AGE_MINUTES) return none("последнее показание сенсора старше ${BOLUS_MAX_READING_AGE_MINUTES.toInt()} мин")
+        // The snapshot serves a day, as it does the watch's basal: after its insulin curve has run
+        // out, insulin on board is what the watch itself has seen the pump give since.
+        if (now - snapshot.madeAtEpochMs > BOLUS_MAX_SNAPSHOT_AGE_MS) return none("данным телефона больше суток: считать не из чего")
+        if (now < snapshot.madeAtEpochMs - WatchForecast.CLOCK_TOLERANCE_MS) return none("данные телефона из будущего: часы не в курсе времени")
         if (snapshot.carbRatioGPerU <= 0.0 || snapshot.sensitivityMgdlPerU <= 0.0) return none("в данных телефона нет коэффициентов")
+        // Without a recent reading the meal is still bolused for - as the phone's wizard does it
+        // without glucose - only with no correction towards the target, and said so.
+        val fresh = GlucoseTrend.from(inputs.readings, now)?.takeIf { (now - it.atEpochMs) / 60_000.0 <= BOLUS_MAX_READING_AGE_MINUTES }
+        val trend = fresh ?: GlucoseTrend(snapshot.targetMgdl, now, 0.0, 0.0, 0.0, known = false, fallPerHour = null)
         fun basalAt(epochMs: Long): Double = inputs.pumpBasalUph.getOrNull(inputs.hourOfDay(epochMs)) ?: 0.0
         val forecast = runCatching { WatchForecast(snapshot, trend, inputs.delivery, ::basalAt, now) }.getOrNull()
             ?: return none("прогноз не построился")
         val iob = forecast.iobNowU()
         val cob = forecast.cobNowG
         val carbsU = carbsG / snapshot.carbRatioGPerU
-        val correctionU = (trend.mgdl - snapshot.targetMgdl) / snapshot.sensitivityMgdlPerU
+        val correctionU = if (fresh != null) (fresh.mgdl - snapshot.targetMgdl) / snapshot.sensitivityMgdlPerU else 0.0
         val cobU = cob / snapshot.carbRatioGPerU
         val raw = carbsU + correctionU + cobU - iob
         val wanted = floor(raw * 10.0 + 1e-9).toInt().coerceAtLeast(0)
         val limited = wanted > maxTenthsIU
         val tenths = minOf(wanted, maxTenthsIU)
         fun u(value: Double) = String.format(java.util.Locale.getDefault(), "%.1f", value)
-        val lines = mutableListOf(
-            "Углеводы $carbsG г ÷ ${u(snapshot.carbRatioGPerU)} г/ЕД = ${u(carbsU)} ЕД",
-            "Сахар ${trend.mgdl.roundToInt()}, цель ${snapshot.targetMgdl.roundToInt()}, ISF ${snapshot.sensitivityMgdlPerU.roundToInt()}: ${if (correctionU >= 0) "+" else "−"}${u(abs(correctionU))} ЕД"
-        )
+        val lines = mutableListOf("Углеводы $carbsG г ÷ ${u(snapshot.carbRatioGPerU)} г/ЕД = ${u(carbsU)} ЕД")
+        lines += if (fresh != null)
+            "Сахар ${fresh.mgdl.roundToInt()}, цель ${snapshot.targetMgdl.roundToInt()}, ISF ${snapshot.sensitivityMgdlPerU.roundToInt()}: ${if (correctionU >= 0) "+" else "−"}${u(abs(correctionU))} ЕД"
+        else "Сахар неизвестен (показаний за ${BOLUS_MAX_READING_AGE_MINUTES.toInt()} мин нет): поправка к цели не считалась"
         if (cob >= 1.0) lines += "Углеводы в работе ${cob.roundToInt()} г: +${u(cobU)} ЕД"
         lines += "Активный инсулин ${u(iob)} ЕД: ${if (iob >= 0) "−" else "+"}${u(abs(iob))} ЕД"
         lines += if (tenths == 0) "Итого: инсулин не нужен (${u(raw)} ЕД)" else "Итого ${u(tenths / 10.0)} ЕД" + if (limited) " (предел телефона ${u(maxTenthsIU / 10.0)} ЕД, расчёт ${u(raw)})" else ""
-        return BolusAdvice(carbsG, carbsU, trend.mgdl, correctionU, cob, cobU, iob, raw, tenths, if (limited) maxTenthsIU else null, lines)
+        return BolusAdvice(carbsG, carbsU, fresh?.mgdl, correctionU, cob, cobU, iob, raw, tenths, if (limited) maxTenthsIU else null, lines)
     }
 
     private class Cap(val fraction: Double, val rule: Rule, val text: String)
@@ -442,8 +447,11 @@ class WatchRegulator {
         /** A reading older than this is the past, not the present; the cycle is five minutes. */
         const val MAX_READING_AGE_MINUTES = 7.0
 
-        /** A meal bolus is not worked out on a reading older than this. */
+        /** A reading older than this does not correct a meal bolus towards the target. */
         const val BOLUS_MAX_READING_AGE_MINUTES = 15.0
+
+        /** The phone's snapshot serves a meal bolus for a day, like the watch's basal. */
+        const val BOLUS_MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60_000L
 
         /**
          * The level the forecast must not go under, and at which basal stops outright. It is the

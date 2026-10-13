@@ -167,7 +167,10 @@ internal class AutonomyRunner(
 
         if (!rehearsal) {
             if (action == WatchRegulator.Action.Leave) lastObserved = null
-            store.addToJournal(entry)
+            // Ticks without the sensor would say "no reading" every five minutes; once is enough.
+            val repeatsNoGlucose = decision.rule == WatchRegulator.Rule.NO_GLUCOSE &&
+                store.journal().lastOrNull()?.optString("rule") == WatchRegulator.Rule.NO_GLUCOSE.name
+            if (!repeatsNoGlucose) store.addToJournal(entry)
             // What the face draws while the watch is alone: the forecast with what runs now left to
             // run its course, and insulin on board by the same model.
             (decision.forecastAsRunningMgdl ?: decision.forecastMgdl)?.let { series ->

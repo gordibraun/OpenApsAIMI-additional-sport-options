@@ -364,14 +364,25 @@ class WatchRegulatorTest {
         assertThat(small.tenthsIU).isEqualTo(0)
     }
 
-    @Test fun `without the phone's snapshot or a fresh reading there is no meal advice, only the reason`() {
+    @Test fun `without the phone's snapshot there is no meal advice, without a fresh reading there is no correction`() {
         val noSnapshot = Fixture().glucose(140.0)
         noSnapshot.snapshot = null
         assertThat(WatchRegulator().adviseBolus(noSnapshot.inputs(), 30, 70).refusal).contains("телефон")
+        val old = Fixture().glucose(140.0)
+        old.snapshot = old.snapshot(ageMinutes = 25 * 60.0)
+        assertThat(WatchRegulator().adviseBolus(old.inputs(), 30, 70).refusal).contains("суток")
+        // A reading too old to correct on, or none at all: the carbohydrates are still covered, nothing more.
         val stale = Fixture()
         stale.readings = listOf(GlucoseReading(stale.minutesAgo(20.0), 140.0))
-        assertThat(WatchRegulator().adviseBolus(stale.inputs(), 30, 70).refusal).contains("старше")
-        assertThat(WatchRegulator().adviseBolus(Fixture().inputs(), 30, 70).refusal).contains("нет показаний")
+        val staleAdvice = WatchRegulator().adviseBolus(stale.inputs(), 30, 70)
+        assertThat(staleAdvice.refusal).isNull()
+        assertThat(staleAdvice.bgMgdl).isNull()
+        assertThat(staleAdvice.correctionU).isEqualTo(0.0)
+        assertThat(staleAdvice.tenthsIU).isEqualTo(30)
+        assertThat(staleAdvice.lines.any { it.contains("неизвестен") }).isTrue()
+        val none = WatchRegulator().adviseBolus(Fixture().inputs(), 30, 70)
+        assertThat(none.refusal).isNull()
+        assertThat(none.tenthsIU).isEqualTo(30)
     }
 
     @Test fun `the carbohydrates the forecast is short of the target are counted for the face`() {
