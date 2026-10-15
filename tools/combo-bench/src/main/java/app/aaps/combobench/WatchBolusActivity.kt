@@ -35,6 +35,9 @@ class WatchBolusActivity : Activity() {
     private lateinit var cancel: Button
     private lateinit var status: TextView
     private var advice: WatchRegulator.BolusAdvice? = null
+    private var adviceFailure: String? = null
+    /** The pump's (or the record's) answer once the owner has pressed; from then on the screen shows it, not the question. */
+    private var done: String? = null
     private var confirming = false
     private var confirmationAskedAt = 0L
     private var delivering = false
@@ -68,6 +71,15 @@ class WatchBolusActivity : Activity() {
         advice = runCatching {
             if (manual) ControllerHost.get(this).manualBolusAdvice(insulinTenths.coerceIn(1, MAX_MANUAL_TENTHS))
             else ControllerHost.get(this).bolusAdvice(carbsG.coerceIn(0, MAX_CARBS_G))
+        }.onFailure { error ->
+            // Seen twice as a bare "controller unavailable" (14-15 Oct): say what actually failed, and keep it.
+            adviceFailure = "${error.javaClass.simpleName}: ${error.message ?: ""}"
+            android.util.Log.e("WatchBolus", "advice failed (manual=$manual tenths=$insulinTenths carbs=$carbsG)", error)
+            runCatching {
+                java.io.File(filesDir, "watch-bolus-errors.log").appendText(
+                    "${java.util.Date()} manual=$manual tenths=$insulinTenths carbs=$carbsG\n${android.util.Log.getStackTraceString(error)}\n"
+                )
+            }
         }.getOrNull()
         render()
     }
@@ -90,8 +102,20 @@ class WatchBolusActivity : Activity() {
         }
         line(if (manual) "Инсулин с часов (без телефона)" else "Инсулин на еду (часы, без телефона)", 16f, bold = true)
         val advice = advice
+        done?.let { result ->
+            // After the press: the outcome first and large, then the arithmetic it came from, then "Закрыть".
+            // (Until 15 Oct this path wiped the advice and the screen said "controller unavailable" over a recorded result.)
+            line(result, 17f, Color.rgb(120, 220, 160), bold = true)
+            advice?.lines?.forEach { line(it, 12f, Color.LTGRAY) }
+            status = line("", 13f, Color.rgb(255, 195, 50))
+            button("Закрыть", Color.rgb(45, 45, 45)) { finish() }
+            return
+        }
         when {
-            advice == null          -> line("Контроллер часов недоступен", 14f, Color.rgb(255, 140, 130))
+            advice == null          -> {
+                line("Контроллер часов недоступен", 14f, Color.rgb(255, 140, 130))
+                adviceFailure?.let { line(it, 11f, Color.GRAY) }
+            }
             advice.refusal != null  -> {
                 line("${if (manual) "Подать нельзя" else "Рассчитать нельзя"}: ${advice.refusal}.", 14f, Color.rgb(255, 140, 130))
                 if (!manual) line("Углеводы можно записать без инсулина кнопкой «Только углеводы».", 12f, Color.GRAY)
@@ -153,13 +177,8 @@ class WatchBolusActivity : Activity() {
                     },
                     onFailure = { "Ошибка: ${it.message ?: it.javaClass.simpleName}" }
                 )
-                this@WatchBolusActivity.advice = null
+                done = text
                 render()
-                status.text = text
-                column.addView(Button(this).apply {
-                    this.text = "Закрыть"; isAllCaps = false
-                    setOnClickListener { finish() }
-                })
             }
         }
     }
