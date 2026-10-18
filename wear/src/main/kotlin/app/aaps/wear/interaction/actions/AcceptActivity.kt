@@ -67,9 +67,16 @@ class AcceptActivity : ViewSelectorActivity() {
                 text = intent.getStringExtra(DataLayerListenerServiceWear.KEY_TITLE) ?: "Подтверждение"
                 textSize = 18f; gravity = Gravity.CENTER; setTextColor(android.graphics.Color.WHITE)
             })
+            // The phone's text is the decision (carbs, food, the dose) and, after a blank line, the
+            // wizard's working. On a round screen the working pushed the button out of sight and
+            // the whole thing read as a log (18 Oct 2026): now the decision and the button come
+            // first, the working under them in small type.
+            val decision = message.substringBefore("\n\n").trim()
+            val working = message.substringAfter("\n\n", "").trim()
             addView(TextView(this@AcceptActivity).apply {
-                text = message; textSize = 15f; setTextColor(android.graphics.Color.WHITE)
-                setPadding(0, dp(12), 0, dp(12))
+                text = decision; textSize = 16f; setTextColor(android.graphics.Color.WHITE)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(0, dp(10), 0, dp(10))
             })
             addView(Button(this@AcceptActivity).apply {
                 text = "Подтвердить"; isAllCaps = false
@@ -80,6 +87,10 @@ class AcceptActivity : ViewSelectorActivity() {
                     finishAffinity()
                 }
             }, LinearLayout.LayoutParams(-1, -2))
+            if (working.isNotEmpty()) addView(TextView(this@AcceptActivity).apply {
+                text = working; textSize = 12f; setTextColor(android.graphics.Color.LTGRAY)
+                setPadding(0, dp(8), 0, dp(8))
+            })
             addView(Button(this@AcceptActivity).apply {
                 text = "Отмена"; isAllCaps = false
                 setOnClickListener { finish() }
