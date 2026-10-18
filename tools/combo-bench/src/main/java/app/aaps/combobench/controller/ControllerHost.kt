@@ -573,6 +573,11 @@ internal class ControllerHost private constructor(context: Context) {
         val carbsNeeded = if (alone) own?.optInt("carbsToTargetG", 0)?.takeIf { it > 0 }
         else phoneSnapshot?.let { s -> forecast?.series?.takeIf { it.isNotEmpty() }?.let { CarbsNeeded.gramsToTarget(it, s.targetMgdl, s.sensitivityMgdlPerU, s.carbRatioGPerU) } }
         val iob = if (alone) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneSnapshot?.iobU
+        // Carbohydrates entered on this watch after the phone's last run are not in its figure yet
+        // (it gets them with the next lease and counts them at its next loop, up to five minutes
+        // later); the face shows them at once on top of the phone's number.
+        val ownCarbsSinceSnapshot = phoneSnapshot?.let { s -> autonomy.carbs().filter { it.atEpochMs > s.madeAtEpochMs }.sumOf { it.grams } } ?: 0
+        val cob = if (alone) null else phoneSnapshot?.cobG?.let { it + ownCarbsSinceSnapshot }
         return FaceFacts(
             heldPump = held,
             phoneHeardEpochMs = phoneLastHeardEpochMs,
@@ -592,7 +597,7 @@ internal class ControllerHost private constructor(context: Context) {
             readings = allReadings.filter { it.atEpochMs >= now - FACE_HISTORY_MS },
             deltaPer5Min = GlucoseTrend.from(allReadings, now)?.takeIf { it.known }?.delta,
             iobU = iob,
-            cobG = if (alone) null else phoneSnapshot?.cobG,
+            cobG = cob,
             targetMgdl = phoneSnapshot?.targetMgdl?.takeIf { it.isFinite() && it > 0 },
             activity = activity,
             carbsNeededG = carbsNeeded

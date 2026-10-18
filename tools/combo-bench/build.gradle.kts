@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 39
-            versionName = "0.39-dose-result"
+            versionCode = 40
+            versionName = "0.40-cob-at-once"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }
