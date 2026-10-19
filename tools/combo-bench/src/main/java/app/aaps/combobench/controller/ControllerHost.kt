@@ -79,6 +79,8 @@ internal class ControllerHost private constructor(context: Context) {
             outbox.append(event.copy(pumpSerial = heldPump()))
             // The watch's own record of what the pump delivered, whoever asked for it.
             runCatching { autonomy.onPumpEvent(event, byWatch = runner.ownCommandInFlight) }
+            // A bolus or a basal change shows on the face at once, not at its next scheduled redraw.
+            if (event.type == PumpEvent.Type.BOLUS_INFUSED || event.type == PumpEvent.Type.TBR_STARTED || event.type == PumpEvent.Type.TBR_ENDED) refreshFace()
         },
         onPumpRead = { snapshot, boluses ->
             lastSnapshot = snapshot
@@ -579,7 +581,15 @@ internal class ControllerHost private constructor(context: Context) {
         // lease and counts at its next loop, up to five minutes later.
         val ownCarbsSinceForecast = autonomy.carbs().filter { it.atEpochMs > forecastAt }.sumOf { it.grams }
         val carbsNeeded = needed?.let { it - ownCarbsSinceForecast }?.takeIf { it > 0 }
-        val iob = if (alone) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneSnapshot?.iobU
+        // Insulin on board: the phone's figure (the watch's own when alone) plus the boluses the pump
+        // reported after that figure was made. A dose given from this watch, or by hand on the pump,
+        // is in the pump's history the next time the watch reads it, long before the phone's next
+        // snapshot (19 Oct 2026: the face kept the old IOB for up to ten minutes after a bolus).
+        // Decay over those few minutes is ignored, as with the carbohydrates below; once the phone
+        // has counted a bolus its snapshot is newer than the bolus and it leaves this sum.
+        val iobBaseAt = if (alone) own?.optLong("at", 0L) ?: 0L else phoneSnapshot?.madeAtEpochMs ?: 0L
+        val bolusesSinceIobBase = autonomy.delivery().boluses.filter { it.atEpochMs > iobBaseAt }.sumOf { it.units }
+        val iob = (if (alone) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneSnapshot?.iobU)?.let { it + bolusesSinceIobBase }
         val ownCarbsSinceSnapshot = phoneSnapshot?.let { s -> autonomy.carbs().filter { it.atEpochMs > s.madeAtEpochMs }.sumOf { it.grams } } ?: 0
         val cob = if (alone) null else phoneSnapshot?.cobG?.let { it + ownCarbsSinceSnapshot }
         return FaceFacts(
