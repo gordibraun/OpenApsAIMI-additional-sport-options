@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 41
-            versionName = "0.41-carbs-to-stay-up"
+            versionCode = 42
+            versionName = "0.42-tbr-stale-packet"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

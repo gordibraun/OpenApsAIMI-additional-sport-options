@@ -34,6 +34,10 @@ private val logger = Logger.get("PumpIO")
 // See sendShortRTButtonPress(): an RT button held longer than this is auto-repeated by the Combo.
 private val MAX_SHORT_RT_BUTTON_PRESS_HOLD = 300.milliseconds
 
+// See switchMode(): how many stale leftover response packets may be dropped while waiting for a
+// service (de)activation response before the mode switch is considered to have failed.
+private const val MAX_SKIPPED_STALE_PACKETS_DURING_MODE_SWITCH = 3
+
 private object PumpIOConstants {
     const val MAX_NUM_REGULAR_CONNECTION_ATTEMPTS = 3
     const val NONCE_INCREMENT = 500
@@ -1379,7 +1383,27 @@ class PumpIO(
                             )
                         )
                         logger(LogLevel.DEBUG) { "Sent CTRL_DEACTIVATE packet; waiting for CTRL_DEACTIVATE_SERVICE_RESPONSE packet" }
-                        val receivedAppLayerPacket = transportLayerIO.receive(TransportLayer.Command.DATA).toAppLayerPacket()
+                        var receivedAppLayerPacket = transportLayerIO.receive(TransportLayer.Command.DATA).toAppLayerPacket()
+
+                        // XXX: A response packet from an earlier command-mode exchange (observed
+                        // 2026-10-19: CMD_READ_ERROR_WARNING_STATUS_RESPONSE, left over from the
+                        // alert check that runs before a TBR) can arrive just before the expected
+                        // CTRL_DEACTIVATE_SERVICE_RESPONSE. This is the mirror of the extra-packet
+                        // workaround below for the activate step: drop such stale responses and read
+                        // again, up to a small bound, instead of failing the whole command. A TBR
+                        // that failed here used to come back UNKNOWN and only recovered on the next
+                        // cycle; tolerating the stale packet lets the command go through at once.
+                        var skippedStalePackets = 0
+                        while (receivedAppLayerPacket.command != ApplicationLayer.Command.CTRL_DEACTIVATE_SERVICE_RESPONSE &&
+                            skippedStalePackets < MAX_SKIPPED_STALE_PACKETS_DURING_MODE_SWITCH
+                        ) {
+                            logger(LogLevel.INFO) {
+                                "Got ${receivedAppLayerPacket.command} packet even though CTRL_DEACTIVATE_SERVICE_RESPONSE " +
+                                "was expected; suspected to be a stale leftover response; dropping it and receiving again"
+                            }
+                            skippedStalePackets++
+                            receivedAppLayerPacket = transportLayerIO.receive(TransportLayer.Command.DATA).toAppLayerPacket()
+                        }
                         if (receivedAppLayerPacket.command != ApplicationLayer.Command.CTRL_DEACTIVATE_SERVICE_RESPONSE) {
                             throw ApplicationLayer.IncorrectPacketException(
                                 receivedAppLayerPacket,
