@@ -385,15 +385,19 @@ class WatchRegulatorTest {
         assertThat(none.tenthsIU).isEqualTo(30)
     }
 
-    @Test fun `the carbohydrates the forecast is short of the target are counted for the face`() {
-        // 50 mg/dL per unit over 10 g per unit: 5 mg/dL per gram. Falling steadily, the forecast ends well under 117.
+    @Test fun `the carbohydrates that keep the forecast out of a low are counted for the face`() {
+        // 50 mg/dL per unit over 10 g per unit: 5 mg/dL per gram. Falling steadily, the forecast goes under 80.
         val falling = Fixture().glucose(100.0, per5 = -4.0)
         val decision = falling.decide()
         assertThat(decision.carbsToTargetG).isNotNull()
         assertThat(decision.carbsToTargetG!!).isAtLeast(1)
-        assertThat(CarbsNeeded.gramsToTarget(listOf(100, 90, 80), 117.0, 50.0, 10.0)).isEqualTo(8)
-        assertThat(CarbsNeeded.gramsToTarget(listOf(120, 125), 117.0, 50.0, 10.0)).isNull()
-        assertThat(CarbsNeeded.gramsToTarget(listOf(20), 117.0, 50.0, 10.0)).isEqualTo(20)
+        // Lowest 70: lifted to 90 takes 20 mg/dL, 4 g. At or above the floor nothing is asked, however far from the target.
+        assertThat(CarbsNeeded.gramsToAvoidLow(listOf(100, 90, 70), 50.0, 10.0)).isEqualTo(4)
+        assertThat(CarbsNeeded.gramsToAvoidLow(listOf(80, 79, 80), 50.0, 10.0)).isEqualTo(3)
+        assertThat(CarbsNeeded.gramsToAvoidLow(listOf(78, 90, 135), 50.0, 10.0)).isEqualTo(3)
+        assertThat(CarbsNeeded.gramsToAvoidLow(listOf(80, 100), 50.0, 10.0)).isNull()
+        assertThat(CarbsNeeded.gramsToAvoidLow(listOf(120, 125), 50.0, 10.0)).isNull()
+        assertThat(CarbsNeeded.gramsToAvoidLow(listOf(20), 50.0, 10.0)).isEqualTo(14)
     }
 
     @Test fun `a reduction the phone left behind is never raised by the watch`() {

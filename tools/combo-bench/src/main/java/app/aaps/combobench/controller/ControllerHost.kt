@@ -568,14 +568,18 @@ internal class ControllerHost private constructor(context: Context) {
         }
         val allReadings = autonomy.readings()
         val activity = ActivityEffect.current(autonomy.activities(), now)
-        // Grams that would bring the forecast back up to the target: the watch's own number when
-        // alone, the same arithmetic on the phone's forecast and coefficients otherwise.
-        val carbsNeeded = if (alone) own?.optInt("carbsToTargetG", 0)?.takeIf { it > 0 }
-        else phoneSnapshot?.let { s -> forecast?.series?.takeIf { it.isNotEmpty() }?.let { CarbsNeeded.gramsToTarget(it, s.targetMgdl, s.sensitivityMgdlPerU, s.carbRatioGPerU) } }
+        // Grams that keep the forecast out of a low: the watch's own number when alone, the same
+        // arithmetic on the phone's forecast and coefficients otherwise. Nothing while no low is
+        // forecast, however far from the target.
+        val forecastAt = if (alone) own?.optLong("at", 0L) ?: 0L else phoneSnapshot?.madeAtEpochMs ?: 0L
+        val needed = if (alone) own?.optInt("carbsToTargetG", 0)?.takeIf { it > 0 }
+        else phoneSnapshot?.let { s -> forecast?.series?.takeIf { it.isNotEmpty() }?.let { CarbsNeeded.gramsToAvoidLow(it, s.sensitivityMgdlPerU, s.carbRatioGPerU) } }
+        // Carbohydrates entered on this watch after that forecast are not in it yet: they come off
+        // the hint at once, and off the phone's carbs-on-board figure, which it gets with the next
+        // lease and counts at its next loop, up to five minutes later.
+        val ownCarbsSinceForecast = autonomy.carbs().filter { it.atEpochMs > forecastAt }.sumOf { it.grams }
+        val carbsNeeded = needed?.let { it - ownCarbsSinceForecast }?.takeIf { it > 0 }
         val iob = if (alone) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneSnapshot?.iobU
-        // Carbohydrates entered on this watch after the phone's last run are not in its figure yet
-        // (it gets them with the next lease and counts them at its next loop, up to five minutes
-        // later); the face shows them at once on top of the phone's number.
         val ownCarbsSinceSnapshot = phoneSnapshot?.let { s -> autonomy.carbs().filter { it.atEpochMs > s.madeAtEpochMs }.sumOf { it.grams } } ?: 0
         val cob = if (alone) null else phoneSnapshot?.cobG?.let { it + ownCarbsSinceSnapshot }
         return FaceFacts(

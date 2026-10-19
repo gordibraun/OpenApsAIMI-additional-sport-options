@@ -131,6 +131,6 @@ internal object FaceGraph {
         val f = facts?.forecast ?: return "График глюкозы: данных нет"
         return "График: последний час и прогноз на полтора часа, минимум ${f.minMgdl}, через четыре часа ${f.endMgdl}; " +
             (facts.iobU?.let { "активный инсулин %.1f ЕД".format(Locale.getDefault(), it) } ?: "активный инсулин неизвестен") +
-            (facts.carbsNeededG?.takeIf { it > 0 }?.let { "; до цели не хватает $it г углеводов" } ?: "")
+            (facts.carbsNeededG?.takeIf { it > 0 }?.let { "; чтобы не упасть ниже 80, нужно $it г углеводов" } ?: "")
     }
 }

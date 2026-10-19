@@ -412,7 +412,7 @@ class WatchRegulator {
         val asRunning = if (running == null || forecast == null) null else runCatching {
             forecast.series(basalNow * runningPercent / 100.0, ceil(remainingMinutes).toInt().coerceAtLeast(1))
         }.getOrNull()
-        val carbsToTarget = snapshot?.let { CarbsNeeded.gramsToTarget(asRunning ?: atProfile ?: emptyList(), goal, it.sensitivityMgdlPerU, it.carbRatioGPerU) }
+        val carbsToTarget = snapshot?.let { CarbsNeeded.gramsToAvoidLow(asRunning ?: atProfile ?: emptyList(), it.sensitivityMgdlPerU, it.carbRatioGPerU, floorMgdl = floorMgdl) }
         return Decision(
             action, rule, wantedPercent, text, carbsHint, trend, forecastMin, forecastEnd, atProfile, asRunning, hold,
             forecast?.let { runCatching { it.iobNowU() }.getOrNull()?.takeIf { iob -> iob.isFinite() } },
