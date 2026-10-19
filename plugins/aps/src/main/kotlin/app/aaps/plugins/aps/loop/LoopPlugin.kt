@@ -996,7 +996,7 @@ class LoopPlugin @Inject constructor(
         }
     }
 
-    private fun applySMBRequest(request: APSResult, callback: Callback?) {
+    internal fun applySMBRequest(request: APSResult, callback: Callback?) {
         staleApsResultReason(request, null)?.let { staleReason ->
             (request.rawData() as? RT)?.recordLoopStep(DecisionStage.DELIVERY, "Устаревший запрос", staleReason,
                 branch = app.aaps.core.interfaces.aps.DecisionBranch("delivery_smb", "blocked"))
@@ -1039,8 +1039,15 @@ class LoopPlugin @Inject constructor(
 
         // deliver SMB
         val detailedBolusInfo = DetailedBolusInfo()
-        detailedBolusInfo.lastKnownBolusTime = BolusInputSnapshot.from(request.iobData?.firstOrNull())?.lastBolusTime
-            ?: request.iobData?.firstOrNull()?.lastBolusTime ?: 0L
+        // The command queue rejects this SMB if a newer bolus reached the database after the loop
+        // computed the request (CommandQueueImplementation: lastKnownBolusTime < newest bolus).
+        // This must therefore be the newest bolus in the database, as upstream has it. Taking it
+        // from the IOB input window (DIA) instead returned 0 whenever the last bolus was older than
+        // DIA, so every SMB was rejected after a bolus-free stretch longer than DIA (seen 2026-10-19:
+        // no SMB delivered for an hour during a rise). The separate "insulin history changed since
+        // the IOB calculation" guard still runs in withInsulinInputValidation below, so dropping the
+        // snapshot source here loses no protection.
+        detailedBolusInfo.lastKnownBolusTime = persistenceLayer.getNewestBolus()?.timestamp ?: 0L
         detailedBolusInfo.eventType = TE.Type.CORRECTION_BOLUS
         detailedBolusInfo.insulin = request.smb
         detailedBolusInfo.bolusType = BS.Type.SMB

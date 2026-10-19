@@ -3,12 +3,14 @@ package app.aaps.plugins.aps.loop
 import android.app.NotificationManager
 import android.content.Context
 import androidx.preference.PreferenceManager
+import app.aaps.core.data.model.BS
 import app.aaps.core.data.model.RM
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.data.pump.defs.PumpDescription
 import app.aaps.core.data.time.T
 import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
+import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.constraints.Constraint
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
 import app.aaps.core.interfaces.db.PersistenceLayer
@@ -16,11 +18,13 @@ import app.aaps.core.interfaces.iob.GlucoseStatusProvider
 import app.aaps.core.interfaces.logging.UserEntryLogger
 import app.aaps.core.interfaces.nsclient.ProcessedDeviceStatusData
 import app.aaps.core.interfaces.plugin.PluginDescription
+import app.aaps.core.interfaces.pump.DetailedBolusInfo
 import app.aaps.core.interfaces.pump.PumpStatusProvider
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.receivers.ReceiverStatusStore
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
+import app.aaps.core.keys.IntKey
 import app.aaps.core.nssdk.interfaces.RunningConfiguration
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.pump.virtual.VirtualPumpPlugin
@@ -134,6 +138,48 @@ class LoopPluginTest : TestBaseWithProfile() {
         loopPlugin.applyTBRRequest(request, validProfile, null)
         verify(commandQueue).tempBasalAbsolute(eq(0.0), eq(30), eq(false), eq(validProfile),
             eq(app.aaps.core.interfaces.pump.PumpSync.TemporaryBasalType.NORMAL), anyOrNull())
+    }
+
+    @Test fun smbUsesNewestDatabaseBolusForRaceCheckNotIobWindow() {
+        // Regression (2026-10-19): the command queue rejects an SMB when its lastKnownBolusTime is
+        // older than the newest bolus in the database. Taking that field from the IOB input window
+        // (DIA) made it 0 after any bolus-free stretch longer than DIA, so every SMB was rejected
+        // during a rise. It must be the newest database bolus, so a stale/empty IOB window does not
+        // block delivery. Here the IOB window holds no boluses but the database has one three hours
+        // back; the delivered DetailedBolusInfo must still carry that database timestamp.
+        val now = 1_700_000_000_000L
+        val newestBolusTime = now - T.hours(3).msecs()
+        whenever(dateUtil.now()).thenReturn(now)
+        whenever(persistenceLayer.getRunningModeActiveAt(anyLong()))
+            .thenReturn(RM(mode = RM.Mode.CLOSED_LOOP, timestamp = now, duration = 0))
+        whenever(constraintChecker.isLoopInvocationAllowed()).thenReturn(ConstraintObject(true, aapsLogger))
+        whenever(constraintChecker.isClosedLoopAllowed()).thenReturn(ConstraintObject(true, aapsLogger))
+        whenever(constraintChecker.isLgsForced()).thenReturn(ConstraintObject(false, aapsLogger))
+        whenever(virtualPumpPlugin.isSuspended()).thenReturn(false)
+        whenever(virtualPumpPlugin.isInitialized()).thenReturn(true)
+        whenever(persistenceLayer.getLastGlucoseValue()).thenReturn(null)
+        whenever(persistenceLayer.getNewestBolus())
+            .thenReturn(BS(timestamp = newestBolusTime, amount = 1.0, dateCreated = newestBolusTime, type = BS.Type.NORMAL))
+        whenever(persistenceLayer.getBolusesFromTime(any(), any())).thenReturn(Single.just(emptyList()))
+        whenever(preferences.get(IntKey.ApsMaxSmbFrequency)).thenReturn(3)
+        whenever(commandQueue.bolus(any(), anyOrNull())).thenReturn(true)
+
+        val request = org.mockito.kotlin.mock<app.aaps.core.interfaces.aps.APSResult>()
+        whenever(request.date).thenReturn(now)
+        whenever(request.glucoseStatus).thenReturn(null)
+        whenever(request.isTempBasalRequested).thenReturn(false)
+        whenever(request.smb).thenReturn(1.0)
+        whenever(request.deliverAt).thenReturn(now)
+        whenever(request.iobData).thenReturn(
+            arrayOf(IobTotal(now, bolusInputs = emptyList(), bolusInputsSince = now - T.hours(5).msecs()))
+        )
+
+        loopPlugin.applySMBRequest(request, null)
+
+        val captor = argumentCaptor<DetailedBolusInfo>()
+        verify(commandQueue).bolus(captor.capture(), anyOrNull())
+        assertThat(captor.firstValue.lastKnownBolusTime).isEqualTo(newestBolusTime)
+        assertThat(captor.firstValue.insulin).isWithin(0.001).of(1.0)
     }
 
     @Test
