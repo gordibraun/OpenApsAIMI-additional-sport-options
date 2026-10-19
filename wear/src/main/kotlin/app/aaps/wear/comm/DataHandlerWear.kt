@@ -28,7 +28,9 @@ import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.wear.R
 import app.aaps.wear.interaction.WatchfaceConfigurationActivity
 import app.aaps.wear.interaction.actions.AcceptActivity
+import app.aaps.wear.interaction.actions.DeliveryStatus
 import app.aaps.wear.interaction.actions.ProfileSwitchActivity
+import app.aaps.wear.interaction.actions.WatchUiState
 import app.aaps.wear.interaction.utils.Persistence
 import app.aaps.wear.tile.ActionsTileService
 import app.aaps.wear.tile.LoopStateTileService
@@ -74,6 +76,17 @@ class DataHandlerWear @Inject constructor(
             .observeOn(aapsSchedulers.io)
             .subscribe {
                 aapsLogger.debug(LTag.WEAR, "ConfirmAction received from ${it.sourceNodeId}")
+                // A plain answer, with nothing to send back, is the phone reporting how an earlier
+                // request ended. It settles the status line; while a dose is being entered or
+                // confirmed it must not take the screen and wipe that work (19 Oct 2026), so it goes
+                // out as a notification instead. With no input on screen its own screen opens as before.
+                if (it.returnCommand == null) {
+                    DeliveryStatus.answered(context, it.title, it.message)
+                    if (WatchUiState.inputOnScreen) {
+                        showDeliveryNotification(it.title, it.message)
+                        return@subscribe
+                    }
+                }
                 context.startActivity(Intent(context, AcceptActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     putExtras(
@@ -307,6 +320,32 @@ class DataHandlerWear @Inject constructor(
         // or other notification behaviors after this
         context.getSystemService(NotificationManager::class.java)
             .createNotificationChannel(channel)
+    }
+
+    private val deliveryChannelId = "watch_delivery"
+    private val deliveryNotificationId = 7301
+
+    /** The phone's answer to a dose confirmed from the watch, shown without taking over the screen. */
+    private fun showDeliveryNotification(title: String, message: String) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        manager.createNotificationChannel(
+            NotificationChannel(deliveryChannelId, "Подача с часов", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Ответ телефона на дозу, подтверждённую с часов"
+                enableVibration(true)
+            }
+        )
+        manager.notify(
+            deliveryNotificationId,
+            NotificationCompat.Builder(context, deliveryChannelId)
+                .setSmallIcon(R.drawable.notif_icon)
+                .setContentTitle(title)
+                .setContentText(message)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setTimeoutAfter(90_000L)
+                .build()
+        )
     }
 
     private fun handleOpenLoopRequest(command: EventData.OpenLoopRequest) {

@@ -27,6 +27,8 @@ import app.aaps.core.interfaces.rx.weardata.EventData
 import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.wear.R
 import app.aaps.wear.interaction.utils.RotaryScrollView
+import androidx.core.view.InputDeviceCompat
+import androidx.core.view.MotionEventCompat
 import com.google.android.gms.wearable.Wearable
 import dagger.android.DaggerActivity
 import io.reactivex.rxjava3.disposables.Disposable
@@ -47,9 +49,31 @@ class WatchControlActivity : DaggerActivity() {
     private var foodType = "balanced"
     private lateinit var root: LinearLayout
     private lateinit var scroll: RotaryScrollView
+    private var amountChange: ((Int) -> Unit)? = null
+    private var rotaryLastAt = 0L
+    private var rotaryRun = 0
+    private var deliveryStrip: TextView? = null
+    private val deliveryListener: () -> Unit = { runOnUiThread { refreshDeliveryStrip() } }
+    private val deliveryTick = object : Runnable {
+        override fun run() { refreshDeliveryStrip(); handler.postDelayed(this, 20_000L) }
+    }
 
-    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean =
-        (::scroll.isInitialized && scroll.handleRotary(event)) || super.dispatchGenericMotionEvent(event)
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        // On the amount screens the crown changes the amount, faster the longer it is turned, as the
+        // phone wizard's fields do; elsewhere it scrolls the page.
+        val change = amountChange
+        if (change != null && event.action == MotionEvent.ACTION_SCROLL && event.isFromSource(InputDeviceCompat.SOURCE_ROTARY_ENCODER)) {
+            val now = System.currentTimeMillis()
+            if (now - rotaryLastAt > 300L) rotaryRun = 0
+            val step = when { rotaryRun < 6 -> 1; rotaryRun < 14 -> 2; else -> 5 }
+            val delta = -event.getAxisValue(MotionEventCompat.AXIS_SCROLL)
+            if (delta != 0f) change(if (delta > 0) step else -step)
+            rotaryLastAt = now
+            rotaryRun++
+            return true
+        }
+        return (::scroll.isInitialized && scroll.handleRotary(event)) || super.dispatchGenericMotionEvent(event)
+    }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -74,6 +98,13 @@ class WatchControlActivity : DaggerActivity() {
         label(when (kind) { "INSULIN" -> "Инсулин"; "ACTIVITY" -> "Нагрузка"; else -> "Углеводы" }, if (compact) 14f else 18f).apply {
             if (compact) layoutParams = LinearLayout.LayoutParams(-1, dp(18))
         }
+        // The dose confirmed a moment ago: sent, delivered, failed. Its answer no longer takes the
+        // screen while something is being entered here, so this line is where it shows.
+        deliveryStrip = TextView(this).apply {
+            textSize = if (compact) 11f else 12f; gravity = Gravity.CENTER; setTextColor(0xFFF2C14E.toInt())
+            visibility = View.GONE
+        }
+        root.addView(deliveryStrip, LinearLayout.LayoutParams(-1, -2))
         if (kind == "ACTIVITY") {
             choices("Режим", listOf("Прогулка", "Спорт")) { mode = if (it == 0) "WALK" else "SPORT" }
             choices("Длительность", listOf("30 мин", "50 мин", "90 мин")) { duration = listOf(30, 50, 90)[it] }
@@ -89,6 +120,27 @@ class WatchControlActivity : DaggerActivity() {
             }
             fun refresh() { amountView.text = if (kind == "INSULIN") "${amount / 10.0} Е" else "$amount г" }
             val row = LinearLayout(this).apply { gravity = Gravity.CENTER }
+            val change: (Int) -> Unit = { delta -> amount = (amount + delta).coerceIn(0, maximum.coerceAtLeast(0)); refresh() }
+            amountChange = change
+            // Dragging up or down over the number changes it too, one unit per ten dp, so a meal
+            // does not take a tap per gram. The buttons at either side keep their own taps.
+            row.setOnTouchListener(object : View.OnTouchListener {
+                private var lastY = 0f
+                private var carry = 0f
+                override fun onTouch(v: View, e: MotionEvent): Boolean {
+                    when (e.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> { lastY = e.y; carry = 0f; v.parent?.requestDisallowInterceptTouchEvent(true) }
+                        MotionEvent.ACTION_MOVE -> {
+                            carry += lastY - e.y; lastY = e.y
+                            val unit = dp(10).toFloat()
+                            while (carry >= unit) { change(1); carry -= unit }
+                            while (carry <= -unit) { change(-1); carry += unit }
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.parent?.requestDisallowInterceptTouchEvent(false)
+                    }
+                    return true
+                }
+            })
             fun step(icon: Int, change: Int, description: String) = ImageButton(this).apply {
                 id = if (change < 0) R.id.watch_control_minus else R.id.watch_control_plus
                 setImageResource(icon); contentDescription = description
@@ -380,5 +432,26 @@ class WatchControlActivity : DaggerActivity() {
         const val PHONE_PROBE_MS = 1_500L
         const val PHONE_ANSWER_MS = 12_000L
     }
+    override fun onResume() {
+        super.onResume()
+        WatchUiState.enterInput()
+        DeliveryStatus.addListener(deliveryListener)
+        handler.post(deliveryTick)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(deliveryTick)
+        DeliveryStatus.removeListener(deliveryListener)
+        WatchUiState.leaveInput()
+        super.onPause()
+    }
+
+    private fun refreshDeliveryStrip() {
+        val strip = deliveryStrip ?: return
+        val line = DeliveryStatus.line(this)
+        strip.text = line ?: ""
+        strip.visibility = if (line == null) View.GONE else View.VISIBLE
+    }
+
     override fun onDestroy() { handler.removeCallbacksAndMessages(null); pongWatch?.dispose(); super.onDestroy() }
 }

@@ -34,6 +34,9 @@ class AcceptActivity : ViewSelectorActivity() {
     var actionKey = ""
     private var dismissThread: DismissThread? = null
     private var controlScroll: RotaryScrollView? = null
+    private var confirmationMode = false
+    private var deliveryStrip: TextView? = null
+    private val deliveryListener: () -> Unit = { runOnUiThread { refreshDeliveryStrip() } }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean =
         controlScroll?.handleRotary(event) == true || super.dispatchGenericMotionEvent(event)
@@ -59,6 +62,7 @@ class AcceptActivity : ViewSelectorActivity() {
 
     private fun showControlConfirmation() {
         fun dp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
+        confirmationMode = true
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(30), dp(30), dp(30), dp(40))
@@ -67,6 +71,13 @@ class AcceptActivity : ViewSelectorActivity() {
                 text = intent.getStringExtra(DataLayerListenerServiceWear.KEY_TITLE) ?: "Подтверждение"
                 textSize = 18f; gravity = Gravity.CENTER; setTextColor(android.graphics.Color.WHITE)
             })
+            // The dose confirmed before this one: sent, delivered, failed. Its answer no longer
+            // replaces this screen, so this line is where the user sees that it went through.
+            deliveryStrip = TextView(this@AcceptActivity).apply {
+                textSize = 12f; gravity = Gravity.CENTER; setTextColor(0xFFF2C14E.toInt())
+                setPadding(0, dp(4), 0, 0); visibility = View.GONE
+            }
+            addView(deliveryStrip)
             // The phone's text is the decision (carbs, food, the dose) and, after a blank line, the
             // wizard's working. On a round screen the working pushed the button out of sight and
             // the whole thing read as a log (18 Oct 2026): now the decision and the button come
@@ -82,6 +93,8 @@ class AcceptActivity : ViewSelectorActivity() {
                 text = "Подтвердить"; isAllCaps = false
                 setOnClickListener {
                     isEnabled = false
+                    // Remembered as "sent" before it goes, so the status line shows it at once.
+                    DeliveryStatus.sent(this@AcceptActivity, DeliveryStatus.shortDecision(message))
                     startService(IntentWearToMobile(this@AcceptActivity, actionKey))
                     startForegroundService(IntentCancelNotification(this@AcceptActivity))
                     finishAffinity()
@@ -101,9 +114,29 @@ class AcceptActivity : ViewSelectorActivity() {
         controlScroll?.requestFocus()
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (confirmationMode) {
+            WatchUiState.enterInput()
+            DeliveryStatus.addListener(deliveryListener)
+            refreshDeliveryStrip()
+        }
+    }
+
     override fun onPause() {
+        if (confirmationMode) {
+            DeliveryStatus.removeListener(deliveryListener)
+            WatchUiState.leaveInput()
+        }
         super.onPause()
         finish()
+    }
+
+    private fun refreshDeliveryStrip() {
+        val strip = deliveryStrip ?: return
+        val line = DeliveryStatus.line(this)
+        strip.text = line ?: ""
+        strip.visibility = if (line == null) View.GONE else View.VISIBLE
     }
 
     private inner class MyGridViewPagerAdapter : GridPagerAdapterNonDeprecated() {
