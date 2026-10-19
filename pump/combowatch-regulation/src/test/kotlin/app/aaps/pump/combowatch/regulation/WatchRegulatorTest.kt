@@ -386,11 +386,16 @@ class WatchRegulatorTest {
     }
 
     @Test fun `the carbohydrates that keep the forecast out of a low are counted for the face`() {
-        // 50 mg/dL per unit over 10 g per unit: 5 mg/dL per gram. Falling steadily, the forecast goes under 80.
-        val falling = Fixture().glucose(100.0, per5 = -4.0)
-        val decision = falling.decide()
+        // 50 mg/dL per unit over 10 g per unit: 5 mg/dL per gram. Two units given ten minutes ago with
+        // glucose at 110 take the forecast well under 80: something to eat is asked for.
+        val dosed = Fixture().glucose(110.0, per5 = 0.0)
+        dosed.snapshot = dosed.snapshot(bolusUnits = 2.0, bolusAgeAtSnapshot = 10.0)
+        val decision = dosed.decide()
+        assertThat(decision.forecastMinMgdl!!).isLessThan(80)
         assertThat(decision.carbsToTargetG).isNotNull()
         assertThat(decision.carbsToTargetG!!).isAtLeast(1)
+        // Flat at 100 with nothing on board: under the target, but no low in sight, nothing to eat for.
+        assertThat(Fixture().glucose(100.0, per5 = 0.0).decide().carbsToTargetG).isNull()
         // Lowest 70: lifted to 90 takes 20 mg/dL, 4 g. At or above the floor nothing is asked, however far from the target.
         assertThat(CarbsNeeded.gramsToAvoidLow(listOf(100, 90, 70), 50.0, 10.0)).isEqualTo(4)
         assertThat(CarbsNeeded.gramsToAvoidLow(listOf(80, 79, 80), 50.0, 10.0)).isEqualTo(3)
