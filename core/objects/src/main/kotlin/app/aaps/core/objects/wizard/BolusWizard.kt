@@ -677,25 +677,30 @@ class BolusWizard @Inject constructor(
             profileFunction.getProfile()?.let { current ->
                 val now = dateUtil.now()
                 Maybe.just(WizardCalculationInputs(
+                    // Records whose arrival changes the dose or means a treatment happened. Not the
+                    // glucose record (compared by value, with tolerance, below), not temporary basals
+                    // and not the loop's run counter: with the watch driving the pump those move every
+                    // minute and refused nearly every meal confirmed from the watch (21 Oct 2026).
                     historyIds = listOf(
                         persistenceLayer.getLastBolusId(), persistenceLayer.getLastCarbsId(),
-                        persistenceLayer.getLastGlucoseValueId(), persistenceLayer.getLastTemporaryTargetId(),
+                        persistenceLayer.getLastTemporaryTargetId(),
                         persistenceLayer.getLastTherapyEventId(), persistenceLayer.getLastEffectiveProfileSwitchId(),
-                        persistenceLayer.getLastProfileSwitchId(), persistenceLayer.getLastTemporaryBasalId(),
+                        persistenceLayer.getLastProfileSwitchId(),
                         persistenceLayer.getLastExtendedBolusId(), persistenceLayer.getLastRunningModeId()
                     ),
                     profile = current.toPureNsJson(dateUtil).toString(),
+                    // The sensitivity must stay last: it is the one entry compared with tolerance.
                     profileValues = listOf(
                         current.getIc(), current.getBasal(), current.getTargetLowMgdl(), current.getTargetHighMgdl(),
                         current.getIsfMgdlForCarbs(now, "WizardConfirmation", config, processedDeviceStatusData)
                     ),
-                    apsRun = loop.lastRun?.lastAPSRun ?: 0L,
+                    glucoseMgdl = persistenceLayer.getLastGlucoseValue()?.value,
                     target = persistenceLayer.getTemporaryTargetActiveAt(now)?.toString(),
                     lastAcceptedTreatment = aimiMealAssist.lastTreatmentAcceptedAt()
                 ))
             } ?: Maybe.empty()
         }.subscribeOn(Schedulers.io()).blockingGet().also {
-            aapsLogger.debug(LTag.UI, "Wizard confirmation snapshot: available=${it != null}, apsRun=${it?.apsRun}")
+            aapsLogger.debug(LTag.UI, "Wizard confirmation snapshot: available=${it != null}, glucose=${it?.glucoseMgdl}")
         }
     } catch (e: Exception) {
         aapsLogger.error("Cannot validate wizard calculation inputs", e)
@@ -726,7 +731,11 @@ class BolusWizard @Inject constructor(
                     rejection == WizardConfirmationState.Rejection.ALREADY_SUBMITTED -> "Этот ввод уже подтверждён. Повторная отправка запрещена."
                     else -> "Срок действия расчёта истёк или изменилось время. Нужен новый расчёт."
                 }
-                aapsLogger.warn(LTag.UI, "Wizard confirmation rejected: reason=$rejection, constraintsChanged=$constraintsChanged")
+                aapsLogger.warn(
+                    LTag.UI,
+                    "Wizard confirmation rejected: reason=$rejection, constraintsChanged=$constraintsChanged, " +
+                        "changed=${calculationInputs?.let { calculated -> currentInputs?.let { calculated.changedFields(it) } }}"
+                )
                 if (ctx != null) OKDialog.show(ctx, rh.gs(app.aaps.core.ui.R.string.boluswizard), "$reason Инсулин не отправлен.")
                 onRejected?.invoke("$reason Инсулин не отправлен.")
                 finishConfirmation(false)
