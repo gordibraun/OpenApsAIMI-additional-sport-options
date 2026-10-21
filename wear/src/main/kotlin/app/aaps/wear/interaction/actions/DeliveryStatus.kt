@@ -31,7 +31,8 @@ object DeliveryStatus {
     private const val PREFS = "watch_delivery_status"
     private const val KEY_ENTRIES = "entries"
     private const val DONE_SHOWN_MS = 3 * 60_000L
-    private const val FAILED_SHOWN_MS = 30 * 60_000L
+    private const val FAILED_SHOWN_MS = 10 * 60_000L
+    private const val MAX_LINE_CHARS = 56
     private const val NO_ANSWER_WARN_MS = 10 * 60_000L
     private const val NO_ANSWER_GIVE_UP_MS = 60 * 60_000L
     private const val MAX_ENTRIES = 4
@@ -90,7 +91,10 @@ object DeliveryStatus {
             return "⏳ Подаётся: ${first.decision}$queued$late"
         }
         val last = entries.filter { it.state != State.SENT }.maxByOrNull { it.answeredAtEpochMs } ?: return null
-        return if (last.state == State.DONE) "✓ ${last.answer}" else "✗ ${last.answer}"
+        // One short line: the phone's full text is in the notification. A long refusal wrapped to
+        // three lines here and pushed the bottom button off the round screen (21 Oct 2026).
+        val text = if (last.state == State.DONE) "✓ ${last.answer}" else "✗ Не подано: ${last.answer.removeSuffix(" Инсулин не отправлен").trimEnd('.')}"
+        return if (text.length <= MAX_LINE_CHARS) text else text.take(MAX_LINE_CHARS - 1) + "…"
     }
 
     private fun live(entries: List<Entry>, now: Long): MutableList<Entry> = entries.filter { entry ->

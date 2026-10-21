@@ -102,6 +102,7 @@ class WatchControlActivity : DaggerActivity() {
         // screen while something is being entered here, so this line is where it shows.
         deliveryStrip = TextView(this).apply {
             textSize = if (compact) 11f else 12f; gravity = Gravity.CENTER; setTextColor(0xFFF2C14E.toInt())
+            maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
             visibility = View.GONE
         }
         root.addView(deliveryStrip, LinearLayout.LayoutParams(-1, -2))

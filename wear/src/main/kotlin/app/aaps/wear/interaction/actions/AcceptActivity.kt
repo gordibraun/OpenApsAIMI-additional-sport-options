@@ -75,6 +75,7 @@ class AcceptActivity : ViewSelectorActivity() {
             // replaces this screen, so this line is where the user sees that it went through.
             deliveryStrip = TextView(this@AcceptActivity).apply {
                 textSize = 12f; gravity = Gravity.CENTER; setTextColor(0xFFF2C14E.toInt())
+                maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
                 setPadding(0, dp(4), 0, 0); visibility = View.GONE
             }
             addView(deliveryStrip)
