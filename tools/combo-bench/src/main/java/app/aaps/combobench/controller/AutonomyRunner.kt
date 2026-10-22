@@ -40,6 +40,8 @@ internal class AutonomyRunner(
     private val lastPumpReadEpochMs: () -> Long? = { null },
     /** Every answer the pump gives to the watch's own commands, for the face's "pump answers" mark. */
     private val onOwnResult: (ComboResult) -> Unit = {},
+    /** The owner's bolus limit from the phone's last lease, tenths; the watch's own microboluses are held under it too. */
+    private val ownerBolusLimitTenths: () -> Int? = { null },
     /** The hour of the pump's day at a moment. */
     private val hourOfDay: (Long) -> Int = { at -> Calendar.getInstance().apply { timeInMillis = at }.get(Calendar.HOUR_OF_DAY) },
     private val nowEpochMs: () -> Long = System::currentTimeMillis
@@ -128,6 +130,24 @@ internal class AutonomyRunner(
             }
         }
 
+        entry.put("insulinReq", decision.insulinReqU ?: JSONObject.NULL).put("smb", decision.smbTenthsIU / 10.0)
+        // The microbolus goes first: it is the part of the correction that cannot wait, and the
+        // basal above profile follows in a session of its own.
+        if (decision.smbTenthsIU > 0) {
+            if (rehearsal || mode == AutonomyPolicy.Mode.OBSERVE) entry.put("smbDone", false)
+            else {
+                val result = runOwnSmb(decision.smbTenthsIU)
+                val given = result?.bolus?.tenthsIU ?: 0
+                val done = result?.outcome == Outcome.DONE && given > 0
+                if (done) store.addSmb(app.aaps.pump.combowatch.regulation.BolusRecord(now, given / 10.0))
+                entry.put("smbDone", done).put("smbOutcome", result?.outcome?.name ?: "NOT_SENT").put("smbReason", result?.reason ?: JSONObject.NULL)
+                note(
+                    "Часы без телефона: микродоза ${given / 10.0} ЕД" +
+                        (if (done) "" else " — не выполнено (${result?.reason ?: "помпа не привязана"})") + ". ${decision.explanation}",
+                    now
+                )
+            }
+        }
         when (action) {
             WatchRegulator.Action.Leave     -> entry.put("action", "LEAVE").put("hold", decision.holdText ?: JSONObject.NULL)
 
@@ -203,7 +223,8 @@ internal class AutonomyRunner(
         snapshot = store.snapshot(),
         pumpBasalUph = pumpBasalUph(),
         delivery = store.delivery(),
-        hourOfDay = hourOfDay
+        hourOfDay = hourOfDay,
+        smbGivenLastHourU = store.smbs().filter { now - it.atEpochMs <= 60 * 60_000L }.sumOf { it.units }
     )
 
     private fun readPumpIfStale() {
@@ -229,6 +250,18 @@ internal class AutonomyRunner(
     fun deliverOwnerBolus(tenthsIU: Int, maxBolusTenthsIU: Int?): ComboResult? {
         val held = heldPump() ?: return null
         val own = policy.ownerBolus("owner-bolus-${UUID.randomUUID()}", tenthsIU, held, maxBolusTenthsIU)
+        beforePumpSession()
+        ownCommandInFlight = true
+        return try {
+            executor.execute(own.command, own.lease).also(onOwnResult)
+        } finally {
+            ownCommandInFlight = false
+        }
+    }
+
+    private fun runOwnSmb(tenthsIU: Int): ComboResult? {
+        val held = heldPump() ?: return null
+        val own = policy.ownMicroBolus("auto-smb-${UUID.randomUUID()}", tenthsIU, held, ownerBolusLimitTenths())
         beforePumpSession()
         ownCommandInFlight = true
         return try {

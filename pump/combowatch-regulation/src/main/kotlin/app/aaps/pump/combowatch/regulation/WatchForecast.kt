@@ -144,7 +144,7 @@ internal class WatchForecast(
      * Glucose every five minutes for the next four hours if the pump runs at [rateUph] for
      * [minutes] and at profile basal afterwards. The first value is glucose now.
      */
-    fun series(rateUph: Double, minutes: Int = 30): List<Int> {
+    fun series(rateUph: Double, minutes: Int = 30, smbU: Double = 0.0): List<Int> {
         // The engine reads, for the step ending k * 5 minutes from now, the entry at that time.
         val entries = Array(STEPS + 1) { index ->
             val at = nowEpochMs + index * 300_000L
@@ -159,7 +159,7 @@ internal class WatchForecast(
             cobG = cobNowG,
             profile = profile,
             delta = trend.delta,
-            plannedSmbU = 0.0,
+            plannedSmbU = smbU,
             plannedRateUph = rateUph,
             profileBasalUph = basalNow,
             plannedDurationMin = minutes,

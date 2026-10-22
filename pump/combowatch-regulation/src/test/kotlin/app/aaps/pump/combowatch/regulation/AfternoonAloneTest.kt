@@ -79,10 +79,16 @@ class AfternoonAloneTest {
         val steps = live(glucose, print = "быстрое падение с 185 до 70 и восстановление")
         val sent = commands(steps)
 
-        // The first command is a stop, and it comes while glucose is still far from low.
-        val (firstStep, first) = sent.first()
+        // Steady at 185 the watch now adds basal (its correction); once the fall begins, the first
+        // command is a stop, and it comes while glucose is still far from low.
+        val (firstStep, first) = sent.first { it.second.percent == 0 }
         assertThat(first).isEqualTo(Action.SetTbr(0, 30))
         assertThat(firstStep.glucose).isGreaterThan(130.0)
+        // Before the stop: the raise, and its end (just under profile) at the first sign of a fall.
+        for ((step, command) in sent.takeWhile { it.second.percent != 0 }) {
+            assertThat(command.percent == WatchRegulator.NEAR_PROFILE_PERCENT || command.percent in 110..WatchRegulator.MAX_RAISE_PERCENT).isTrue()
+            assertThat(step.glucose).isAtLeast(175.0)
+        }
 
         // Basal stays off through the whole fall and the low.
         val lowest = steps.minByOrNull { it.glucose }!!
@@ -92,14 +98,14 @@ class AfternoonAloneTest {
         for (step in steps.filter { it.minute > firstStep.minute && it.glucose < 80.0 }) assertThat(step.percentAfter).isEqualTo(0)
 
         // It comes back once glucose is over 80 and rising, half of it first, and ends at profile.
-        val (backStep, back) = sent.first { it.second.percent > 0 }
+        val (backStep, back) = sent.dropWhile { it.second.percent != 0 }.first { it.second.percent > 0 }
         assertThat(back).isEqualTo(Action.SetTbr(50, 15))
         assertThat(backStep.glucose).isAtLeast(80.0)
         assertThat(steps.last().percentAfter).isEqualTo(100)
 
-        // And the pump was not woken at every reading: a stop, its renewals every 25 minutes, one command to come back.
-        assertThat(sent.size).isAtMost(6)
-        for ((_, command) in sent) assertThat(command.percent).isAtMost(90)
+        // And the pump was not woken at every reading: the raise at 185 and its end, a stop, its renewals every 25 minutes, one command to come back.
+        assertThat(sent.size).isAtMost(8)
+        for ((_, command) in sent.dropWhile { it.second.percent != 0 }) assertThat(command.percent).isAtMost(90)
         assertNothingGivenBackInHaste(steps)
     }
 

@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 43
-            versionName = "0.43-iob-at-once"
+            versionCode = 44
+            versionName = "0.44-alone-adds-insulin"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

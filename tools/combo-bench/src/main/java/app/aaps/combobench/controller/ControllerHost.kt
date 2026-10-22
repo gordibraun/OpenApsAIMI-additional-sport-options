@@ -118,7 +118,8 @@ internal class ControllerHost private constructor(context: Context) {
         pumpInOtherUse = { ManualPumpRuntime.get(this.context).usingBluetoothNow() },
         beforePumpSession = ::leaveTheSensorItsWindow,
         lastPumpReadEpochMs = { savedSnapshot()?.readAtEpochMs },
-        onOwnResult = ::notePumpAnswer
+        onOwnResult = ::notePumpAnswer,
+        ownerBolusLimitTenths = { ownerBolusLimitTenths() }
     )
 
     /** What a command's answer says about the pump being within reach; the face shows it. */

@@ -128,6 +128,19 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
         files.write(CARBS_FILE, JSONObject().put("carbs", JSONArray().apply { kept.forEach { put(JSONObject().put("at", it.atEpochMs).put("grams", it.grams)) } }))
     }
 
+    /** Microboluses the watch gave itself, for its hourly cap; the pump's own receipt of each is in [delivery]. */
+    @Synchronized fun smbs(): List<BolusRecord> = runCatching {
+        if (!files.exists(SMB_FILE)) emptyList()
+        else files.read(SMB_FILE).getJSONArray("smbs").let { array ->
+            List(array.length()) { index -> array.getJSONObject(index).let { BolusRecord(it.getLong("at"), it.getDouble("units")) } }
+        }
+    }.getOrDefault(emptyList())
+
+    @Synchronized fun addSmb(record: BolusRecord) {
+        val kept = (smbs() + record).filter { it.atEpochMs >= nowEpochMs() - KEEP_DELIVERY_MS }.sortedBy { it.atEpochMs }
+        files.write(SMB_FILE, JSONObject().put("smbs", JSONArray().apply { kept.forEach { put(JSONObject().put("at", it.atEpochMs).put("units", it.units)) } }))
+    }
+
     private fun saveDelivery(tbrs: List<TbrSegment>, boluses: List<BolusRecord>) {
         val since = nowEpochMs() - KEEP_DELIVERY_MS
         files.write(
@@ -225,6 +238,7 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
         const val GLUCOSE_FILE = "autonomy-glucose.json"
         const val DELIVERY_FILE = "autonomy-delivery.json"
         const val CARBS_FILE = "autonomy-carbs.json"
+        const val SMB_FILE = "autonomy-smb.json"
         const val ACTIVITY_FILE = "autonomy-activity.json"
         const val KEEP_ACTIVITIES_MS = 12 * 60 * 60_000L
         const val JOURNAL_FILE = "autonomy-journal.json"

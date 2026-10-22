@@ -22,9 +22,11 @@ import kotlin.math.roundToInt
 /**
  * What the watch does about glucose when the phone is away.
  *
- * It only ever lowers basal, or brings it back after lowering it. It never gives a bolus and
- * never runs the pump above its own basal profile, so the most it can get wrong is to hold basal
- * back when it need not have - never to give insulin the phone did not decide on.
+ * Mostly it lowers basal, or brings it back after lowering it. Since 23 Oct 2026 it also adds
+ * insulin when nothing holds basal back and the forecast runs above the target: the phone's own
+ * oref arithmetic on the watch's forecast, under hard caps of the watch's own ([MAX_SMB_U],
+ * [MAX_SMB_PER_HOUR_U], [MAX_RAISE_PERCENT], [MAX_IOB_ALONE_U]) - because a meal with the phone
+ * away used to run to 200 with the watch able to do nothing about it (22 Oct 2026).
  *
  * It is not a second algorithm. The forecast, the choice of a basal the forecast can bear and the
  * low-glucose guards are the phone's own code; the insulin already on board and the carbohydrates
@@ -46,7 +48,9 @@ class WatchRegulator {
         val pumpBasalUph: List<Double>,
         val delivery: DeliveryLog,
         /** The hour of the pump's day at a moment. Passed in so that nothing here reads a clock or a time zone. */
-        val hourOfDay: (Long) -> Int
+        val hourOfDay: (Long) -> Int,
+        /** Units of microbolus the watch gave itself in the last hour, for its hourly cap. */
+        val smbGivenLastHourU: Double = 0.0
     )
 
     sealed interface Action {
@@ -54,7 +58,7 @@ class WatchRegulator {
         /** Send nothing; the pump goes on with what it has. */
         data object Leave : Action
 
-        /** Set this temporary basal. The percentage is never above 90. */
+        /** Set this temporary basal: 0..90 to hold basal back, 110..[MAX_RAISE_PERCENT] to add to it. */
         data class SetTbr(val percent: Int, val durationMinutes: Int) : Action
     }
 
@@ -86,6 +90,9 @@ class WatchRegulator {
         /** A walk or a sport session the owner entered: basal is kept down for it and the hour before. */
         ACTIVITY,
 
+        /** Nothing holds basal back and the forecast runs above the target: insulin is added, as the phone would add it. */
+        CORRECTION,
+
         /** Nothing calls for less basal than the profile. */
         ALL_CLEAR
     }
@@ -93,7 +100,7 @@ class WatchRegulator {
     class Decision(
         val action: Action,
         val rule: Rule,
-        /** The share of profile basal the rules ask for, in per cent, 0..100. */
+        /** The share of profile basal the rules ask for, in per cent, 0..[MAX_RAISE_PERCENT]. */
         val wantedPercent: Int,
         /** One sentence for the journal, in the owner's language. */
         val explanation: String,
@@ -122,7 +129,11 @@ class WatchRegulator {
          * Grams of carbohydrate that would lift the lowest point of the forecast, with what runs
          * now, back up to the target; null when the forecast stays at or above it. For the face.
          */
-        val carbsToTargetG: Int? = null
+        val carbsToTargetG: Int? = null,
+        /** Tenths of a unit of microbolus to give now; zero when none. */
+        val smbTenthsIU: Int = 0,
+        /** The phone's "insulin required" on the watch's forecast, units; null when the rules asked for less basal instead. */
+        val insulinReqU: Double? = null
     )
 
     /**
@@ -346,9 +357,69 @@ class WatchRegulator {
             bg > floorMgdl + ZERO_LIMIT_MARGIN_MGDL && trend.known && trend.delta >= 0
         ) wanted = Cap(ZERO_LIMIT_FRACTION, Rule.ZERO_LIMIT, "$glucoseText: базал остановлен уже $zeroMinutes мин, сахар не низкий и не падает — возвращается половина базала")
 
-        val wantedPercent = wanted?.let { percentOf(it.fraction) } ?: 100
-        val rule = wanted?.rule ?: Rule.ALL_CLEAR
-        val text = wanted?.text ?: "$glucoseText: снижать базал не нужно"
+        var wantedPercent = wanted?.let { percentOf(it.fraction) } ?: 100
+        var rule = wanted?.rule ?: Rule.ALL_CLEAR
+        var text = wanted?.text ?: "$glucoseText: снижать базал не нужно"
+
+        // ---- more insulin than profile: the phone's own arithmetic on the watch's forecast ----
+        // Only when nothing above asks for less basal. The phone's "insulin required" (oref) is the
+        // distance from the target of the lowest point of the forecast after the insulin peak - or
+        // of its end, whichever is lower - over the sensitivity, and never more than the insulin
+        // cap leaves room for. Half of it goes as a microbolus, the rest as basal above profile
+        // for half an hour, both under the watch's own caps, and only if the forecast with that
+        // plan still keeps above the floor; otherwise first the microbolus goes, then the raise.
+        var smbTenths = 0
+        var insulinReq: Double? = null
+        fun u1(value: Double) = String.format(java.util.Locale.US, "%.1f", value)
+        if (wanted == null && snapshot != null && forecast != null && atProfile != null && trend.known) {
+            val iob = runCatching { forecast.iobNowU() }.getOrDefault(0.0)
+            val cob = forecast.cobNowG
+            val mealContext = cob >= MEAL_COB_MIN_G ||
+                inputs.delivery.carbs.any { (now - it.atEpochMs) in 0L..MEAL_CONTEXT_MS }
+            val peakSteps = if (mealContext) PEAK_STEPS_WITH_CARBS else PEAK_STEPS
+            val eventual = atProfile.last()
+            val minAfterPeak = atProfile.drop(peakSteps).minOrNull() ?: eventual
+            val minPred = min(minAfterPeak, eventual)
+            val req = min((minPred - goal) / snapshot.sensitivityMgdlPerU, MAX_IOB_ALONE_U - iob)
+            // Not while glucose is falling: the watch's forecast does not carry a fall forward the
+            // way the phone's deviations do, so a glide towards the target would read as "above
+            // target" and get insulin on top of it. Not for less than a third of a unit either -
+            // each command is a connection to the pump - and not around a walk or a sport session.
+            val falling = min(trend.delta, trend.shortAvgDelta) < 0.0
+            val activityNow = ActivityEffect.current(inputs.delivery.activities, now) != null
+            // Below the target only a meal under way justifies adding insulin: glucose climbing
+            // out of a low with nothing eaten is a rebound, and insulin on it makes the next low.
+            val highEnough = bg >= goal || (mealContext && bg > floorMgdl)
+            if (req >= MIN_CORRECTION_U && highEnough && !falling && !fastFall && !activityNow) {
+                insulinReq = req
+                val hour = inputs.hourOfDay(now)
+                val night = hour >= NIGHT_FROM_HOUR || hour < NIGHT_TO_HOUR
+                val sinceBolusMs = inputs.delivery.boluses.maxOfOrNull { it.atEpochMs }?.let { now - it } ?: Long.MAX_VALUE
+                val smbAllowed = !night && bg > floorMgdl && sinceBolusMs >= SMB_INTERVAL_MS &&
+                    (mealContext || (bg >= HIGH_BG_SMB_MGDL && trend.delta > 0))
+                fun raiseFor(smbU: Double): Int =
+                    (floor((basalNow + 2.0 * (req - smbU)) / basalNow * 10.0 + 1e-9).toInt() * 10).coerceIn(100, MAX_RAISE_PERCENT)
+                fun keepsAboveFloor(percent: Int, smbU: Double): Boolean =
+                    (runCatching { forecast.series(basalNow * percent / 100.0, REDUCTION_MINUTES, smbU) }.getOrNull()?.minOrNull() ?: Int.MIN_VALUE) >= floorMgdl
+                if (smbAllowed) {
+                    val cap = min(MAX_SMB_U, MAX_SMB_PER_HOUR_U - inputs.smbGivenLastHourU)
+                    smbTenths = floor(min(req / 2.0, cap) * 10.0 + 1e-9).toInt().coerceAtLeast(0)
+                }
+                var raise = raiseFor(smbTenths / 10.0)
+                if (smbTenths > 0 && !keepsAboveFloor(raise, smbTenths / 10.0)) {
+                    smbTenths = 0
+                    raise = raiseFor(0.0)
+                }
+                if (raise > 100 && !keepsAboveFloor(raise, 0.0)) raise = 100
+                if (raise > 100 || smbTenths > 0) {
+                    wantedPercent = raise
+                    rule = Rule.CORRECTION
+                    text = "$glucoseText: прогноз $minPred (после ${peakSteps * 5} мин), цель ${n(goal)} — нужно ${u1(req)} ЕД" +
+                        (if (smbTenths > 0) ", микродоза ${u1(smbTenths / 10.0)} ЕД" else "") +
+                        (if (raise > 100) ", базал $raise %" else "")
+                }
+            }
+        }
 
         val running = inputs.delivery.tbrAt(now)
         val runningPercent = running?.percent ?: 100
@@ -360,13 +431,29 @@ class WatchRegulator {
         // Every command is a connection to the pump, so one is sent only when it changes something
         // that matters. Stopping basal always does. Trading sixty per cent for fifty does not.
         val action: Action = when {
-            wantedPercent >= 100                                              ->
-                // Nothing is to be held back. A reduction still running is left to run out. Only a
-                // temporary basal above profile that the phone left behind, and that the forecast
-                // does not bear to its end, is brought down to just under profile.
-                if (runningPercent > 100 && forecast != null &&
+            // Basal above profile: set at once over a reduction or over nothing, over a smaller
+            // raise only by a real step, and left alone when the pump already gives as much or
+            // more - unless that much does not keep the forecast above the floor to its end.
+            wantedPercent > 100                                               -> when {
+                running == null || runsOut || runningPercent < 100       -> set
+                wantedPercent - runningPercent >= MIN_RAISE_PERCENT      -> set
+                runningPercent > wantedPercent && forecast != null &&
                     (runCatching { forecast.series(basalNow * runningPercent / 100.0, ceil(remainingMinutes).toInt().coerceAtLeast(5)) }
-                        .getOrNull()?.minOrNull() ?: Int.MAX_VALUE) < floorMgdl
+                        .getOrNull()?.minOrNull() ?: Int.MAX_VALUE) < floorMgdl -> set
+                else                                                     -> Action.Leave
+            }
+
+            wantedPercent >= 100                                              ->
+                // Nothing is to be held back. A reduction still running is left to run out. A
+                // temporary basal above profile is brought down to just under profile when the
+                // forecast does not bear it to its end, or when it is the watch's own raise and
+                // the reason for it is gone - the phone, too, re-decides at every reading.
+                if (runningPercent > 100 && (
+                        (running?.byWatch == true && insulinReq == null) ||
+                            (forecast != null &&
+                                (runCatching { forecast.series(basalNow * runningPercent / 100.0, ceil(remainingMinutes).toInt().coerceAtLeast(5)) }
+                                    .getOrNull()?.minOrNull() ?: Int.MAX_VALUE) < floorMgdl)
+                        )
                 ) Action.SetTbr(NEAR_PROFILE_PERCENT, RESUME_MINUTES) else Action.Leave
 
             // A tenth of basal less for half an hour is a few hundredths of a unit. With the pump
@@ -396,6 +483,11 @@ class WatchRegulator {
         val remainingText = "ещё ${ceil(remainingMinutes).toInt()} мин"
         val whose = if (running?.byWatch == true) "от часов" else "от телефона"
         val hold: String? = if (action != Action.Leave) null else when {
+            wantedPercent > 100                                -> when {
+                runningPercent >= wantedPercent -> "на помпе $runningPercent % $whose ($remainingText): не меньше нужного"
+                else                            -> "подъём с $runningPercent % до $wantedPercent % меньше $MIN_RAISE_PERCENT %: не стоит соединения с помпой"
+            }
+
             wantedPercent >= 100                               -> when {
                 running == null || runningPercent == 100 -> null
                 runningPercent > 100                     -> "на помпе $runningPercent % $whose ($remainingText): прогноз это выдерживает"
@@ -416,7 +508,7 @@ class WatchRegulator {
         return Decision(
             action, rule, wantedPercent, text, carbsHint, trend, forecastMin, forecastEnd, atProfile, asRunning, hold,
             forecast?.let { runCatching { it.iobNowU() }.getOrNull()?.takeIf { iob -> iob.isFinite() } },
-            carbsToTarget
+            carbsToTarget, smbTenths, insulinReq
         )
     }
 
@@ -538,5 +630,35 @@ class WatchRegulator {
         const val CARBS_HINT_WITHIN_STEPS = 18
         const val CARBS_HINT_MIN_MGDL = 5.0
         const val CARBS_HINT_MAX_G = 40
+
+        /**
+         * Five-minute steps of the forecast skipped before its lowest point counts, as the phone
+         * waits for the insulin peak: 90 minutes, 60 with carbohydrates at work (oref).
+         */
+        const val PEAK_STEPS = 18
+        const val PEAK_STEPS_WITH_CARBS = 12
+
+        /** Less than this is not worth a connection to the pump: no correction at all. */
+        const val MIN_CORRECTION_U = 0.3
+
+        /** The watch's own caps on insulin it adds alone, under whatever the phone's settings allow. */
+        const val MAX_IOB_ALONE_U = 6.0
+        const val MAX_SMB_U = 0.5
+        const val MAX_SMB_PER_HOUR_U = 2.0
+        const val MAX_RAISE_PERCENT = 150
+
+        /** Since any bolus, the pump's or the watch's: the phone's own interval between microboluses. */
+        const val SMB_INTERVAL_MS = 5 * 60_000L
+
+        /** Carbohydrates entered this long ago, or this much still on board, mean a meal is under way. */
+        const val MEAL_CONTEXT_MS = 3 * 60 * 60_000L
+        const val MEAL_COB_MIN_G = 5.0
+
+        /** Without a meal a microbolus needs glucose this high and rising. */
+        const val HIGH_BG_SMB_MGDL = 160.0
+
+        /** No microboluses at night; basal above profile still. Hours of the pump's day. */
+        const val NIGHT_FROM_HOUR = 23
+        const val NIGHT_TO_HOUR = 6
     }
 }

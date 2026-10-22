@@ -162,10 +162,14 @@ class WatchRegulatorTest {
         assertThat(decision.carbsHintG).isNull()
     }
 
-    @Test fun `a little insulin on board with glucose high above the floor changes nothing`() {
+    @Test fun `a little insulin on board with glucose high above the floor is answered with basal above profile, no microbolus`() {
         val fixture = Fixture().glucose(170.0)
         fixture.snapshot = fixture.snapshot(bolusUnits = 0.5)
-        assertThat(fixture.decide().action).isEqualTo(Action.Leave)
+        val decision = fixture.decide()
+        assertThat(decision.rule).isEqualTo(Rule.CORRECTION)
+        assertThat(decision.action).isEqualTo(Action.SetTbr(WatchRegulator.MAX_RAISE_PERCENT, 30))
+        // Steady, not rising, and no meal: the phone's rules give no microbolus here either.
+        assertThat(decision.smbTenthsIU).isEqualTo(0)
     }
 
     @Test fun `a snapshot whose insulin curve has run out is not forecast from, but levels still work`() {
@@ -322,7 +326,8 @@ class WatchRegulatorTest {
 
     @Test fun `a walk entered on the watch keeps basal at eighty per cent, sport at seventy, from an hour before`() {
         val fixture = Fixture().glucose(140.0, per5 = 0.0)
-        assertThat(fixture.decide().action).isEqualTo(Action.Leave)
+        // Steady at 140 with nothing entered, the watch now adds basal; an activity takes precedence over that.
+        assertThat(fixture.decide().rule).isEqualTo(Rule.CORRECTION)
         fixture.activities = listOf(ActivityRecord(fixture.now + 20 * 60_000L, 30, "WALK"))
         val walk = fixture.decide()
         assertThat(walk.rule).isEqualTo(Rule.ACTIVITY)
@@ -330,9 +335,9 @@ class WatchRegulatorTest {
         assertThat(walk.explanation).contains("прогулка")
         fixture.activities = listOf(ActivityRecord(fixture.now, 50, "SPORT"))
         assertThat(fixture.decide().action).isEqualTo(Action.SetTbr(70, 30))
-        // Two hours after a half-hour walk nothing is left of it.
+        // Two hours after a half-hour walk nothing is left of it: the correction is back in charge.
         fixture.activities = listOf(ActivityRecord(fixture.now - 150 * 60_000L, 30, "WALK"))
-        assertThat(fixture.decide().action).isEqualTo(Action.Leave)
+        assertThat(fixture.decide().rule).isEqualTo(Rule.CORRECTION)
     }
 
     // ---- a meal worked out on the watch ------------------------------------------------------------
@@ -491,7 +496,7 @@ class WatchRegulatorTest {
 
     // ---- what must never happen ------------------------------------------------------------------
 
-    @Test fun `whatever the inputs, the watch never asks for more than 90 percent and never for a bolus`() {
+    @Test fun `whatever the inputs, the watch never asks for more than 150 percent nor for more than half a unit`() {
         var checked = 0
         for (level in listOf(45.0, 62.0, 74.0, 79.0, 86.0, 95.0, 110.0, 140.0, 200.0, 320.0))
             for (per5 in listOf(-15.0, -8.0, -3.0, -1.0, 0.0, 1.0, 4.0, 12.0))
@@ -502,10 +507,12 @@ class WatchRegulatorTest {
                             fixture.snapshot = fixture.snapshot(bolusUnits = bolus)
                             if (running != null) fixture.tbrs = listOf(TbrSegment(fixture.minutesAgo(11.0), running, 30, byWatch = own))
                             val decision = fixture.decide()
-                            assertThat(decision.wantedPercent).isIn(0..100)
+                            assertThat(decision.wantedPercent).isIn(0..WatchRegulator.MAX_RAISE_PERCENT)
+                            assertThat(decision.smbTenthsIU).isIn(0..5)
                             when (val action = decision.action) {
                                 is Action.SetTbr -> {
-                                    assertThat(action.percent).isIn(0..90)
+                                    assertThat(action.percent).isIn(0..WatchRegulator.MAX_RAISE_PERCENT)
+                                    assertThat(action.percent).isNotEqualTo(100)
                                     assertThat(action.percent % 10).isEqualTo(0)
                                     assertThat(action.durationMinutes).isIn(listOf(15, 30))
                                 }
@@ -517,11 +524,21 @@ class WatchRegulatorTest {
         assertThat(checked).isEqualTo(10 * 8 * 3 * 4 * 2)
     }
 
-    @Test fun `rising glucose is never a reason to send anything`() {
+    @Test fun `rising glucose is met with a correction within the caps, never with a reduction`() {
         for (level in listOf(110.0, 150.0, 250.0)) for (per5 in listOf(1.0, 5.0, 12.0)) {
             val decision = Fixture().glucose(level, per5).decide()
-            assertThat(decision.action).isEqualTo(Action.Leave)
+            assertThat(decision.wantedPercent).isIn(100..WatchRegulator.MAX_RAISE_PERCENT)
+            assertThat(decision.smbTenthsIU).isIn(0..5)
+            when (val action = decision.action) {
+                is Action.SetTbr -> assertThat(action.percent).isIn(110..WatchRegulator.MAX_RAISE_PERCENT)
+                Action.Leave     -> Unit
+            }
         }
+        // High and climbing: a correction for certain, with a microbolus since it is high and rising.
+        val high = Fixture().glucose(250.0, 5.0).decide()
+        assertThat(high.rule).isEqualTo(Rule.CORRECTION)
+        assertThat(high.action).isEqualTo(Action.SetTbr(WatchRegulator.MAX_RAISE_PERCENT, 30))
+        assertThat(high.smbTenthsIU).isEqualTo(5)
     }
 }
 

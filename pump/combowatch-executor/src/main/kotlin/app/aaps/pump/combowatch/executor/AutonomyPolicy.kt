@@ -97,6 +97,27 @@ class AutonomyPolicy(private val nowEpochMs: () -> Long) {
         return OwnCommand(command, lease)
     }
 
+    /**
+     * A microbolus the watch decided on itself with the phone away - the regulator's correction -
+     * carried out under the watch's own lease with the phone's bolus limit on it, and capped again
+     * here at [MAX_OWN_SMB_TENTHS_IU], so that no fault upstream can come out as more insulin.
+     */
+    fun ownMicroBolus(id: String, tenthsIU: Int, heldPump: String, maxBolusTenthsIU: Int?): OwnCommand {
+        require(tenthsIU in 1..MAX_OWN_SMB_TENTHS_IU) { "the watch gives itself microboluses of 1..$MAX_OWN_SMB_TENTHS_IU tenths, not $tenthsIU" }
+        val now = nowEpochMs()
+        val limit = minOf(maxBolusTenthsIU ?: MAX_OWN_SMB_TENTHS_IU, MAX_OWN_SMB_TENTHS_IU)
+        val lease = ControlLease(
+            generation = OWN_GENERATION, issuedAtEpochMs = now, expiresAtEpochMs = now + OWN_COMMAND_VALID_MS,
+            pumpSerial = heldPump, controllerIsWatch = true, maxBolusTenthsIU = limit
+        )
+        val command = ComboCommand(
+            id = id, leaseGeneration = OWN_GENERATION, kind = CommandKind.DELIVER_BOLUS,
+            issuedAtEpochMs = now, expiresAtEpochMs = now + OWN_COMMAND_VALID_MS,
+            bolusTenthsIU = tenthsIU, bolusKind = BolusKind.SMB
+        )
+        return OwnCommand(command, lease)
+    }
+
     /** A reading of the pump the watch gives itself: to learn of boluses given on the pump while the phone is away. */
     fun ownRead(id: String, heldPump: String): OwnCommand {
         val now = nowEpochMs()
@@ -106,14 +127,15 @@ class AutonomyPolicy(private val nowEpochMs: () -> Long) {
     }
 
     /**
-     * The only command the watch ever gives itself: a temporary basal at or under profile.
+     * A temporary basal the watch sets itself: from a stop up to [MAX_OWN_PERCENT] of profile.
      *
-     * Not a bolus, not a rate above profile, not a cancellation that the pump would turn into
-     * 110 %. The limits are checked here as well as where the decision is made, so that no fault
-     * upstream can come out of this function as more insulin.
+     * Not a cancellation that the pump would turn into 110 %. The limits are checked here as well
+     * as where the decision is made, so that no fault upstream can come out of this function as
+     * more insulin than the watch is allowed alone.
      */
     fun ownTemporaryBasal(id: String, percent: Int, durationMinutes: Int, heldPump: String): OwnCommand {
-        require(percent in 0..MAX_OWN_PERCENT && percent % 10 == 0) { "the watch only sets 0..$MAX_OWN_PERCENT % in tens, not $percent" }
+        // 100 is not a temporary basal the pump has; profile is reached by ending one, never by setting it.
+        require(percent in 0..MAX_OWN_PERCENT && percent % 10 == 0 && percent != 100) { "the watch only sets 0..$MAX_OWN_PERCENT % in tens, never 100, not $percent" }
         require(durationMinutes in ALLOWED_OWN_MINUTES) { "the watch only sets temporary basals of $ALLOWED_OWN_MINUTES minutes, not $durationMinutes" }
         val now = nowEpochMs()
         val lease = ControlLease(
@@ -140,8 +162,14 @@ class AutonomyPolicy(private val nowEpochMs: () -> Long) {
          */
         const val MIN_PHONE_SILENCE_MS = 5 * 60_000L
 
-        /** Just under profile; the pump has no "100 %" temporary basal. */
-        const val MAX_OWN_PERCENT = 90
+        /**
+         * The most the watch sets alone: one and a half times profile (the regulator's own cap);
+         * 90 is how a basal above profile is ended, the pump having no "100 %" temporary basal.
+         */
+        const val MAX_OWN_PERCENT = 150
+
+        /** Half a unit: the most the watch gives itself in one microbolus. */
+        const val MAX_OWN_SMB_TENTHS_IU = 5
         val ALLOWED_OWN_MINUTES = listOf(15, 30)
 
         /** A generation no phone ever uses: theirs are wall-clock timestamps. */
