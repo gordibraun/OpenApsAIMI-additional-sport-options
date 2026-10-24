@@ -100,6 +100,7 @@ class ControllerService : Service() {
                 host.scheduleTickIfAlone()
             }
             PATH_REHEARSAL                     -> host.regulate(rehearsal = true)
+            PATH_TRIAGE_CHECK                  -> host.triageCheckAfterSetChange()
         }
     }
 
@@ -138,6 +139,8 @@ class ControllerService : Service() {
         internal const val PATH_GLUCOSE = "/controller/glucose"
         internal const val PATH_REHEARSAL = "/controller/rehearsal"
         internal const val PATH_TICK = "/controller/tick"
+        /** An hour after the owner changed the infusion set: did glucose turn? */
+        internal const val PATH_TRIAGE_CHECK = "/controller/triage-check"
 
         /** How often the watch looks by itself while it leads and the sensor is silent. */
         internal const val TICK_MS = 5 * 60_000L
@@ -280,6 +283,7 @@ class ControllerInboundReceiver : BroadcastReceiver() {
  *   ... --es cmd BOLUS --ei tenths 1 [--es bolusKind SMB]
  *   ... --es cmd STATE
  *   ... --es cmd REHEARSAL
+ *   ... --es cmd TRIAGE [--es screen HOME|SET|RESIST|ADVICE]
  */
 class ControllerDebugReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -294,6 +298,14 @@ class ControllerDebugReceiver : BroadcastReceiver() {
             "STATE"  -> { ControllerService.start(context, ControllerService.PATH_STATE, null); return }
             // Touches nothing either: shows what the watch would decide right now, into a file.
             "REHEARSAL" -> { ControllerService.start(context, ControllerService.PATH_REHEARSAL, null); return }
+            // Opens the owner's triage screen (not exported), at the sub-screen named by --es screen; for looking at it from adb.
+            "TRIAGE" -> {
+                context.startActivity(
+                    Intent(context, app.aaps.combobench.TriageActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        .putExtra("screen", intent.getStringExtra("screen"))
+                )
+                return
+            }
             else     -> return
         }
         // Everything below stands in for the phone, which is allowed on the bench's test pump only.

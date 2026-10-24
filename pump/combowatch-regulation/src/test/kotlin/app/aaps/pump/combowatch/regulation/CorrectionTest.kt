@@ -87,6 +87,27 @@ class CorrectionTest {
         assertThat(d.wantedPercent).isAtMost(100)
     }
 
+    @Test fun `the owner's resistance mode widens the caps, never past the ceilings`() {
+        val f = Fixture().apply { glucose(250.0, 5.0) }
+        fun with(factor: Double) = WatchRegulator().decide(
+            WatchRegulator.Inputs(
+                nowEpochMs = f.now, readings = f.readings, snapshot = f.snapshot, pumpBasalUph = f.basal,
+                delivery = DeliveryLog(), hourOfDay = { 12 }, resistanceFactor = factor
+            )
+        )
+        val plain = with(1.0)
+        assertThat(plain.wantedPercent).isEqualTo(WatchRegulator.MAX_RAISE_PERCENT)
+        assertThat(plain.smbTenthsIU).isEqualTo(5)
+        val resistant = with(1.3)
+        assertThat(resistant.wantedPercent).isEqualTo(190)
+        assertThat(resistant.smbTenthsIU).isEqualTo(6)
+        assertThat(resistant.explanation).contains("сопротивление +30 %")
+        // The factor is clamped: nothing beyond the ceilings however large it is.
+        val absurd = with(5.0)
+        assertThat(absurd.wantedPercent).isAtMost(WatchRegulator.MAX_RAISE_RESISTANT_PERCENT)
+        assertThat(absurd.smbTenthsIU).isAtMost((WatchRegulator.MAX_SMB_RESISTANT_U * 10).toInt())
+    }
+
     @Test fun `a planned microbolus lowers the forecast the plan is checked against`() {
         val f = meal()
         val forecast = WatchForecast(f.snapshot!!, GlucoseTrend.from(f.readings, f.now)!!, DeliveryLog(), { 1.2 }, f.now)

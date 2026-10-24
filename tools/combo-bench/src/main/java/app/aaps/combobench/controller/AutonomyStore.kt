@@ -9,9 +9,12 @@ import app.aaps.pump.combowatch.regulation.BolusRecord
 import app.aaps.pump.combowatch.regulation.CarbsRecord
 import app.aaps.pump.combowatch.regulation.DeliveryLog
 import app.aaps.pump.combowatch.regulation.GlucoseReading
+import app.aaps.pump.combowatch.regulation.InsulinEffectiveness
+import app.aaps.pump.combowatch.regulation.WatchRegulator
 import app.aaps.pump.combowatch.regulation.TbrSegment
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 /**
  * What the watch keeps for the time it may be alone: the owner's choice of mode, the phone's
@@ -141,6 +144,71 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
         files.write(SMB_FILE, JSONObject().put("smbs", JSONArray().apply { kept.forEach { put(JSONObject().put("at", it.atEpochMs).put("units", it.units)) } }))
     }
 
+    // ---- forecasts made, kept to check later whether insulin did what they said ----------------------
+
+    /** Forecasts of the last hours: the phone's from each lease, the watch's own from each decision; see [InsulinEffectiveness]. */
+    @Synchronized fun forecastsMade(): List<InsulinEffectiveness.ForecastMade> = runCatching {
+        if (!files.exists(FORECAST_HISTORY_FILE)) emptyList()
+        else files.read(FORECAST_HISTORY_FILE).getJSONArray("forecasts").let { array ->
+            List(array.length()) { index ->
+                array.getJSONObject(index).let { item ->
+                    val series = item.getJSONArray("series")
+                    InsulinEffectiveness.ForecastMade(item.getLong("at"), List(series.length()) { series.getInt(it) })
+                }
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    /** Keep a forecast made at [atEpochMs]; one already kept for that moment from the same source is not kept twice (false then). */
+    @Synchronized fun addForecastMade(atEpochMs: Long, seriesMgdl: List<Int>, byWatch: Boolean): Boolean {
+        if (seriesMgdl.isEmpty()) return false
+        val saved = runCatching { if (files.exists(FORECAST_HISTORY_FILE)) files.read(FORECAST_HISTORY_FILE).getJSONArray("forecasts") else null }.getOrNull() ?: JSONArray()
+        val kept = JSONArray()
+        val since = nowEpochMs() - KEEP_FORECASTS_MS
+        for (index in 0 until saved.length()) {
+            val item = saved.getJSONObject(index)
+            if (item.getLong("at") == atEpochMs && item.optBoolean("byWatch") == byWatch) return false
+            if (item.getLong("at") >= since) kept.put(item)
+        }
+        kept.put(JSONObject().put("at", atEpochMs).put("byWatch", byWatch).put("series", JSONArray(seriesMgdl)))
+        files.write(FORECAST_HISTORY_FILE, JSONObject().put("forecasts", kept))
+        return true
+    }
+
+    // ---- the owner's word that insulin works worse today ------------------------------------------------
+
+    /** Illness, a day spent sitting: more insulin per gram and per mg/dL by [factor], until [untilEpochMs]. */
+    class Resistance(val factor: Double, val untilEpochMs: Long, val setAtEpochMs: Long, val reason: String) {
+        val extraPercent: Int get() = ((factor - 1.0) * 100).roundToInt()
+    }
+
+    /** The resistance mode in force now, or null when none is or it has run out. */
+    @Synchronized fun resistance(): Resistance? = runCatching {
+        if (!files.exists(RESISTANCE_FILE)) null
+        else files.read(RESISTANCE_FILE).let { saved ->
+            if (!saved.has("factor")) null
+            else Resistance(saved.getDouble("factor"), saved.getLong("until"), saved.optLong("setAt"), saved.optString("reason"))
+                .takeIf { it.untilEpochMs > nowEpochMs() && it.factor > 1.0 }
+        }
+    }.getOrNull()
+
+    /** Switch the mode on with [resistance], or off with null. The factor is held to the regulator's ceiling here as well. */
+    @Synchronized fun setResistance(resistance: Resistance?) {
+        if (resistance == null) files.write(RESISTANCE_FILE, JSONObject().put("endedAt", nowEpochMs()))
+        else files.write(
+            RESISTANCE_FILE,
+            JSONObject().put("factor", resistance.factor.coerceIn(1.0, WatchRegulator.MAX_RESISTANCE_FACTOR)).put("until", resistance.untilEpochMs)
+                .put("setAt", resistance.setAtEpochMs).put("reason", resistance.reason)
+        )
+    }
+
+    // ---- what the watch said about insulin not acting, and what the owner answered ---------------------
+
+    /** State of the insulin notice and the owner's answers; the rules are in [InsulinAlertPolicy]. */
+    @Synchronized fun triage(): JSONObject = runCatching { if (files.exists(TRIAGE_FILE)) files.read(TRIAGE_FILE) else JSONObject() }.getOrDefault(JSONObject())
+
+    @Synchronized fun saveTriage(state: JSONObject) = files.write(TRIAGE_FILE, state)
+
     private fun saveDelivery(tbrs: List<TbrSegment>, boluses: List<BolusRecord>) {
         val since = nowEpochMs() - KEEP_DELIVERY_MS
         files.write(
@@ -243,6 +311,13 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
         const val KEEP_ACTIVITIES_MS = 12 * 60 * 60_000L
         const val JOURNAL_FILE = "autonomy-journal.json"
         const val FORECAST_FILE = "autonomy-forecast.json"
+
+        const val FORECAST_HISTORY_FILE = "autonomy-forecast-history.json"
+        const val RESISTANCE_FILE = "autonomy-resistance.json"
+        const val TRIAGE_FILE = "autonomy-triage.json"
+
+        /** Forecasts are compared with glucose up to two hours on; three hours keeps them with room to spare. */
+        const val KEEP_FORECASTS_MS = 3 * 60 * 60_000L
 
         const val SAME_SAMPLE_MS = 60_000L
 

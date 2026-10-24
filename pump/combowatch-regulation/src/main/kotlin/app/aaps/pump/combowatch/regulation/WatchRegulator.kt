@@ -39,6 +39,9 @@ import kotlin.math.roundToInt
  */
 class WatchRegulator {
 
+    /** What the watch may add on its own under the owner's resistance factor; see [resistantCaps]. */
+    class ResistantCaps(val maxIobU: Double, val maxSmbU: Double, val maxSmbPerHourU: Double, val maxRaisePercent: Int)
+
     class Inputs(
         val nowEpochMs: Long,
         val readings: List<GlucoseReading>,
@@ -50,7 +53,13 @@ class WatchRegulator {
         /** The hour of the pump's day at a moment. Passed in so that nothing here reads a clock or a time zone. */
         val hourOfDay: (Long) -> Int,
         /** Units of microbolus the watch gave itself in the last hour, for its hourly cap. */
-        val smbGivenLastHourU: Double = 0.0
+        val smbGivenLastHourU: Double = 0.0,
+        /**
+         * The owner's "insulin works worse today" factor, 1.0 normally, up to [MAX_RESISTANCE_FACTOR]:
+         * the snapshot's sensitivity and carb ratio are expected to have been divided by it already
+         * (more insulin per mg/dL and per gram); here it widens the caps on what the watch adds.
+         */
+        val resistanceFactor: Double = 1.0
     )
 
     sealed interface Action {
@@ -189,6 +198,8 @@ class WatchRegulator {
         val tenths = minOf(wanted, maxTenthsIU)
         fun u(value: Double) = String.format(java.util.Locale.getDefault(), "%.1f", value)
         val lines = mutableListOf("Углеводы $carbsG г ÷ ${u(snapshot.carbRatioGPerU)} г/ЕД = ${u(carbsU)} ЕД")
+        // The owner said insulin works worse today: the ratio above is already the strengthened one.
+        if (inputs.resistanceFactor > 1.0 + 1e-9) lines += "Режим «инсулин работает хуже» +${((inputs.resistanceFactor - 1.0) * 100).roundToInt()} %: коэффициенты усилены"
         lines += if (fresh != null)
             "Сахар ${fresh.mgdl.roundToInt()}, цель ${snapshot.targetMgdl.roundToInt()}, ISF ${snapshot.sensitivityMgdlPerU.roundToInt()}: ${if (correctionU >= 0) "+" else "−"}${u(abs(correctionU))} ЕД"
         else "Сахар неизвестен (показаний за ${BOLUS_MAX_READING_AGE_MINUTES.toInt()} мин нет): поправка к цели не считалась"
@@ -380,7 +391,10 @@ class WatchRegulator {
             val eventual = atProfile.last()
             val minAfterPeak = atProfile.drop(peakSteps).minOrNull() ?: eventual
             val minPred = min(minAfterPeak, eventual)
-            val req = min((minPred - goal) / snapshot.sensitivityMgdlPerU, MAX_IOB_ALONE_U - iob)
+            // The owner's resistance factor widens the caps; the coefficients it scales are already in the snapshot.
+            val f = inputs.resistanceFactor.coerceIn(1.0, MAX_RESISTANCE_FACTOR)
+            val caps = resistantCaps(f)
+            val req = min((minPred - goal) / snapshot.sensitivityMgdlPerU, caps.maxIobU - iob)
             // Not while glucose is falling: the watch's forecast does not carry a fall forward the
             // way the phone's deviations do, so a glide towards the target would read as "above
             // target" and get insulin on top of it. Not for less than a third of a unit either -
@@ -398,11 +412,11 @@ class WatchRegulator {
                 val smbAllowed = !night && bg > floorMgdl && sinceBolusMs >= SMB_INTERVAL_MS &&
                     (mealContext || (bg >= HIGH_BG_SMB_MGDL && trend.delta > 0))
                 fun raiseFor(smbU: Double): Int =
-                    (floor((basalNow + 2.0 * (req - smbU)) / basalNow * 10.0 + 1e-9).toInt() * 10).coerceIn(100, MAX_RAISE_PERCENT)
+                    (floor((basalNow + 2.0 * (req - smbU)) / basalNow * 10.0 + 1e-9).toInt() * 10).coerceIn(100, caps.maxRaisePercent)
                 fun keepsAboveFloor(percent: Int, smbU: Double): Boolean =
                     (runCatching { forecast.series(basalNow * percent / 100.0, REDUCTION_MINUTES, smbU) }.getOrNull()?.minOrNull() ?: Int.MIN_VALUE) >= floorMgdl
                 if (smbAllowed) {
-                    val cap = min(MAX_SMB_U, MAX_SMB_PER_HOUR_U - inputs.smbGivenLastHourU)
+                    val cap = min(caps.maxSmbU, caps.maxSmbPerHourU - inputs.smbGivenLastHourU)
                     smbTenths = floor(min(req / 2.0, cap) * 10.0 + 1e-9).toInt().coerceAtLeast(0)
                 }
                 var raise = raiseFor(smbTenths / 10.0)
@@ -416,7 +430,8 @@ class WatchRegulator {
                     rule = Rule.CORRECTION
                     text = "$glucoseText: прогноз $minPred (после ${peakSteps * 5} мин), цель ${n(goal)} — нужно ${u1(req)} ЕД" +
                         (if (smbTenths > 0) ", микродоза ${u1(smbTenths / 10.0)} ЕД" else "") +
-                        (if (raise > 100) ", базал $raise %" else "")
+                        (if (raise > 100) ", базал $raise %" else "") +
+                        (if (f > 1.0 + 1e-9) " · сопротивление +${((f - 1.0) * 100).roundToInt()} %" else "")
                 }
             }
         }
@@ -646,6 +661,26 @@ class WatchRegulator {
         const val MAX_SMB_U = 0.5
         const val MAX_SMB_PER_HOUR_U = 2.0
         const val MAX_RAISE_PERCENT = 150
+
+        /**
+         * With the owner's resistance mode on (see [Inputs.resistanceFactor]) the caps widen with the
+         * factor, but never beyond these: the mode is the owner's judgement, the ceilings are not.
+         */
+        const val MAX_RESISTANCE_FACTOR = 1.3
+        const val MAX_IOB_RESISTANT_U = 8.0
+        const val MAX_SMB_RESISTANT_U = 0.7
+        const val MAX_RAISE_RESISTANT_PERCENT = 200
+
+        /** The caps on what the watch adds under the owner's resistance [factor], clamped to [MAX_RESISTANCE_FACTOR]. */
+        fun resistantCaps(factor: Double): ResistantCaps {
+            val f = factor.coerceIn(1.0, MAX_RESISTANCE_FACTOR)
+            return ResistantCaps(
+                maxIobU = min(MAX_IOB_RESISTANT_U, MAX_IOB_ALONE_U * f),
+                maxSmbU = min(MAX_SMB_RESISTANT_U, MAX_SMB_U * f),
+                maxSmbPerHourU = MAX_SMB_PER_HOUR_U * f,
+                maxRaisePercent = min(MAX_RAISE_RESISTANT_PERCENT, floor(MAX_RAISE_PERCENT * f / 10.0 + 1e-9).toInt() * 10)
+            )
+        }
 
         /** Since any bolus, the pump's or the watch's: the phone's own interval between microboluses. */
         const val SMB_INTERVAL_MS = 5 * 60_000L

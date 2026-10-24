@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 44
-            versionName = "0.44-alone-adds-insulin"
+            versionCode = 45
+            versionName = "0.45-insulin-check"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

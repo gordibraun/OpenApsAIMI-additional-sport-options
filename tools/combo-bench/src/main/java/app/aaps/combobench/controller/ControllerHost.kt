@@ -3,11 +3,13 @@ package app.aaps.combobench.controller
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.app.PendingIntent
 import android.os.BatteryManager
 import app.aaps.combobench.BenchFiles
 import app.aaps.combobench.BuildConfig
 import app.aaps.combobench.ManualPumpRuntime
 import app.aaps.combobench.ManualPumpTarget
+import app.aaps.combobench.TriageActivity
 import app.aaps.pump.combowatch.executor.ComboExecutor
 import app.aaps.pump.combowatch.executor.AutonomyPolicy
 import app.aaps.pump.combowatch.executor.CommandGate
@@ -31,8 +33,10 @@ import app.aaps.pump.combowatch.regulation.CarbsRecord
 import app.aaps.pump.combowatch.regulation.WatchRegulator
 import app.aaps.pump.combowatch.regulation.GlucoseReading
 import app.aaps.pump.combowatch.regulation.GlucoseTrend
+import app.aaps.pump.combowatch.regulation.InsulinEffectiveness
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 /**
  * The watch-side controller: holds the lease, the journal and the event outbox, and runs commands
@@ -271,7 +275,12 @@ internal class ControllerHost private constructor(context: Context) {
         files.write(LEASE_FILE, incoming.toJson())
         // What the phone leaves for the case that this was its last word for a while.
         JSONObject(payload).optJSONObject(RegulationSnapshot.KEY_IN_LEASE)?.let { saved ->
-            runCatching { autonomy.saveSnapshot(RegulationSnapshot.fromJson(saved)) }
+            runCatching {
+                val snapshot = RegulationSnapshot.fromJson(saved)
+                autonomy.saveSnapshot(snapshot)
+                // The phone's forecast is what the system expected: kept to check insulin's effect against later.
+                snapshot.phoneForecast?.let { autonomy.addForecastMade(snapshot.madeAtEpochMs, it, byWatch = false) }
+            }
         }
         observeLeadership()
         // The phone is here: whatever the watch noted and did meanwhile goes to it now.
@@ -308,6 +317,9 @@ internal class ControllerHost private constructor(context: Context) {
         if (!autonomy.addReading(GlucoseReading(sampledAtEpochMs, mgdl.toDouble()))) return false
         // A reading is also when the phone's silence is found to have grown long enough.
         if (observeLeadership() != null) refreshFace()
+        // Whoever leads: is insulin doing what the forecasts said? The owner is told when it is not.
+        runCatching { checkInsulinEffect(System.currentTimeMillis()) }
+            .onFailure { android.util.Log.e("ComboController", "insulin check failed: ${it.javaClass.simpleName}") }
         return runner.wantsToRun() || runner.needsSettling()
     }
 
@@ -413,6 +425,163 @@ internal class ControllerHost private constructor(context: Context) {
         sendEvents()
         sendHeartbeat()
         result
+    }
+
+    // ---- insulin not acting: the owner is told, and asked ------------------------------------------
+
+    /** Glucose now against what the forecasts of an hour or two ago promised; see [InsulinEffectiveness]. */
+    fun insulinVerdict(nowEpochMs: Long = System.currentTimeMillis()): InsulinEffectiveness.Verdict =
+        InsulinEffectiveness.evaluate(nowEpochMs, autonomy.readings(), autonomy.forecastsMade(), autonomy.delivery())
+
+    private fun checkInsulinEffect(now: Long) {
+        val verdict = insulinVerdict(now)
+        val step = InsulinAlertPolicy.onVerdict(autonomy.triage(), verdict, now)
+        autonomy.saveTriage(step.state)
+        if (step.clear) cancelInsulinNotice()
+        if (!step.notify) return
+        notifyInsulin(
+            title = if (verdict.level == InsulinEffectiveness.Level.STRONG) "Инсулин почти не действует" else "Инсулин действует слабо",
+            text = verdict.text + " Нажмите, чтобы разобраться: набор, болезнь или еда."
+        )
+        autonomy.addToJournal(JSONObject().put("at", now).put("action", "INSULIN_CHECK").put("text", verdict.text).put("mode", autonomy.mode().name))
+        outbox.append(PumpEvent(0, PumpEvent.Type.WATCH_NOTE, now, pumpSerial = heldPump(), note = "Часы: ${verdict.text}"))
+        sendEvents()
+    }
+
+    /** A notification that vibrates and opens the triage screen when tapped. */
+    private fun notifyInsulin(title: String, text: String) {
+        runCatching {
+            val manager = context.getSystemService(android.app.NotificationManager::class.java)
+            manager.createNotificationChannel(
+                android.app.NotificationChannel(INSULIN_CHANNEL, "Инсулин не действует", android.app.NotificationManager.IMPORTANCE_HIGH).apply {
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 300, 150, 300, 150, 600)
+                }
+            )
+            val open = PendingIntent.getActivity(
+                context, 0,
+                Intent(context, TriageActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            manager.notify(
+                INSULIN_NOTIFICATION_ID,
+                android.app.Notification.Builder(context, INSULIN_CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_notify_error)
+                    .setContentTitle(title)
+                    .setContentText(text)
+                    .setStyle(android.app.Notification.BigTextStyle().bigText(text))
+                    .setCategory(android.app.Notification.CATEGORY_ALARM)
+                    .setContentIntent(open)
+                    .setAutoCancel(true)
+                    .build()
+            )
+        }
+    }
+
+    private fun cancelInsulinNotice() = runCatching { context.getSystemService(android.app.NotificationManager::class.java).cancel(INSULIN_NOTIFICATION_ID) }
+
+    /** What the triage screen shows the owner. */
+    class TriageFacts(
+        val verdict: InsulinEffectiveness.Verdict,
+        val bgMgdl: Int?,
+        val deltaPer5: Double?,
+        val iobU: Double?,
+        val bolusesLast2hU: Double,
+        val resistance: AutonomyStore.Resistance?,
+        val quietUntilEpochMs: Long,
+        val setChangedAtEpochMs: Long,
+        val alone: Boolean
+    )
+
+    fun triageFacts(): TriageFacts {
+        val now = System.currentTimeMillis()
+        val face = faceFacts()
+        val trend = GlucoseTrend.from(autonomy.readings(), now)
+        val triage = autonomy.triage()
+        return TriageFacts(
+            verdict = insulinVerdict(now),
+            bgMgdl = trend?.takeIf { now - it.atEpochMs <= 15 * 60_000L }?.mgdl?.roundToInt(),
+            deltaPer5 = trend?.takeIf { it.known }?.delta,
+            iobU = face.iobU,
+            bolusesLast2hU = autonomy.delivery().boluses.filter { it.atEpochMs >= now - InsulinEffectiveness.WINDOW_MS }.sumOf { it.units },
+            resistance = autonomy.resistance(),
+            quietUntilEpochMs = triage.optLong(InsulinAlertPolicy.KEY_QUIET_UNTIL),
+            setChangedAtEpochMs = triage.optLong(InsulinAlertPolicy.KEY_SET_CHANGED_AT),
+            alone = runner.standing() == AutonomyPolicy.Standing.Alone
+        )
+    }
+
+    private fun journalLine(now: Long, action: String, text: String) =
+        autonomy.addToJournal(JSONObject().put("at", now).put("action", action).put("text", text).put("mode", autonomy.mode().name))
+
+    /** The owner changed the infusion set: quiet for a while, a look an hour on, and the phone's records told. */
+    fun triageSetChanged() {
+        val now = System.currentTimeMillis()
+        val bg = GlucoseTrend.from(autonomy.readings(), now)?.mgdl?.roundToInt()
+        val state = InsulinAlertPolicy.quiet(autonomy.triage(), now, QUIET_AFTER_SET_CHANGE_MIN, "set changed")
+            .put(InsulinAlertPolicy.KEY_SET_CHANGED_AT, now).put(InsulinAlertPolicy.KEY_SET_CHANGED_BG, bg ?: JSONObject.NULL)
+        autonomy.saveTriage(state)
+        cancelInsulinNotice()
+        val text = "Часы: владелец сменил набор/канюлю" + (bg?.let { " при сахаре $it" } ?: "") + "; проверка через час"
+        journalLine(now, "SET_CHANGED", text)
+        outbox.append(PumpEvent(0, PumpEvent.Type.WATCH_NOTE, now, pumpSerial = heldPump(), note = text))
+        ControllerService.schedule(context, ControllerService.PATH_TRIAGE_CHECK, null, RECHECK_AFTER_SET_CHANGE_MS)
+        sendEvents()
+    }
+
+    /** An hour after the set change: did glucose turn? Said either way, so that the owner knows where things stand. */
+    fun triageCheckAfterSetChange() {
+        val now = System.currentTimeMillis()
+        val state = autonomy.triage()
+        val changedAt = state.optLong(InsulinAlertPolicy.KEY_SET_CHANGED_AT).takeIf { it > 0L } ?: return
+        val before = state.optInt(InsulinAlertPolicy.KEY_SET_CHANGED_BG, -1).takeIf { it > 0 }
+        val trend = GlucoseTrend.from(autonomy.readings(), now) ?: return
+        val bg = trend.mgdl.roundToInt()
+        val fell = before != null && before - bg >= SET_CHANGE_FALL_MGDL
+        val better = bg < InsulinAlertPolicy.CLEAR_BELOW_MGDL || fell || (trend.known && trend.delta <= -3.0)
+        val minutes = ((now - changedAt) / 60_000L).toInt()
+        val was = before?.let { " (был $it)" } ?: ""
+        val text = if (better) "Через $minutes мин после смены набора сахар $bg$was: инсулин заработал."
+        else "Через $minutes мин после смены набора сахар всё ещё $bg$was. Если доза после смены введена — возможно, болезнь или день без движения: откройте опрос."
+        notifyInsulin(if (better) "После смены набора: лучше" else "После смены набора: без перемен", text)
+        journalLine(now, "SET_CHANGE_CHECK", text)
+    }
+
+    /** The owner says insulin works worse today (illness, a day spent sitting): more of it, for [hours]. */
+    fun triageResistance(extraPercent: Int, hours: Int, reason: String) {
+        val now = System.currentTimeMillis()
+        val factor = (1.0 + extraPercent / 100.0).coerceIn(1.0, WatchRegulator.MAX_RESISTANCE_FACTOR)
+        autonomy.setResistance(AutonomyStore.Resistance(factor, now + hours * 60 * 60_000L, now, reason))
+        autonomy.saveTriage(InsulinAlertPolicy.quiet(autonomy.triage(), now, QUIET_AFTER_RESISTANCE_MIN, "resistance mode"))
+        cancelInsulinNotice()
+        val caps = WatchRegulator.resistantCaps(factor)
+        val text = "Часы: режим «инсулин работает хуже» +$extraPercent % на $hours ч ($reason): дозы и коррекции на часах усилены, " +
+            "базал до ${caps.maxRaisePercent} %, микродозы до ${String.format(java.util.Locale.US, "%.1f", caps.maxSmbU)} ЕД. " +
+            "На телефоне поставьте профиль ${100 + extraPercent} % на то же время."
+        journalLine(now, "RESISTANCE_ON", text)
+        outbox.append(PumpEvent(0, PumpEvent.Type.WATCH_NOTE, now, pumpSerial = heldPump(), note = text))
+        sendEvents()
+        refreshFace()
+        // Alone, the strengthened coefficients are acted on now rather than at the next reading.
+        if (runner.wantsToRun()) ControllerService.start(context, ControllerService.PATH_GLUCOSE, null)
+    }
+
+    fun triageEndResistance() {
+        val now = System.currentTimeMillis()
+        autonomy.setResistance(null)
+        val text = "Часы: режим «инсулин работает хуже» выключен владельцем"
+        journalLine(now, "RESISTANCE_OFF", text)
+        outbox.append(PumpEvent(0, PumpEvent.Type.WATCH_NOTE, now, pumpSerial = heldPump(), note = text))
+        sendEvents()
+        refreshFace()
+    }
+
+    /** The owner wants quiet about insulin for [minutes], with [why] on record. */
+    fun triageQuiet(minutes: Int, why: String) {
+        val now = System.currentTimeMillis()
+        autonomy.saveTriage(InsulinAlertPolicy.quiet(autonomy.triage(), now, minutes, why))
+        cancelInsulinNotice()
+        journalLine(now, "INSULIN_CHECK_QUIET", "Владелец: $why; часы молчат об инсулине $minutes мин")
     }
 
     /** Let the regulator look at the newest reading; see [AutonomyRunner.onReading]. */
@@ -720,6 +889,14 @@ internal class ControllerHost private constructor(context: Context) {
         private const val MAX_SENSOR_WAIT_MS = 2 * 60_000L
         private const val SENSOR_WAIT_SLICE_MS = 5_000L
         private const val CARBS_NOTIFICATION_ID = 42
+        private const val INSULIN_CHANNEL = "combo-insulin-check"
+        private const val INSULIN_NOTIFICATION_ID = 43
+
+        /** After a set change the new insulin needs time before anything can be said; the look comes an hour on. */
+        private const val QUIET_AFTER_SET_CHANGE_MIN = 90
+        private const val RECHECK_AFTER_SET_CHANGE_MS = 60 * 60_000L
+        private const val SET_CHANGE_FALL_MGDL = 30
+        private const val QUIET_AFTER_RESISTANCE_MIN = 90
 
         /** Written by the driver session each time it reads the profile off the pump. */
         private const val BASAL_PROFILE_FILE = "manual-basal-profile.json"

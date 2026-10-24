@@ -112,6 +112,7 @@ class ManualPumpSetupActivity : Activity() {
         alone = label("", 12f).apply { id = R.id.manual_alone_status }
         aloneMode = button("") { onAloneModeTapped() }.apply { id = R.id.manual_alone_mode }
         button("Журнал помпы") { showJournal() }.apply { id = R.id.manual_alone_journal }
+        button("Инсулин не действует? Болею") { startActivity(Intent(this, TriageActivity::class.java)) }
         val scroll = ScrollView(this).apply {
             addView(column); isFocusableInTouchMode = true
             setOnGenericMotionListener { _, event ->
@@ -206,7 +207,7 @@ class ManualPumpSetupActivity : Activity() {
         val what = when (mode) {
             app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.OFF     -> "Часы ничего не делают сами."
             app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.OBSERVE -> "Часы только записывают, что сделали бы; помпу не трогают."
-            app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.ACTIVE  -> "Часы сами снижают и останавливают базал. Инсулин не добавляют."
+            app.aaps.pump.combowatch.executor.AutonomyPolicy.Mode.ACTIVE  -> "Часы сами снижают и останавливают базал, а при высоком прогнозе добавляют инсулин: микродозы до 0,5 ЕД, базал до 150 %."
         }
         val now = when (val reason = runCatching { host.whyNotAlone() }.getOrDefault("нет данных")) {
             null                                             -> "Сейчас часы одни."

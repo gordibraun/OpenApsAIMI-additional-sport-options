@@ -97,6 +97,8 @@ internal class AutonomyRunner(
         val now = nowEpochMs()
         val snapshot = store.snapshot()
         val decision = regulator.decide(inputs(now))
+        // Kept for later: did insulin do what this forecast said? See InsulinEffectiveness.
+        if (!rehearsal) decision.forecastMgdl?.let { store.addForecastMade(now, it, byWatch = true) }
         val action = decision.action
         val entry = JSONObject()
             .put("at", now)
@@ -110,6 +112,7 @@ internal class AutonomyRunner(
             .put("forecastEnd", decision.forecastEndMgdl ?: JSONObject.NULL)
             .put("snapshotAgeMin", snapshot?.let { (now - it.madeAtEpochMs) / 60_000L } ?: JSONObject.NULL)
             .put("carbsHintG", decision.carbsHintG ?: JSONObject.NULL)
+        store.resistance()?.let { entry.put("resistancePercent", it.extraPercent) }
         if (rehearsal) {
             entry.put("standing", (standing as? AutonomyPolicy.Standing.NotAlone)?.reason ?: "alone")
             // Side by side, for checking the watch's forecast against the phone's own from the
@@ -217,15 +220,24 @@ internal class AutonomyRunner(
         return entry
     }
 
-    private fun inputs(now: Long) = WatchRegulator.Inputs(
-        nowEpochMs = now,
-        readings = store.readings(),
-        snapshot = store.snapshot(),
-        pumpBasalUph = pumpBasalUph(),
-        delivery = store.delivery(),
-        hourOfDay = hourOfDay,
-        smbGivenLastHourU = store.smbs().filter { now - it.atEpochMs <= 60 * 60_000L }.sumOf { it.units }
-    )
+    private fun inputs(now: Long): WatchRegulator.Inputs {
+        // The owner's word that insulin works worse today: the coefficients ask more insulin per
+        // gram and per mg/dL, and the regulator widens its caps by the same factor.
+        val factor = store.resistance()?.factor ?: 1.0
+        val snapshot = store.snapshot()?.let { s ->
+            if (factor > 1.0) s.copy(sensitivityMgdlPerU = s.sensitivityMgdlPerU / factor, carbRatioGPerU = s.carbRatioGPerU / factor) else s
+        }
+        return WatchRegulator.Inputs(
+            nowEpochMs = now,
+            readings = store.readings(),
+            snapshot = snapshot,
+            pumpBasalUph = pumpBasalUph(),
+            delivery = store.delivery(),
+            hourOfDay = hourOfDay,
+            smbGivenLastHourU = store.smbs().filter { now - it.atEpochMs <= 60 * 60_000L }.sumOf { it.units },
+            resistanceFactor = factor
+        )
+    }
 
     private fun readPumpIfStale() {
         val held = heldPump() ?: return

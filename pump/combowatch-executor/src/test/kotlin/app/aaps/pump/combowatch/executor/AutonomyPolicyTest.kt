@@ -106,7 +106,7 @@ class AutonomyPolicyTest {
 
     @Test fun `the watch cannot give itself a rate above profile, an odd one, or an odd duration`() {
         assertThrows(IllegalArgumentException::class.java) { policy.ownTemporaryBasal("a", 100, 30, pump) }
-        assertThrows(IllegalArgumentException::class.java) { policy.ownTemporaryBasal("a", 160, 30, pump) }
+        assertThrows(IllegalArgumentException::class.java) { policy.ownTemporaryBasal("a", 210, 30, pump) }
         assertThrows(IllegalArgumentException::class.java) { policy.ownTemporaryBasal("a", 500, 30, pump) }
         assertThrows(IllegalArgumentException::class.java) { policy.ownTemporaryBasal("a", -10, 30, pump) }
         assertThrows(IllegalArgumentException::class.java) { policy.ownTemporaryBasal("a", 45, 30, pump) }
@@ -121,20 +121,22 @@ class AutonomyPolicyTest {
         assertInstanceOf(CommandGate.Admission.Refused::class.java, gate.admit(own.command, own.lease, SimpleCommandJournal(), false, false))
     }
 
-    @Test fun `the watch may raise basal to one and a half times profile and no further`() {
+    @Test fun `the watch may raise basal to twice profile and no further`() {
         assertEquals(150, policy.ownTemporaryBasal("raise", 150, 30, pump).command.percentage)
-        assertThrows(IllegalArgumentException::class.java) { policy.ownTemporaryBasal("raise", 160, 30, pump) }
+        assertEquals(200, policy.ownTemporaryBasal("raise", 200, 30, pump).command.percentage)
+        assertThrows(IllegalArgumentException::class.java) { policy.ownTemporaryBasal("raise", 210, 30, pump) }
     }
 
-    @Test fun `a microbolus the watch gives itself is an SMB held under half a unit whatever the phone's limit`() {
+    @Test fun `a microbolus the watch gives itself is an SMB held under seven tenths whatever the phone's limit`() {
         val own = policy.ownMicroBolus("smb", 5, pump, 70)
         assertEquals(CommandKind.DELIVER_BOLUS, own.command.kind)
         assertEquals(BolusKind.SMB, own.command.bolusKind)
         assertEquals(5, own.command.bolusTenthsIU)
-        assertEquals(5, own.lease.maxBolusTenthsIU)
+        assertEquals(7, own.lease.maxBolusTenthsIU)
         assertEquals(pump, own.lease.pumpSerial)
         assertEquals(2, policy.ownMicroBolus("smb", 2, pump, 2).lease.maxBolusTenthsIU)
-        assertThrows(IllegalArgumentException::class.java) { policy.ownMicroBolus("smb", 6, pump, 70) }
+        assertEquals(7, policy.ownMicroBolus("smb", 7, pump, 70).command.bolusTenthsIU)
+        assertThrows(IllegalArgumentException::class.java) { policy.ownMicroBolus("smb", 8, pump, 70) }
         assertThrows(IllegalArgumentException::class.java) { policy.ownMicroBolus("smb", 0, pump, 70) }
     }
 }

@@ -322,4 +322,34 @@ class AutonomyRunnerTest {
         assertEquals(1, carbs.size)
         assertTrue(carbsWhy.single().contains("режиме наблюдения"))
     }
+
+    @Test fun aloneEachDecisionLeavesItsForecastBehindForTheInsulinCheck() {
+        phoneLeft()
+        glucose(150.0, 0.0)
+        assertTrue(store.forecastsMade().isEmpty())
+        runner.onReading()
+        val made = store.forecastsMade()
+        assertEquals(1, made.size)
+        assertEquals(now, made[0].atEpochMs)
+        assertTrue(made[0].seriesMgdl.size >= 24)
+        // A rehearsal is a look, not a decision: nothing is kept of it.
+        now += minutes(5)
+        runner.onReading(rehearsal = true)
+        assertEquals(1, store.forecastsMade().size)
+    }
+
+    @Test fun theOwnersResistanceModeAsksMoreInsulinForTheSameMeal() {
+        phoneLeft()
+        glucose(117.0, 0.0)
+        val plain = runner.adviseBolus(50, 200)
+        store.setResistance(AutonomyStore.Resistance(1.2, now + 6 * 60 * 60_000L, now, "ill"))
+        val resistant = runner.adviseBolus(50, 200)
+        // 50 g at 10 g/U is 5.0 U; at 10/1.2 g/U it is 6.0 U, and the screen says why.
+        assertEquals(50, plain.tenthsIU)
+        assertEquals(60, resistant.tenthsIU)
+        assertTrue(resistant.lines.any { it.contains("+20 %") })
+        // The decision journal says the mode was on.
+        glucose(150.0, 0.0)
+        assertEquals(20, runner.onReading()!!.getInt("resistancePercent"))
+    }
 }

@@ -163,13 +163,17 @@ class AutonomyPolicy(private val nowEpochMs: () -> Long) {
         const val MIN_PHONE_SILENCE_MS = 5 * 60_000L
 
         /**
-         * The most the watch sets alone: one and a half times profile (the regulator's own cap);
-         * 90 is how a basal above profile is ended, the pump having no "100 %" temporary basal.
+         * The most the watch sets alone: twice profile, reached only with the owner's resistance
+         * mode on (the regulator's own cap is 150 otherwise); 90 is how a basal above profile is
+         * ended, the pump having no "100 %" temporary basal.
          */
-        const val MAX_OWN_PERCENT = 150
+        const val MAX_OWN_PERCENT = 200
 
-        /** Half a unit: the most the watch gives itself in one microbolus. */
-        const val MAX_OWN_SMB_TENTHS_IU = 5
+        /**
+         * The most the watch gives itself in one microbolus: half a unit normally (the regulator's
+         * own cap), seven tenths with the owner's resistance mode on.
+         */
+        const val MAX_OWN_SMB_TENTHS_IU = 7
         val ALLOWED_OWN_MINUTES = listOf(15, 30)
 
         /** A generation no phone ever uses: theirs are wall-clock timestamps. */

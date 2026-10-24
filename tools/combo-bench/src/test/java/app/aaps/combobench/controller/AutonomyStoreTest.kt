@@ -6,6 +6,7 @@ import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.regulation.GlucoseReading
 import org.json.JSONObject
+import app.aaps.pump.combowatch.regulation.WatchRegulator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -124,5 +125,31 @@ class AutonomyStoreTest {
         store.addCarbs(app.aaps.pump.combowatch.regulation.CarbsRecord(now, 10))
         assertEquals(listOf(25, 10), store.carbs().map { it.grams })
         assertEquals(2, store.delivery().carbs.size)
+    }
+
+    @Test fun forecastsMadeAreKeptForThreeHoursOncePerMomentAndSource() {
+        assertTrue(store.addForecastMade(ago(200), listOf(100, 110), byWatch = false))
+        assertTrue(store.addForecastMade(ago(60), listOf(150, 140), byWatch = false))
+        assertFalse(store.addForecastMade(ago(60), listOf(150, 140), byWatch = false))
+        assertTrue(store.addForecastMade(ago(60), listOf(155, 145), byWatch = true))
+        assertFalse(store.addForecastMade(ago(10), emptyList(), byWatch = true))
+        val kept = store.forecastsMade()
+        assertEquals(listOf(ago(60), ago(60)), kept.map { it.atEpochMs })
+        assertEquals(listOf(150, 140), kept[0].seriesMgdl)
+        assertEquals(listOf(155, 145), kept[1].seriesMgdl)
+    }
+
+    @Test fun theResistanceModeHoldsUntilItsTimeAndIsHeldToTheRegulatorsCeiling() {
+        assertNull(store.resistance())
+        store.setResistance(AutonomyStore.Resistance(1.2, now + 60 * 60_000L, now, "ill"))
+        assertEquals(1.2, store.resistance()!!.factor, 1e-9)
+        assertEquals(20, store.resistance()!!.extraPercent)
+        store.setResistance(AutonomyStore.Resistance(5.0, now + 60 * 60_000L, now, "absurd"))
+        assertEquals(WatchRegulator.MAX_RESISTANCE_FACTOR, store.resistance()!!.factor, 1e-9)
+        now += 61 * 60_000L
+        assertNull(store.resistance())
+        store.setResistance(AutonomyStore.Resistance(1.2, now + 60 * 60_000L, now, "ill"))
+        store.setResistance(null)
+        assertNull(store.resistance())
     }
 }
