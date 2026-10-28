@@ -66,7 +66,7 @@ object CoefficientsDashboard {
         }
         val icLessonLine = when {
             !facts.learnerEnabled -> "Учитель выключен: берётся профиль."
-            lessonNow?.lessonIc != null -> "Учитель ведёт к ${one(lessonNow.lessonIc)} (${plural(lessonNow.meals, "обед", "обеда", "обедов")}${if (lessonNow.fromAllDay) ", по всему дню" else ""})."
+            lessonNow?.lessonIc != null -> "Учитель ведёт к ${one(lessonNow.lessonIc)} (${if (lessonNow.fromAllDay) "по всему дню, " else ""}${plural(lessonNow.meals, "обед", "обеда", "обедов")})."
             else -> "Учитель собирает обеды: ${facts.mealsWithResult} с результатом, нужно 8."
         }
         val icCard = BigCard(
@@ -78,17 +78,19 @@ object CoefficientsDashboard {
             status = icStatus,
             accent = Accent.IC
         )
+        // When the numbers a consumer last took differ from the ones above, say which it would take now.
+        fun nowHint(ic: Double) = if (sameIc(ic, facts.icApplied)) "" else " → сейчас IC ${one(facts.icApplied)}"
         val usedIn = listOf(
             facts.wizard?.let {
-                UsageRow("Мастер болюса", "расчёт ${time(it.atEpochMs)}", "ISF ${whole(it.isf)} · IC ${one(it.ic)}", sameIc(it.ic, facts.icApplied))
+                UsageRow("Мастер болюса", "расчёт ${time(it.atEpochMs)}", "ISF ${whole(it.isf)} · IC ${one(it.ic)}" + nowHint(it.ic), sameIc(it.ic, facts.icApplied))
             } ?: UsageRow("Мастер болюса", "расчётов за сутки нет", "возьмёт ISF ${isfCard.value} · IC ${one(facts.icApplied)}", null),
             facts.loop?.let {
-                UsageRow("Цикл", "прогон ${time(it.atEpochMs)}", "ISF ${whole(it.isf)} · IC ${one(it.ic)}", sameIc(it.ic, facts.icApplied))
+                UsageRow("Цикл", "прогон ${time(it.atEpochMs)}", "ISF ${whole(it.isf)} · IC ${one(it.ic)}" + nowHint(it.ic), sameIc(it.ic, facts.icApplied))
             } ?: UsageRow("Цикл", "прогона ещё не было", "—", null),
             facts.watch?.let {
                 UsageRow(
                     "Часы", "снимок ${time(it.atEpochMs)}",
-                    "ISF ${whole(it.isf)}" + (it.foodIsf?.let { f -> ", на еду ${whole(f)}" } ?: "") + " · IC ${one(it.ic)}",
+                    "ISF ${whole(it.isf)}" + (it.foodIsf?.let { f -> ", на еду ${whole(f)}" } ?: ", на еду —") + " · IC ${one(it.ic)}" + nowHint(it.ic),
                     sameIc(it.ic, facts.icApplied) && it.foodIsf != null
                 )
             } ?: UsageRow("Часы", "снимка ещё не было", "—", null)
@@ -97,7 +99,7 @@ object CoefficientsDashboard {
             LessonRow(
                 period = b.label,
                 lesson = b.lessonIc?.let { one(it) } ?: "—",
-                meals = if (b.meals > 0) plural(b.meals, "обед", "обеда", "обедов") else "нет обедов",
+                meals = if (b.ownMeals > 0) plural(b.ownMeals, "обед", "обеда", "обедов") else "нет обедов",
                 applied = b.appliedIc?.let { one(it) } ?: "профиль",
                 current = b.current
             )

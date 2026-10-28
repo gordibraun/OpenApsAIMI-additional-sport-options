@@ -2096,7 +2096,8 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             }
             // The carb ratio beside the two sensitivities: the one the wizard, the loop and the watch dose carbohydrates by.
             val carbRatioLine = if (config.APS) activePlugin.activeAPS.getCarbRatioOverviewString() else null
-            carbRatioLine?.let { overViewText.add(it) }
+            // First, so that it stays in view when the autosens line pushes the text past one line.
+            carbRatioLine?.let { overViewText.add(0, it) }
             binding.infoLayout.sensitivity.text = overViewText.joinToString("\n")
             binding.infoLayout.sensitivity.visibility = View.VISIBLE
             binding.infoLayout.variableSensitivity.text = isfOverviewText(decisionIsf, carbsIsf)

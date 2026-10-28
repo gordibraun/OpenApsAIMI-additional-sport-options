@@ -22,7 +22,8 @@ class CoefficientsFacts(
     val watch: WatchConsumer?
 ) {
     class IsfPoint(val atEpochMs: Long, val isf: Double, val glucose: Double)
-    class BucketLesson(val label: String, val lessonIc: Double?, val meals: Int, val fromAllDay: Boolean, val appliedIc: Double?, val current: Boolean)
+    /** [meals] is what the lesson rests on (the whole day's when [fromAllDay]); [ownMeals] the meals of this part of the day alone. */
+    class BucketLesson(val label: String, val lessonIc: Double?, val meals: Int, val fromAllDay: Boolean, val appliedIc: Double?, val current: Boolean, val ownMeals: Int = meals)
     class MealRow(val atEpochMs: Long, val grams: Double, val givenU: Double, val neededU: Double, val icEff: Double?, val bgStart: Double, val bgEnd: Double)
     class Consumer(val atEpochMs: Long, val isf: Double, val ic: Double)
     class WatchConsumer(val atEpochMs: Long, val isf: Double, val foodIsf: Double?, val ic: Double)

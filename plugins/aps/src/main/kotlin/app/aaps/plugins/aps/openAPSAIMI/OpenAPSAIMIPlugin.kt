@@ -258,7 +258,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
             icApplied = profile.getIc(),
             icProfile = profile.getIcTimeFromMidnight(MidnightUtils.secondsFromMidnight()),
             learnerEnabled = learner.enabled,
-            lessons = learner.lessons.map { app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.BucketLesson(label(it.bucket), it.lessonIc, it.meals, it.fromAllDay, it.appliedIc, it.current) },
+            lessons = learner.lessons.map { app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.BucketLesson(label(it.bucket), it.lessonIc, it.meals, it.fromAllDay, it.appliedIc, it.current, it.ownMeals) },
             mealsEvaluated = learner.mealsEvaluated,
             mealsWithResult = learner.mealsWithResult,
             meals = learner.meals.map { app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.MealRow(it.startEpochMs, it.grams, it.bolusesU, it.neededU, it.effectiveIc, it.bgStart, it.bgEnd) },

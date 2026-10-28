@@ -22,7 +22,7 @@ class CoefficientsDashboardTest {
 
     private fun facts(
         foodIsf: Double? = 62.3, decisionIsf: Double? = 58.5, icApplied: Double = 10.3, icProfile: Double = 10.3, enabled: Boolean = true,
-        lessonNow: Double? = null, lessonMeals: Int = 3, mealsWithResult: Int = 3,
+        lessonNow: Double? = null, lessonMeals: Int = 3, mealsWithResult: Int = 3, lessonFromAllDay: Boolean = false,
         wizardIc: Double? = 10.3, loopIc: Double? = 10.3, watchFoodIsf: Double? = 62.3, samples: Int = 6
     ) = CoefficientsFacts(
         nowEpochMs = now, foodIsf = foodIsf, decisionIsf = decisionIsf, profileIsf = 108.0,
@@ -30,7 +30,7 @@ class CoefficientsDashboardTest {
         icApplied = icApplied, icProfile = icProfile, learnerEnabled = enabled,
         lessons = listOf(
             CoefficientsFacts.BucketLesson("Утро 06–11", 4.1, 10, false, 8.8, false),
-            CoefficientsFacts.BucketLesson("День 11–16", lessonNow, lessonMeals, false, lessonNow?.let { 8.8 }, true),
+            CoefficientsFacts.BucketLesson("День 11–16", lessonNow, lessonMeals, lessonFromAllDay, lessonNow?.let { 8.8 }, true, ownMeals = 3),
             CoefficientsFacts.BucketLesson("Вечер 16–21", null, 0, false, null, false),
             CoefficientsFacts.BucketLesson("Поздно 21–06", 5.4, 19, false, 8.8, false)
         ),
@@ -80,6 +80,8 @@ class CoefficientsDashboardTest {
         val learned = build(facts(lessonNow = 5.2, lessonMeals = 12))
         assertTrue(learned.ic.details.any { it.replace("5.2", "5,2") == "Учитель ведёт к 5,2 (12 обедов)." }, learned.ic.details.toString())
         assertTrue(build(facts(enabled = false)).ic.details.any { it.startsWith("Учитель выключен") })
+        val allDay = build(facts(lessonNow = 7.4, lessonMeals = 11, lessonFromAllDay = true))
+        assertTrue(allDay.ic.details.any { it.replace("7.4", "7,4") == "Учитель ведёт к 7,4 (по всему дню, 11 обедов)." }, allDay.ic.details.toString())
     }
 
     @Test fun `each place a coefficient is used says when, with its numbers, and a check mark when they are the same`() {
@@ -90,7 +92,9 @@ class CoefficientsDashboardTest {
         assertTrue(v.usedIn[2].values.contains("на еду 62"))
         val other = build(facts(wizardIc = 8.0, watchFoodIsf = null))
         assertEquals(false, other.usedIn[0].matches)
+        assertTrue(other.usedIn[0].values.replace('.', ',').endsWith("→ сейчас IC 10,3"), other.usedIn[0].values)
         assertEquals(false, other.usedIn[2].matches)
+        assertTrue(other.usedIn[2].values.contains("на еду —"))
         val none = build(facts(wizardIc = null, loopIc = null))
         assertNull(none.usedIn[0].matches)
         assertEquals("прогона ещё не было", none.usedIn[1].whenText)
@@ -101,7 +105,7 @@ class CoefficientsDashboardTest {
         assertEquals(4, rows.size)
         assertEquals(1, rows.count { it.current })
         assertEquals("10 обедов", rows[0].meals)
-        assertEquals("3 обеда", rows[1].meals)
+        assertEquals("3 обеда", rows[1].meals) // the period's own meals, whatever the lesson rests on
         assertEquals("нет обедов", rows[2].meals)
         assertEquals("—", rows[2].lesson)
         assertEquals("профиль", rows[2].applied)

@@ -83,7 +83,7 @@ class MealCarbRatioLearner @Inject constructor(
         "IC учитель: " + parts.joinToString(" · ") + "; обедов с уроком ${stored.count { it.effectiveIc != null }} за ${MealCarbRatioMath.KEEP_DAYS} дн"
     }
 
-    class BucketFacts(val bucket: MealCarbRatioMath.Bucket, val lessonIc: Double?, val meals: Int, val fromAllDay: Boolean, val appliedIc: Double?, val current: Boolean)
+    class BucketFacts(val bucket: MealCarbRatioMath.Bucket, val lessonIc: Double?, val meals: Int, val fromAllDay: Boolean, val appliedIc: Double?, val current: Boolean, val ownMeals: Int)
     class MealFacts(val startEpochMs: Long, val grams: Double, val bolusesU: Double, val neededU: Double, val effectiveIc: Double?, val bgStart: Double, val bgEnd: Double)
     class Facts(
         val enabled: Boolean, val lessons: List<BucketFacts>, val mealsEvaluated: Int, val mealsWithResult: Int,
@@ -99,7 +99,7 @@ class MealCarbRatioLearner @Inject constructor(
             lessons = MealCarbRatioMath.Bucket.entries.map { b ->
                 val lesson = lessons[b]
                 val ownMeals = stored.count { it.effectiveIc != null && MealCarbRatioMath.bucket(hourOfDay(it.startEpochMs)) == b }
-                BucketFacts(b, lesson?.icGPerU, if (lesson != null && !lesson.fromAllDay) lesson.meals else ownMeals, lesson?.fromAllDay ?: false, applied[b]?.icGPerU, b == now)
+                BucketFacts(b, lesson?.icGPerU, lesson?.meals ?: ownMeals, lesson?.fromAllDay ?: false, applied[b]?.icGPerU, b == now, ownMeals)
             },
             mealsEvaluated = stored.size,
             mealsWithResult = stored.count { it.effectiveIc != null },
