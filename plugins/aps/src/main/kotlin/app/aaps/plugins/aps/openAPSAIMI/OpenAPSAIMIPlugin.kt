@@ -262,7 +262,8 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         sb.append(mealCarbRatioLearner.report(now, profile))
         sb.appendLine()
         sb.appendLine("— Где применяются —")
-        val wizard = runCatching { persistenceLayer.getBolusCalculatorResultsFromTime(now - 24 * 60 * 60_000L, false).blockingGet().firstOrNull() }.getOrNull()
+        // The newest calculation of the last day, whatever order the query returns them in.
+        val wizard = runCatching { persistenceLayer.getBolusCalculatorResultsFromTime(now - 24 * 60 * 60_000L, false).blockingGet().maxByOrNull { it.timestamp } }.getOrNull()
         sb.appendLine(
             "• Мастер болюса: " + (wizard?.let { "последний расчёт ${t(it.timestamp)}: ISF ${f1(it.isf)}, IC ${f1(it.ic)}, ${it.carbs.roundToInt()} г → ${f2(it.totalInsulin)} ЕД" } ?: "расчётов за сутки нет") +
                 "; сейчас взял бы ISF Е ${f1(foodIsf)} и IC ${f1(profile.getIc())}."
