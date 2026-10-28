@@ -83,6 +83,31 @@ class MealCarbRatioLearner @Inject constructor(
         "IC учитель: " + parts.joinToString(" · ") + "; обедов с уроком ${stored.count { it.effectiveIc != null }} за ${MealCarbRatioMath.KEEP_DAYS} дн"
     }
 
+    class BucketFacts(val bucket: MealCarbRatioMath.Bucket, val lessonIc: Double?, val meals: Int, val fromAllDay: Boolean, val appliedIc: Double?, val current: Boolean)
+    class MealFacts(val startEpochMs: Long, val grams: Double, val bolusesU: Double, val neededU: Double, val effectiveIc: Double?, val bgStart: Double, val bgEnd: Double)
+    class Facts(
+        val enabled: Boolean, val lessons: List<BucketFacts>, val mealsEvaluated: Int, val mealsWithResult: Int,
+        val evaluatedUpToEpochMs: Long, val meals: List<MealFacts>
+    )
+
+    /** The state as data, for the dashboard. */
+    fun facts(nowEpochMs: Long): Facts = synchronized(lock) {
+        load()
+        val now = MealCarbRatioMath.bucket(hourOfDay(nowEpochMs))
+        Facts(
+            enabled = enabled(),
+            lessons = MealCarbRatioMath.Bucket.entries.map { b ->
+                val lesson = lessons[b]
+                val ownMeals = stored.count { it.effectiveIc != null && MealCarbRatioMath.bucket(hourOfDay(it.startEpochMs)) == b }
+                BucketFacts(b, lesson?.icGPerU, if (lesson != null && !lesson.fromAllDay) lesson.meals else ownMeals, lesson?.fromAllDay ?: false, applied[b]?.icGPerU, b == now)
+            },
+            mealsEvaluated = stored.size,
+            mealsWithResult = stored.count { it.effectiveIc != null },
+            evaluatedUpToEpochMs = evaluatedUpToEpochMs,
+            meals = stored.sortedByDescending { it.startEpochMs }.take(12).map { MealFacts(it.startEpochMs, it.grams, it.bolusesU, it.neededU, it.effectiveIc, it.bgStart, it.bgEnd) }
+        )
+    }
+
     /** The owner's view: what is applied now and why, the lessons, the meals they rest on. */
     fun report(nowEpochMs: Long, profile: Profile): String = synchronized(lock) {
         load()

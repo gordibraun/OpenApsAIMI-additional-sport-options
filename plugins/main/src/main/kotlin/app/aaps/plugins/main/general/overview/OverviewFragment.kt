@@ -2115,8 +2115,10 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             carbRatioLine?.let { appendPlainLine(okDialogText, it) }
             binding.infoLayout.asLayout.setOnClickListener {
                 activity?.let { act ->
-                    // The report reads the database for the last wizard calculation: built off the main thread, then shown.
                     val aps = activePlugin.activeAPS
+                    // The plugin's own screen when it has one; the text report otherwise.
+                    if (config.APS && aps.showCoefficientsDashboard(act)) return@let
+                    // The report reads the database for the last wizard calculation: built off the main thread, then shown.
                     disposable += Single.fromCallable { if (config.APS) aps.getCoefficientsReport().orEmpty() else "" }
                         .subscribeOn(aapsSchedulers.io)
                         .observeOn(aapsSchedulers.main)

@@ -387,6 +387,7 @@
     
     <!-- Learners Section -->
     <string name="oaps_aimi_learners_title">🎓 Learners</string>
+    <string name="coefficients_dashboard_title">Коэффициенты еды</string>
     <string name="meal_ic_learner_title">Учитель углеводного коэффициента</string>
     <string name="meal_ic_learner_summary">Считает по закрытым приёмам пищи (4 ч), сколько инсулина на грамм понадобилось на самом деле, и ведёт коэффициент по времени суток к медиане за 21 день: в пределах 0,5–1,5 от профиля, не быстрее 15 % в день. Этим коэффициентом считают мастер болюса, цикл и часы.</string>
     <string name="unified_reactivity_title">Unified Reactivity Learner</string>

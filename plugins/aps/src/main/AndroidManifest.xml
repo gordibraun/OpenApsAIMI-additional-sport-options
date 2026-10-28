@@ -7,6 +7,11 @@
             android:exported="false"
             android:theme="@style/AppTheme"
             android:label="@string/aimi_advisor_title" />
+        <activity
+            android:name=".openAPSAIMI.dashboard.CoefficientsDashboardActivity"
+            android:exported="false"
+            android:theme="@style/AppTheme"
+            android:label="@string/coefficients_dashboard_title" />
     </application>
 
 </manifest>

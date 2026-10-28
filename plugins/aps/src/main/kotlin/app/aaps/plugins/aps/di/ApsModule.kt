@@ -33,6 +33,7 @@ abstract class ApsModule {
     @ContributesAndroidInjector abstract fun contributesPatternInsightsFragment(): PatternInsightsFragment
     @ContributesAndroidInjector abstract fun contributesCarbModelFragment(): CarbModelFragment
     @ContributesAndroidInjector abstract fun contributesAimiProfileAdvisorActivity(): AimiProfileAdvisorActivity
+    @ContributesAndroidInjector abstract fun contributesCoefficientsDashboardActivity(): app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsDashboardActivity
 
     @Module
     interface Bindings {

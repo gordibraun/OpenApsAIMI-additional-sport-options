@@ -38,6 +38,9 @@ interface APS : ConfigExportImport {
     /** Where the dynamic coefficients come from, how they moved and where they are used; for the overview's dialog. May read the database: call it off the main thread. */
     fun getCoefficientsReport(): String? = null
 
+    /** Open the plugin's own screen about those coefficients, if it has one; false when it has none and the caller should show the text report. */
+    fun showCoefficientsDashboard(context: android.content.Context): Boolean = false
+
     /**
      * Dedicated string for Sensitivity OKDialog in overview on ISF calculation ?
      * @return string or null if nothing to show

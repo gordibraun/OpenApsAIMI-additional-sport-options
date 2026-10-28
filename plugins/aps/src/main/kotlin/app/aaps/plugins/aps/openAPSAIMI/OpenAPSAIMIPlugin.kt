@@ -222,6 +222,50 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     override fun getIc(profile: Profile): Double? = mealCarbRatioLearner.icFor(profile, dateUtil.now())
     override fun getIc(timestamp: Long, profile: Profile): Double? = mealCarbRatioLearner.icFor(profile, timestamp)
 
+    override fun showCoefficientsDashboard(context: Context): Boolean {
+        context.startActivity(
+            Intent(context, app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsDashboardActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        return true
+    }
+
+    /** The facts the dashboard is built from; null without a profile. Reads the database once (the last wizard calculation): call it off the main thread. */
+    fun coefficientsFacts(): app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts? {
+        val now = dateUtil.now()
+        val profile = profileFunction.getProfile() ?: return null
+        val foodIsf = runCatching { getAverageIsfMgdl(now, "dashboard") }.getOrNull()?.takeIf { it.isFinite() && it > 0.0 }
+        val lastRun = lastAPSResult
+        val learner = mealCarbRatioLearner.facts(now)
+        val samples = runCatching { isfHistory.snapshot(now).samples }.getOrDefault(emptyList())
+            .map { app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.IsfPoint(it.timestamp, it.isf, it.glucose) }
+        val wizard = runCatching { persistenceLayer.getBolusCalculatorResultsFromTime(now - 24 * 60 * 60_000L, false).blockingGet().maxByOrNull { it.timestamp } }.getOrNull()
+            ?.let { app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.Consumer(it.timestamp, it.isf, it.ic) }
+        val loop = lastRun?.let { r -> r.variableSens?.let { isf -> r.oapsProfileAimi?.carb_ratio?.let { ic -> app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.Consumer(r.date, isf, ic) } } }
+        // The watch's snapshot is built from the same run, with the wizard's food ISF beside it.
+        val watch = loop?.let {
+            app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.WatchConsumer(
+                it.atEpochMs, it.isf, runCatching { getAverageIsfMgdl(it.atEpochMs, "dashboard") }.getOrNull()?.takeIf { f -> f.isFinite() && f > 0.0 }, it.ic
+            )
+        }
+        fun label(b: app.aaps.plugins.aps.openAPSAIMI.learning.MealCarbRatioMath.Bucket) = b.label.replaceFirstChar { it.uppercase() }
+        return app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts(
+            nowEpochMs = now,
+            foodIsf = foodIsf,
+            decisionIsf = lastRun?.variableSens,
+            profileIsf = profile.getProfileIsfMgdl(),
+            isfSamples = samples,
+            icApplied = profile.getIc(),
+            icProfile = profile.getIcTimeFromMidnight(MidnightUtils.secondsFromMidnight()),
+            learnerEnabled = learner.enabled,
+            lessons = learner.lessons.map { app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.BucketLesson(label(it.bucket), it.lessonIc, it.meals, it.fromAllDay, it.appliedIc, it.current) },
+            mealsEvaluated = learner.mealsEvaluated,
+            mealsWithResult = learner.mealsWithResult,
+            meals = learner.meals.map { app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.MealRow(it.startEpochMs, it.grams, it.bolusesU, it.neededU, it.effectiveIc, it.bgStart, it.bgEnd) },
+            wizard = wizard, loop = loop, watch = watch
+        )
+    }
+
     override fun getCarbRatioOverviewString(): String? {
         val profile = profileFunction.getProfile() ?: return null
         val base = profile.getIcTimeFromMidnight(MidnightUtils.secondsFromMidnight())
