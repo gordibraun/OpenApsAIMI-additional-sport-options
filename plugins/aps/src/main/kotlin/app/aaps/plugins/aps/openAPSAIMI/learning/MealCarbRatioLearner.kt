@@ -59,6 +59,13 @@ class MealCarbRatioLearner @Inject constructor(
     private var lastUpdateEpochMs = 0L
     private var lastRampEpochMs = 0L
 
+    /**
+     * True once every closed meal of the window has been looked at. Until then the lessons rest on
+     * the oldest meals only and must not be applied: on 28 Oct the first eight meals (7-13 Oct) gave
+     * a median above the profile, which the late-evening ratio then started from.
+     */
+    private var caughtUp = false
+
     fun enabled(): Boolean = preferences.get(BooleanKey.OApsAIMIMealIcLearnerEnabled)
 
     /** The ratio to dose carbohydrates by at [timestamp], or null when nothing has been learned for that time of day. */
@@ -167,10 +174,11 @@ class MealCarbRatioLearner @Inject constructor(
             .map { MealCarbRatioMath.CarbEntry(it.timestamp, it.amount) }
         val meals = MealCarbRatioMath.meals(entries)
         var looked = 0
+        var stoppedAtTheLimit = false
         for ((index, meal) in meals.withIndex()) {
             if (meal.startEpochMs <= evaluatedUpToEpochMs || meal.startEpochMs < horizon) continue
             if (meal.endEpochMs > nowEpochMs) break
-            if (looked >= MAX_MEALS_PER_UPDATE) break
+            if (looked >= MAX_MEALS_PER_UPDATE) { stoppedAtTheLimit = true; break }
             evaluatedUpToEpochMs = meal.startEpochMs
             looked++
             if (meal.grams < MealCarbRatioMath.MIN_MEAL_GRAMS) continue
@@ -180,6 +188,10 @@ class MealCarbRatioLearner @Inject constructor(
             runCatching { evaluate(meal) }
                 .onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner: meal at ${dateUtil.dateAndTimeString(meal.startEpochMs)} not evaluated: ${it.javaClass.simpleName}") }
                 .getOrNull()?.let { stored += it }
+        }
+        if (!stoppedAtTheLimit && !caughtUp) {
+            caughtUp = true
+            aapsLogger.info(LTag.APS, "MealCarbRatioLearner: caught up with the window; lessons may be applied from now on")
         }
         return looked
     }
@@ -247,6 +259,8 @@ class MealCarbRatioLearner @Inject constructor(
     }
 
     private fun ramp(nowEpochMs: Long) {
+        // Lessons from a window only half looked at are not lessons yet.
+        if (!caughtUp) return
         for ((bucket, lesson) in lessons) {
             // The profile's ratio at the middle of that part of the day, as the bounds and the first step refer to it.
             val profile = profileFunction.getProfile(nowEpochMs) ?: continue
@@ -278,18 +292,24 @@ class MealCarbRatioLearner @Inject constructor(
             val saved = sp.getStringOrNull(KEY, null)?.let { JSONObject(it) } ?: return
             evaluatedUpToEpochMs = saved.optLong("evaluatedUpTo")
             lastRampEpochMs = saved.optLong("lastRamp")
+            val version = saved.optInt("version", 1)
+            caughtUp = saved.optBoolean("caughtUp", false)
             val meals = saved.optJSONArray("meals") ?: JSONArray()
             for (i in 0 until meals.length()) {
                 val m = meals.getJSONObject(i)
-                stored += Stored(
-                    m.getLong("t0"), m.getDouble("g"), m.optDouble("given"), m.optDouble("needed"),
-                    if (m.isNull("ic")) null else m.getDouble("ic"), m.optDouble("profileIc"), m.optDouble("bg0"), m.optDouble("bg1")
-                )
+                val grams = m.getDouble("g")
+                val given = m.optDouble("given")
+                val needed = m.optDouble("needed")
+                // The ratio is re-derived with the current rules, so that a stricter rule reaches meals evaluated under a looser one.
+                stored += Stored(m.getLong("t0"), grams, given, needed, MealCarbRatioMath.effectiveIc(grams, given, needed), m.optDouble("profileIc"), m.optDouble("bg0"), m.optDouble("bg1"))
             }
-            val app = saved.optJSONObject("applied") ?: JSONObject()
-            for (bucket in MealCarbRatioMath.Bucket.entries) {
-                app.optJSONObject(bucket.name)?.let { applied[bucket] = Applied(it.getDouble("ic"), it.getLong("at")) }
-            }
+            // Ratios applied by version 1 started from a half-read window; they start again from the profile.
+            if (version >= STATE_VERSION) {
+                val app = saved.optJSONObject("applied") ?: JSONObject()
+                for (bucket in MealCarbRatioMath.Bucket.entries) {
+                    app.optJSONObject(bucket.name)?.let { applied[bucket] = Applied(it.getDouble("ic"), it.getLong("at")) }
+                }
+            } else aapsLogger.info(LTag.APS, "MealCarbRatioLearner: state version $version → $STATE_VERSION, applied ratios start again from the profile")
             lessons = MealCarbRatioMath.learn(stored.mapNotNull { s -> s.effectiveIc?.let { MealCarbRatioMath.bucket(hourOfDay(s.startEpochMs)) to it } })
         }.onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner: saved state unreadable: ${it.javaClass.simpleName}") }
     }
@@ -305,7 +325,11 @@ class MealCarbRatioLearner @Inject constructor(
             }
             val app = JSONObject()
             applied.forEach { (bucket, a) -> app.put(bucket.name, JSONObject().put("ic", a.icGPerU).put("at", a.atEpochMs)) }
-            sp.putString(KEY, JSONObject().put("version", 1).put("evaluatedUpTo", evaluatedUpToEpochMs).put("lastRamp", lastRampEpochMs).put("meals", meals).put("applied", app).toString())
+            sp.putString(
+                KEY,
+                JSONObject().put("version", STATE_VERSION).put("evaluatedUpTo", evaluatedUpToEpochMs).put("lastRamp", lastRampEpochMs)
+                    .put("caughtUp", caughtUp).put("meals", meals).put("applied", app).toString()
+            )
         }.onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner: state not saved: ${it.javaClass.simpleName}") }
     }
 
@@ -315,6 +339,7 @@ class MealCarbRatioLearner @Inject constructor(
     companion object {
 
         const val KEY = "aimi_meal_ic_learner_v1"
+        const val STATE_VERSION = 2
         const val UPDATE_EVERY_MS = 15 * 60_000L
         const val RAMP_EVERY_MS = 60 * 60_000L
 

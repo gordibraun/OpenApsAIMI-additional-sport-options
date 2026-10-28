@@ -42,6 +42,12 @@ class MealCarbRatioMathTest {
         val meal = MealCarbRatioMath.Meal(t, 20.0, 1)
         val none = MealCarbRatioMath.outcome(MealCarbRatioMath.Window(meal, 100.0, 90.0, 1.0, 1.0, 0.0, 0.0, 50.0, 10.0))
         assertNull(none.effectiveIcGPerU)
+        // 15 g nobody bolused for, "needing" half a unit: the 28 g/U of 10 October that pulled the median up.
+        val unbolused = MealCarbRatioMath.outcome(MealCarbRatioMath.Window(MealCarbRatioMath.Meal(t, 15.0, 1), 84.0, 93.0, 0.9, 0.5, 0.0, 0.0, 52.0, 10.3))
+        assertNull(unbolused.effectiveIcGPerU)
+        assertNull(MealCarbRatioMath.effectiveIc(20.0, 0.4, 2.0))
+        assertNull(MealCarbRatioMath.effectiveIc(20.0, 2.0, 0.9))
+        assertEquals(10.0, MealCarbRatioMath.effectiveIc(20.0, 2.0, 2.0)!!, 1e-9)
         // 20 g over 90 U would be a fifth of a gram per unit: no ratio a body has.
         val absurd = MealCarbRatioMath.outcome(MealCarbRatioMath.Window(meal, 100.0, 1000.0, 0.0, 0.0, 0.1, 0.0, 10.0, 10.0))
         assertNull(absurd.effectiveIcGPerU)

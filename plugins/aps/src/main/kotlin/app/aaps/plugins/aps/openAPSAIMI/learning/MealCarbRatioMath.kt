@@ -68,11 +68,18 @@ object MealCarbRatioMath {
         val bolusesU: Double
     )
 
-    fun outcome(w: Window): Outcome {
-        val needed = w.iobStartU + w.bolusesU + w.tempBasalNetU - w.iobEndU + (w.bgEndMgdl - w.bgStartMgdl) / w.sensitivityMgdlPerU
-        val ic = if (needed >= MIN_NEEDED_U) (w.meal.grams / needed).takeIf { it.isFinite() && it in MIN_IC_G_PER_U..MAX_IC_G_PER_U } else null
-        return Outcome(w.meal, needed, ic, w.profileIcGPerU, w.bgStartMgdl, w.bgEndMgdl, w.bolusesU)
-    }
+    fun outcome(w: Window): Outcome =
+        Outcome(w.meal, needed(w), effectiveIc(w.meal.grams, w.bolusesU, needed(w)), w.profileIcGPerU, w.bgStartMgdl, w.bgEndMgdl, w.bolusesU)
+
+    fun needed(w: Window): Double = w.iobStartU + w.bolusesU + w.tempBasalNetU - w.iobEndU + (w.bgEndMgdl - w.bgStartMgdl) / w.sensitivityMgdlPerU
+
+    /**
+     * Grams per unit a meal turned out to need, or null when the window cannot teach: a meal nobody
+     * bolused for, or one that needed next to nothing, gives ratios that are noise (28 Oct 2026: 15 g
+     * with no bolus and 0.5 U "needed" came out as 28 g/U and pulled the day's median up).
+     */
+    fun effectiveIc(grams: Double, bolusesU: Double, neededU: Double): Double? =
+        if (bolusesU >= MIN_BOLUSES_U && neededU >= MIN_NEEDED_U) (grams / neededU).takeIf { it.isFinite() && it in MIN_IC_G_PER_U..MAX_IC_G_PER_U } else null
 
     /** Four parts of the day; the night goes with the late evening, meals there being few. */
     enum class Bucket(val label: String) { MORNING("утро 06–11"), DAY("день 11–16"), EVENING("вечер 16–21"), LATE("поздно 21–06") }
@@ -132,9 +139,12 @@ object MealCarbRatioMath {
     const val MIN_MEAL_GRAMS = 8.0
 
     /** Less insulin than this over four hours says nothing about a ratio. */
-    const val MIN_NEEDED_U = 0.3
-    const val MIN_IC_G_PER_U = 1.0
-    const val MAX_IC_G_PER_U = 60.0
+    const val MIN_NEEDED_U = 1.0
+
+    /** A meal with less bolus than this was not dosed for; what glucose did then is not the ratio's doing. */
+    const val MIN_BOLUSES_U = 0.5
+    const val MIN_IC_G_PER_U = 2.0
+    const val MAX_IC_G_PER_U = 25.0
     const val KEEP_DAYS = 21
     const val MIN_MEALS_PER_BUCKET = 5
     const val MIN_MEALS_ALL_DAY = 8
