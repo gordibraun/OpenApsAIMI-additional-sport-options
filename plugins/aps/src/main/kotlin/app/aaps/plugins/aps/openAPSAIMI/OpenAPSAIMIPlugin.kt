@@ -267,11 +267,9 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     }
 
     override fun getCarbRatioOverviewString(): String? {
+        // One short token: the column is narrow and the profile's own value is on the dashboard behind the tap.
         val profile = profileFunction.getProfile() ?: return null
-        val base = profile.getIcTimeFromMidnight(MidnightUtils.secondsFromMidnight())
-        val used = profile.getIc()
-        return if (abs(used - base) > 0.05) String.format(Locale.getDefault(), "IC %.1f (проф. %.1f)", used, base)
-        else String.format(Locale.getDefault(), "IC %.1f", used)
+        return String.format(Locale.getDefault(), "IC %.1f", profile.getIc())
     }
 
     /**
