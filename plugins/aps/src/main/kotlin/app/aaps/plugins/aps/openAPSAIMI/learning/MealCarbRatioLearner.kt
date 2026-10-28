@@ -81,7 +81,7 @@ class MealCarbRatioLearner @Inject constructor(
     /** What is applied, from how many meals; for the log and the owner. */
     fun describe(): String = synchronized(lock) {
         load()
-        if (applied.isEmpty()) return "IC учитель: пока нет урока (обедов учтено ${stored.count { it.effectiveIc != null }})"
+        if (applied.isEmpty()) return "IC учитель: " + (if (lessons.isEmpty()) "пока нет урока" else "урок есть, применится на ближайшем шаге") + " (обедов учтено ${stored.count { it.effectiveIc != null }})"
         val parts = MealCarbRatioMath.Bucket.entries.mapNotNull { bucket ->
             val a = applied[bucket] ?: return@mapNotNull null
             val lesson = lessons[bucket]
@@ -309,7 +309,11 @@ class MealCarbRatioLearner @Inject constructor(
                 for (bucket in MealCarbRatioMath.Bucket.entries) {
                     app.optJSONObject(bucket.name)?.let { applied[bucket] = Applied(it.getDouble("ic"), it.getLong("at")) }
                 }
-            } else aapsLogger.info(LTag.APS, "MealCarbRatioLearner: state version $version → $STATE_VERSION, applied ratios start again from the profile")
+            } else {
+                // Start again from the profile, and take the first step at the next update rather than an hour on.
+                lastRampEpochMs = 0L
+                aapsLogger.info(LTag.APS, "MealCarbRatioLearner: state version $version → $STATE_VERSION, applied ratios start again from the profile")
+            }
             lessons = MealCarbRatioMath.learn(stored.mapNotNull { s -> s.effectiveIc?.let { MealCarbRatioMath.bucket(hourOfDay(s.startEpochMs)) to it } })
         }.onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner: saved state unreadable: ${it.javaClass.simpleName}") }
     }
