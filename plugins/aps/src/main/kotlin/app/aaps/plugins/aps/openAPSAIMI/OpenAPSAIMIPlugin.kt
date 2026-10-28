@@ -125,7 +125,8 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     private val profiler: Profiler,
     private val context: Context,
     private val apsResultProvider: Provider<APSResult>,
-    private val isfStateStore: IsfStateStore
+    private val isfStateStore: IsfStateStore,
+    private val mealCarbRatioLearner: app.aaps.plugins.aps.openAPSAIMI.learning.MealCarbRatioLearner
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.APS)
@@ -211,6 +212,12 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     override val algorithm = APSResult.Algorithm.AIMI
     override var lastAPSResult: APSResult? = null
     override fun supportsDynamicIsf(): Boolean = preferences.get(BooleanKey.ApsUseDynamicSensitivity)
+
+    // The carb ratio learned from meals; the profile asks here, so the wizard, the loop, the wear
+    // preview and the watch's snapshot all dose carbohydrates by the same learned number.
+    override fun supportsDynamicIc(): Boolean = mealCarbRatioLearner.enabled()
+    override fun getIc(profile: Profile): Double? = mealCarbRatioLearner.icFor(profile, dateUtil.now())
+    override fun getIc(timestamp: Long, profile: Profile): Double? = mealCarbRatioLearner.icFor(profile, timestamp)
     private val pkpdIntegration = PkPdIntegration(preferences, isfStateStore, "plugin")
     private var lastPkpdScale: Double = 1.0
     // Dans votre classe principale (ou plugin), vous pouvez déclarer :
@@ -520,6 +527,10 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         val activeProfilePercentage = (profile as? ProfileSealed.EPS)?.value?.originalPercentage ?: profile.percentage
         val profileBasalFallback = profile.getBasal()
         val activeProfileIsf = profile.getProfileIsfMgdl()
+        // Meals that have run their course teach the carb ratio; getIc() below asks the learner.
+        runCatching { mealCarbRatioLearner.update(dateUtil.now()) }
+            .onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner update failed: ${it.javaClass.simpleName}: ${it.message}") }
+        aapsLogger.info(LTag.APS, "IC for this run: ${"%.2f".format(profile.getIc())} (profile ${"%.2f".format(profile.getIcTimeFromMidnight(MidnightUtils.secondsFromMidnight()))}); ${mealCarbRatioLearner.describe()}")
         val currentBasalForInvoke =
             if (forecastOnly && pump.baseBasalRate < 0.01) {
                 aapsLogger.debug(
@@ -1317,6 +1328,14 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                         booleanKey = BooleanKey.OApsAIMIUnifiedReactivityEnabled,
                         title = R.string.unified_reactivity_title,
                         summary = R.string.unified_reactivity_summary
+                    )
+                )
+                addPreference(
+                    AdaptiveSwitchPreference(
+                        ctx = context,
+                        booleanKey = BooleanKey.OApsAIMIMealIcLearnerEnabled,
+                        title = R.string.meal_ic_learner_title,
+                        summary = R.string.meal_ic_learner_summary
                     )
                 )
                 

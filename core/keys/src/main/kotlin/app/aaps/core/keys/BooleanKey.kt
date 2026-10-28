@@ -138,4 +138,6 @@ enum class BooleanKey(
     OApsAIMINightGrowthEnabled("key_oaps_aimi_ngr_enabled", true),
     OApsAIMIPkpdEnabled("key_aimi_pkpd_enabled", false),
     OApsAIMIUnifiedReactivityEnabled("key_use_unified_reactivity", true),  // 🎯 NEW: Enable UnifiedReactivityLearner
+    /** The carb ratio learned from meals that have run their course; see MealCarbRatioLearner. */
+    OApsAIMIMealIcLearnerEnabled("key_use_aimi_meal_ic_learner", true),
 }

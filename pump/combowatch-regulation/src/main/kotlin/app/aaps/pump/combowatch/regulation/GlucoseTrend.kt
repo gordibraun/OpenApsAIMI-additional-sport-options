@@ -47,8 +47,10 @@ data class GlucoseTrend(
                 .sortedByDescending { it.atEpochMs }
             val newest = usable.firstOrNull() ?: return null
 
+            // Rates of change are read off the smoothed readings, as the phone's loop reads them off
+            // its smoothed buckets; the newest value itself stays the sensor's own.
             val deltas = DeltaCalculator(QuietLogger).calculateDeltas(
-                usable.mapTo(mutableListOf()) { InMemoryGlucoseValue(timestamp = it.atEpochMs, value = it.mgdl) }
+                GlucoseSmoothing.smooth(usable.mapTo(mutableListOf()) { InMemoryGlucoseValue(timestamp = it.atEpochMs, value = it.mgdl) })
             )
             fun minutesBefore(reading: GlucoseReading) = (newest.atEpochMs - reading.atEpochMs) / 60_000.0
             val hasNeighbour = usable.drop(1).any { minutesBefore(it) in 2.5..17.5 }
