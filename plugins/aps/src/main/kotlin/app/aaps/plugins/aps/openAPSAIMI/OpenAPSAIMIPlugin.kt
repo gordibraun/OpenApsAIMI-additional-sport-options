@@ -89,11 +89,14 @@ import dagger.android.HasAndroidInjector
 import org.json.JSONObject
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Provider
 import javax.inject.Singleton
 import kotlin.math.floor
 import kotlin.math.max
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import app.aaps.plugins.aps.openAPSAIMI.ISF.IsfBlender
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.IsfFusion
 import app.aaps.plugins.aps.openAPSAIMI.pkpd.IsfFusionBounds
@@ -218,6 +221,56 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     override fun supportsDynamicIc(): Boolean = mealCarbRatioLearner.enabled()
     override fun getIc(profile: Profile): Double? = mealCarbRatioLearner.icFor(profile, dateUtil.now())
     override fun getIc(timestamp: Long, profile: Profile): Double? = mealCarbRatioLearner.icFor(profile, timestamp)
+
+    override fun getCarbRatioOverviewString(): String? {
+        val profile = profileFunction.getProfile() ?: return null
+        val base = profile.getIcTimeFromMidnight(MidnightUtils.secondsFromMidnight())
+        val used = profile.getIc()
+        return if (abs(used - base) > 0.05) String.format(Locale.getDefault(), "IC %.1f (проф. %.1f)", used, base)
+        else String.format(Locale.getDefault(), "IC %.1f", used)
+    }
+
+    /**
+     * The owner's check on the two coefficients that set a meal's dose: the sensitivity the wizard
+     * corrects by (the average of the loop's decision ISF, shown as "Е"), the carb ratio the learner
+     * applies, how both moved, and what the wizard, the loop and the watch actually took.
+     */
+    override fun getCoefficientsReport(): String {
+        val now = dateUtil.now()
+        val profile = profileFunction.getProfile() ?: return "Профиль не задан"
+        fun f1(v: Double?) = v?.takeIf { it.isFinite() }?.let { String.format(Locale.getDefault(), "%.1f", it) } ?: "—"
+        fun f2(v: Double?) = v?.takeIf { it.isFinite() }?.let { String.format(Locale.getDefault(), "%.2f", it) } ?: "—"
+        fun t(ms: Long?) = ms?.takeIf { it > 0 }?.let { dateUtil.timeString(it) } ?: "—"
+        val foodIsf = runCatching { getAverageIsfMgdl(now, "coefficients report") }.getOrNull()
+        val lastRun = lastAPSResult
+        val decisionIsf = lastRun?.variableSens
+        val loopIc = lastRun?.oapsProfileAimi?.carb_ratio
+        val sb = StringBuilder()
+        sb.appendLine("— ISF (чувствительность, мг/дл на 1 ЕД) —")
+        sb.appendLine("Е (еда): ${f1(foodIsf)} — среднее ISF решений цикла за последние часы; им мастер болюса считает поправку к цели.")
+        sb.appendLine("Р (решение): ${f1(decisionIsf)} — динамический ISF последнего прогона (${t(lastRun?.date)}); им цикл считает коррекции и прогноз.")
+        sb.appendLine("Профильный: ${f1(profile.getProfileIsfMgdl())}.")
+        val samples = runCatching { isfHistory.snapshot(now).samples }.getOrDefault(emptyList()).sortedBy { it.timestamp }
+        if (samples.isNotEmpty()) {
+            sb.appendLine("Динамика ISF решений (${samples.size} образцов, средние по часам):")
+            samples.groupBy { it.timestamp / 3_600_000L }.toSortedMap().forEach { (hour, list) ->
+                sb.appendLine("  ${t(hour * 3_600_000L)}  ${f1(list.map { it.isf }.average())}  при сахаре ${list.map { it.glucose }.average().roundToInt()}")
+            }
+        }
+        sb.appendLine()
+        sb.appendLine("— IC (углеводный коэффициент, г на 1 ЕД) —")
+        sb.append(mealCarbRatioLearner.report(now, profile))
+        sb.appendLine()
+        sb.appendLine("— Где применяются —")
+        val wizard = runCatching { persistenceLayer.getBolusCalculatorResultsFromTime(now - 24 * 60 * 60_000L, false).blockingGet().firstOrNull() }.getOrNull()
+        sb.appendLine(
+            "• Мастер болюса: " + (wizard?.let { "последний расчёт ${t(it.timestamp)}: ISF ${f1(it.isf)}, IC ${f1(it.ic)}, ${it.carbs.roundToInt()} г → ${f2(it.totalInsulin)} ЕД" } ?: "расчётов за сутки нет") +
+                "; сейчас взял бы ISF Е ${f1(foodIsf)} и IC ${f1(profile.getIc())}."
+        )
+        sb.appendLine("• Цикл: последний прогон ${t(lastRun?.date)}: ISF ${f1(decisionIsf)}, IC ${f1(loopIc)} (carb_ratio профиля алгоритма: углеводы в прогнозе и carbsReq).")
+        sb.appendLine("• Часы: снимок для часов берётся из того же прогона и уходит с каждой арендой (раз в 5 мин, пока телефон рядом): ISF ${f1(decisionIsf)} для прогноза, ISF Е ${f1(foodIsf)} для поправки в расчёте еды, IC ${f1(loopIc)} для еды и прогноза.")
+        return sb.toString()
+    }
     private val pkpdIntegration = PkPdIntegration(preferences, isfStateStore, "plugin")
     private var lastPkpdScale: Double = 1.0
     // Dans votre classe principale (ou plugin), vous pouvez déclarer :

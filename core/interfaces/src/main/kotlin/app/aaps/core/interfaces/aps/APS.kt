@@ -32,6 +32,12 @@ interface APS : ConfigExportImport {
      */
     fun supportsDynamicIc(): Boolean = false
 
+    /** The carb ratio in use beside the profile's, one short line for the overview; null when the plugin has nothing to say. */
+    fun getCarbRatioOverviewString(): String? = null
+
+    /** Where the dynamic coefficients come from, how they moved and where they are used; for the overview's dialog. May read the database: call it off the main thread. */
+    fun getCoefficientsReport(): String? = null
+
     /**
      * Dedicated string for Sensitivity OKDialog in overview on ISF calculation ?
      * @return string or null if nothing to show

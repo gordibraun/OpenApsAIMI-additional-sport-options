@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 46
-            versionName = "0.46-smoothed-trend"
+            versionCode = 47
+            versionName = "0.47-food-isf"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

@@ -225,7 +225,10 @@ internal class AutonomyRunner(
         // gram and per mg/dL, and the regulator widens its caps by the same factor.
         val factor = store.resistance()?.factor ?: 1.0
         val snapshot = store.snapshot()?.let { s ->
-            if (factor > 1.0) s.copy(sensitivityMgdlPerU = s.sensitivityMgdlPerU / factor, carbRatioGPerU = s.carbRatioGPerU / factor) else s
+            if (factor > 1.0) s.copy(
+                sensitivityMgdlPerU = s.sensitivityMgdlPerU / factor, carbRatioGPerU = s.carbRatioGPerU / factor,
+                foodSensitivityMgdlPerU = s.foodSensitivityMgdlPerU?.let { it / factor }
+            ) else s
         }
         return WatchRegulator.Inputs(
             nowEpochMs = now,

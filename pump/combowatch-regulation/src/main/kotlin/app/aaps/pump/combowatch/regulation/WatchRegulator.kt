@@ -190,7 +190,9 @@ class WatchRegulator {
         val iob = forecast.iobNowU()
         val cob = forecast.cobNowG
         val carbsU = carbsG / snapshot.carbRatioGPerU
-        val correctionU = if (fresh != null) (fresh.mgdl - snapshot.targetMgdl) / snapshot.sensitivityMgdlPerU else 0.0
+        // The correction by the sensitivity the phone's wizard uses (its food ISF) when the snapshot carries it.
+        val correctionIsf = snapshot.foodSensitivityMgdlPerU ?: snapshot.sensitivityMgdlPerU
+        val correctionU = if (fresh != null) (fresh.mgdl - snapshot.targetMgdl) / correctionIsf else 0.0
         val cobU = cob / snapshot.carbRatioGPerU
         val raw = carbsU + correctionU + cobU - iob
         val wanted = floor(raw * 10.0 + 1e-9).toInt().coerceAtLeast(0)
@@ -201,7 +203,7 @@ class WatchRegulator {
         // The owner said insulin works worse today: the ratio above is already the strengthened one.
         if (inputs.resistanceFactor > 1.0 + 1e-9) lines += "Режим «инсулин работает хуже» +${((inputs.resistanceFactor - 1.0) * 100).roundToInt()} %: коэффициенты усилены"
         lines += if (fresh != null)
-            "Сахар ${fresh.mgdl.roundToInt()}, цель ${snapshot.targetMgdl.roundToInt()}, ISF ${snapshot.sensitivityMgdlPerU.roundToInt()}: ${if (correctionU >= 0) "+" else "−"}${u(abs(correctionU))} ЕД"
+            "Сахар ${fresh.mgdl.roundToInt()}, цель ${snapshot.targetMgdl.roundToInt()}, ISF${if (snapshot.foodSensitivityMgdlPerU != null) " еды" else ""} ${correctionIsf.roundToInt()}: ${if (correctionU >= 0) "+" else "−"}${u(abs(correctionU))} ЕД"
         else "Сахар неизвестен (показаний за ${BOLUS_MAX_READING_AGE_MINUTES.toInt()} мин нет): поправка к цели не считалась"
         if (cob >= 1.0) lines += "Углеводы в работе ${cob.roundToInt()} г: +${u(cobU)} ЕД"
         lines += "Активный инсулин ${u(iob)} ЕД: ${if (iob >= 0) "−" else "+"}${u(abs(iob))} ЕД"

@@ -99,7 +99,9 @@ class RegulationSnapshotBuilder @Inject constructor(
             insulinActivity = iob.map { it.activity },
             insulinRemaining = remaining,
             assumedTbr = assumed,
-            phoneForecast = result?.predBGs?.AIMI_FINAL
+            phoneForecast = result?.predBGs?.AIMI_FINAL,
+            // What the phone's wizard corrects by, so that the watch's meal calculation matches it.
+            foodSensitivityMgdlPerU = runCatching { activePlugin.get().activeAPS.getAverageIsfMgdl(madeAt, "combowatch") }.getOrNull()?.takeIf { it.isFinite() && it > 0.0 }
         ).takeIf { it.isWellFormed }
             ?.also { aapsLogger.debug(LTag.PUMP, "combowatch: snapshot of the loop run at $madeAt: IOB ${it.iobU}, COB ${it.cobG}, ISF ${it.sensitivityMgdlPerU}") }
     }

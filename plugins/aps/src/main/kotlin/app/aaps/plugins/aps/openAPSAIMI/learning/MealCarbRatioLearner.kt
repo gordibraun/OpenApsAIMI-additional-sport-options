@@ -19,6 +19,7 @@ import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * Learns the carb ratio from meals that have run their course, and answers the profile's
@@ -80,6 +81,34 @@ class MealCarbRatioLearner @Inject constructor(
             "${bucket.label}: ${u1(a.icGPerU)}" + (lesson?.let { " (урок ${u1(it.icGPerU)}, n=${it.meals}${if (it.fromAllDay) " весь день" else ""})" } ?: "")
         }
         "IC учитель: " + parts.joinToString(" · ") + "; обедов с уроком ${stored.count { it.effectiveIc != null }} за ${MealCarbRatioMath.KEEP_DAYS} дн"
+    }
+
+    /** The owner's view: what is applied now and why, the lessons, the meals they rest on. */
+    fun report(nowEpochMs: Long, profile: Profile): String = synchronized(lock) {
+        load()
+        val sb = StringBuilder()
+        val bucket = MealCarbRatioMath.bucket(hourOfDay(nowEpochMs))
+        val base = profile.getIcTimeFromMidnight(MidnightUtils.secondsFromMidnight(nowEpochMs))
+        val using = icFor(profile, nowEpochMs)
+        sb.appendLine(
+            (using?.let { "Применяется ${u1(it)} г/ЕД (профиль ${u1(base)}), сейчас ${bucket.label}." } ?: "Применяется профильный ${u1(base)} г/ЕД: у учителя пока нет урока.") +
+                (if (!enabled()) " Учитель выключен." else "")
+        )
+        sb.appendLine("Уроки по времени суток (медиана за ${MealCarbRatioMath.KEEP_DAYS} дн, к уроку идём не быстрее 15 % в день, в пределах 0,5–1,5 от профиля):")
+        for (b in MealCarbRatioMath.Bucket.entries) {
+            val lesson = lessons[b]
+            val a = applied[b]
+            sb.appendLine(
+                "  ${b.label}: " + (lesson?.let { "урок ${u1(it.icGPerU)} (n=${it.meals}${if (it.fromAllDay) ", весь день" else ""})" } ?: "урока нет") +
+                    (a?.let { ", применяется ${u1(it.icGPerU)} с ${dateUtil.timeString(it.atEpochMs)}" } ?: "")
+            )
+        }
+        val usable = stored.filter { it.effectiveIc != null }.sortedByDescending { it.startEpochMs }
+        sb.appendLine("Обедов с результатом ${usable.size} из ${stored.size} оценённых; просмотрено до ${if (evaluatedUpToEpochMs > 0) dateUtil.dateAndTimeString(evaluatedUpToEpochMs) else "—"}.")
+        usable.take(8).forEach { s ->
+            sb.appendLine("  ${dateUtil.dateAndTimeString(s.startEpochMs)} ${s.grams.roundToInt()} г: подано ${u1(s.bolusesU)} ЕД, нужно было ${u1(s.neededU)} → IC ${u1(s.effectiveIc!!)} (сахар ${s.bgStart.roundToInt()}→${s.bgEnd.roundToInt()} за 4 ч)")
+        }
+        sb.toString()
     }
 
     /**

@@ -134,6 +134,7 @@ import app.aaps.plugins.main.skins.SkinProvider
 import com.jjoe64.graphview.GraphView
 import dagger.android.support.DaggerFragment
 import io.reactivex.rxjava3.disposables.CompositeDisposable
+import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.kotlin.plusAssign
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -2093,6 +2094,9 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     overViewText.add(rh.gs(app.aaps.core.ui.R.string.autosens_short, it))
                 appendPlainLine(okDialogText, rh.gs(app.aaps.core.ui.R.string.autosens_long, it))
             }
+            // The carb ratio beside the two sensitivities: the one the wizard, the loop and the watch dose carbohydrates by.
+            val carbRatioLine = if (config.APS) activePlugin.activeAPS.getCarbRatioOverviewString() else null
+            carbRatioLine?.let { overViewText.add(it) }
             binding.infoLayout.sensitivity.text = overViewText.joinToString("\n")
             binding.infoLayout.sensitivity.visibility = View.VISIBLE
             binding.infoLayout.variableSensitivity.text = isfOverviewText(decisionIsf, carbsIsf)
@@ -2108,7 +2112,23 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                     appendPlainLine(okDialogText, it)
                 }
             }
-            binding.infoLayout.asLayout.setOnClickListener { activity?.let { OKDialog.show(it, rh.gs(app.aaps.core.ui.R.string.sensitivity), okDialogText) } }
+            carbRatioLine?.let { appendPlainLine(okDialogText, it) }
+            binding.infoLayout.asLayout.setOnClickListener {
+                activity?.let { act ->
+                    // The report reads the database for the last wizard calculation: built off the main thread, then shown.
+                    val aps = activePlugin.activeAPS
+                    disposable += Single.fromCallable { if (config.APS) aps.getCoefficientsReport().orEmpty() else "" }
+                        .subscribeOn(aapsSchedulers.io)
+                        .observeOn(aapsSchedulers.main)
+                        .subscribe(
+                            { report ->
+                                val text = SpannableStringBuilder(okDialogText).apply { if (report.isNotBlank()) append("\n\n").append(report) }
+                                OKDialog.show(act, rh.gs(app.aaps.core.ui.R.string.sensitivity), text)
+                            },
+                            { OKDialog.show(act, rh.gs(app.aaps.core.ui.R.string.sensitivity), okDialogText) }
+                        )
+                }
+            }
 
         } else {
             binding.infoLayout.sensitivity.text =

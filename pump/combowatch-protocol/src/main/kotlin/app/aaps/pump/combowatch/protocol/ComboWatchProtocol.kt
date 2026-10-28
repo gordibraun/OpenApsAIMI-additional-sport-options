@@ -525,7 +525,14 @@ data class RegulationSnapshot(
     /** The temporary basal the phone's records showed running at [madeAtEpochMs], if any. */
     val assumedTbr: AssumedTbr? = null,
     /** The phone's own forecast from this run, mg/dL every five minutes; kept for comparison. */
-    val phoneForecast: List<Int>? = null
+    val phoneForecast: List<Int>? = null,
+    /**
+     * The sensitivity the phone's bolus wizard corrects by (its average decision ISF, "Е"), when the
+     * phone has one: the watch's meal calculation uses it for the correction towards the target, so
+     * that a meal entered on the watch gets the dose the phone's wizard would give. The forecast
+     * keeps [sensitivityMgdlPerU], the run's own.
+     */
+    val foodSensitivityMgdlPerU: Double? = null
 ) {
 
     /** A temporary basal as an absolute rate, and when it was due to end. */
@@ -555,6 +562,7 @@ data class RegulationSnapshot(
         .apply {
             assumedTbr?.let { put("assumedTbr", JSONObject().put("rate", it.rateUph).put("endsAt", it.endsAtEpochMs)) }
             phoneForecast?.let { forecast -> put("phoneForecast", JSONArray().apply { forecast.forEach { put(it) } }) }
+            foodSensitivityMgdlPerU?.let { put("foodSensitivity", it) }
         }
 
     companion object {
@@ -575,6 +583,7 @@ data class RegulationSnapshot(
             insulinActivity = json.getJSONArray("insulinActivity").let { array -> List(array.length()) { array.getDouble(it) } },
             insulinRemaining = json.getJSONArray("insulinRemaining").let { array -> List(array.length()) { array.getDouble(it) } },
             assumedTbr = json.optJSONObject("assumedTbr")?.let { AssumedTbr(it.getDouble("rate"), it.getLong("endsAt")) },
+            foodSensitivityMgdlPerU = json.optDouble("foodSensitivity").takeIf { it.isFinite() && it > 0.0 },
             phoneForecast = json.optJSONArray("phoneForecast")?.let { array -> List(array.length()) { array.getInt(it) } }
         )
     }
