@@ -81,7 +81,7 @@ class FoodUploadWorker(
                 else                           -> "undecided"
             }
             try {
-                api.decision(serverId, decision, if (decision == "declined") null else fresh.finalGrams ?: fresh.estimatedGrams.takeIf { decision == "eaten" }, "фото ${fresh.shortId}")
+                api.decision(serverId, decision, if (decision == "declined") null else fresh.finalGrams ?: fresh.estimatedGrams.takeIf { decision == "eaten" }, "фото ${fresh.shortId}", if (decision == "declined") null else fresh.splitToEnter)
                 store.update(fresh.id) { decisionPending = false }
             } catch (e: FoodApi.Failure) {
                 aapsLogger.warn(LTag.CORE, "food decision not sent for ${fresh.id}: ${e.message}")

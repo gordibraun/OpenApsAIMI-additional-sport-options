@@ -9,7 +9,9 @@ import app.aaps.core.data.model.TE
 import app.aaps.core.data.model.TT
 import app.aaps.core.data.pump.defs.PumpDescription
 import app.aaps.core.data.time.T
+import app.aaps.core.data.model.CA
 import app.aaps.core.data.ue.Action
+import app.aaps.core.interfaces.aps.CarbSplit
 import app.aaps.core.data.ue.Sources
 import app.aaps.core.data.ue.ValueWithUnit
 import app.aaps.core.interfaces.aps.AimiMealAssist
@@ -157,6 +159,11 @@ class BolusWizard @Inject constructor(
     lateinit var profile: Profile
     lateinit var profileName: String
     var selectedFoodType: String = "balanced"
+        private set
+
+    /** The meal by type when the owner entered it in parts; null means all [carbs] are of [selectedFoodType]. */
+    var carbSplit: CarbSplit? = null
+        private set
     var tempTarget: TT? = null
     var carbs: Int = 0
     var cob: Double = 0.0
@@ -209,7 +216,8 @@ class BolusWizard @Inject constructor(
         forecastRequiredCarbs: Int? = null,
         activityNewInsulinFactor: Double = 1.0,
         activityDescription: String? = null,
-        forecastRequiredCarbsSource: String = "AIMI_FINAL"
+        forecastRequiredCarbsSource: String = "AIMI_FINAL",
+        carbSplit: CarbSplit? = null
     ): BolusWizard {
 
         calculatedAt = dateUtil.now()
@@ -233,6 +241,8 @@ class BolusWizard @Inject constructor(
         this.notes = notes
         this.carbTime = carbTime
         this.selectedFoodType = selectedFoodType
+        // A split only counts when it is the whole meal; otherwise the meal is one type, as before.
+        this.carbSplit = carbSplit?.takeIf { !it.isEmpty && it.total == carbs }
         this.quickWizard = quickWizard
         this.usePercentage = usePercentage
         this.totalPercentage = totalPercentage
@@ -505,23 +515,28 @@ class BolusWizard @Inject constructor(
 
     private fun wizardBgToMgdl(): Double = profileUtil.convertToMgdl(bg, profileFunction.getUnits())
 
+    /** The meal by type: the entered split, or all carbs of the chosen type. */
+    fun effectiveCarbSplit(): CarbSplit = carbSplit ?: CarbSplit.single(selectedFoodType, carbs)
+
     private fun notesWithAimiFoodType(): String {
         if (carbs <= 0) return notes
-        val normalizedType = when (selectedFoodType.lowercase()) {
-            "fast" -> "fast"
-            "slow" -> "slow"
-            else -> "balanced"
-        }
+        val split = effectiveCarbSplit()
+        val dominant = split.dominantType
+        return notesForPart(dominant, aimiCobHandledCarbsForNotes()?.let { split.allocateHandled(it)[dominant] })
+    }
+
+    /**
+     * The note of one carb entry: the owner's words, then the type token the absorption model and
+     * the forecast read, then how many of this part's grams the dose already covers.
+     */
+    private fun notesForPart(type: String, handledGrams: Int?): String {
+        val normalizedType = CarbSplit.normalize(type)
         val token = "AIMI_CARB_TYPE type=$normalizedType"
-        val cobHandledToken = aimiCobHandledCarbsForNotes()
-            ?.let { "AIMI_COB_HANDLED grams=$it" }
-        val trimmedNotes = notes.trim()
-        if ((trimmedNotes.contains("AIMI_CARB_TYPE") || trimmedNotes.contains("type=$normalizedType")) &&
-            (cobHandledToken == null || trimmedNotes.contains("AIMI_COB_HANDLED"))
-        ) {
-            return trimmedNotes
-        }
-        return listOfNotNull(trimmedNotes, token, cobHandledToken)
+        val cobHandledToken = handledGrams?.let { "AIMI_COB_HANDLED grams=$it" }
+        val ownWords = notes.trim().split(' ')
+            .filterNot { it == "AIMI_CARB_TYPE" || it == "AIMI_COB_HANDLED" || it.startsWith("type=") || it.startsWith("grams=") }
+            .joinToString(" ").trim()
+        return listOfNotNull(ownWords, token, cobHandledToken)
             .filter { it.isNotBlank() }
             .joinToString(" ")
     }
@@ -567,7 +582,7 @@ class BolusWizard @Inject constructor(
             totalInsulin = calculatedTotalInsulin,
             percentageCorrection = percentageCorrection,
             profileName = profileName,
-            note = notesWithAimiFoodType()
+            note = carbSplit?.let { notesWithAimiFoodType() + " AIMI_CARB_SPLIT fast=${it.fast},balanced=${it.balanced},slow=${it.slow}" } ?: notesWithAimiFoodType()
         )
     }
 
@@ -588,9 +603,10 @@ class BolusWizard @Inject constructor(
             } else if (carbTime < 0) {
                 timeShift += " (" + rh.gs(app.aaps.core.ui.R.string.mins, carbTime) + ")"
             }
+            val parts = carbSplit?.takeIf { it.parts().size > 1 }?.let { " (" + it.describe() + ")" } ?: ""
             actions.add(
                 rh.gs(app.aaps.core.ui.R.string.carbs) + ": " + rh.gs(app.aaps.core.ui.R.string.format_carbs, carbs)
-                    .formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor) + timeShift
+                    .formatColor(context, rh, app.aaps.core.ui.R.attr.carbsColor) + parts + timeShift
             )
         }
         if (insulinFromCOB > 0) {
@@ -834,8 +850,28 @@ class BolusWizard @Inject constructor(
 
     private fun activateMealEpisode(deliveredInsulin: Double) {
         val confirmedInsulin = deliveredInsulin.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
-        aimiMealDecision?.let { decision ->
-            aimiMealAssist.activate(buildAimiMealInput(), decision.copy(recommendedBolus = confirmedInsulin))
+        val decision = aimiMealDecision ?: return
+        val input = buildAimiMealInput()
+        val split = effectiveCarbSplit()
+        val parts = split.parts()
+        if (parts.size <= 1) {
+            aimiMealAssist.activate(input, decision.copy(recommendedBolus = confirmedInsulin))
+            return
+        }
+        // One episode per part, so each absorbs on its own curve; the dose and the covered grams
+        // are shared out in proportion, the covered ones fast first, as in the entries' notes.
+        val handled = split.allocateHandled(aimiCobHandledCarbsForNotes() ?: 0)
+        for ((type, grams) in parts) {
+            val share = grams.toDouble() / split.total
+            aimiMealAssist.activate(
+                input.copy(
+                    selectedFoodType = type,
+                    carbs = grams,
+                    requiredCarbs = handled[type] ?: 0,
+                    wizardInsulinFromCarbs = input.wizardInsulinFromCarbs * share
+                ),
+                decision.copy(recommendedBolus = confirmedInsulin * share)
+            )
         }
     }
 
@@ -852,19 +888,42 @@ class BolusWizard @Inject constructor(
         enqueueConfirmedTreatment(null, now, Sources.Wear, onResult)
     }
 
+    /** The fast or slow parts of a split meal, each its own carb entry at the same moment, with its own type token. */
+    private fun storeOtherParts(parts: List<Pair<String, Int>>, carbsTimestamp: Long, handledByPart: Map<String, Int>?, source: Sources) {
+        if (parts.isEmpty()) return
+        for ((type, grams) in parts) {
+            val note = notesForPart(type, handledByPart?.get(type))
+            @Suppress("CheckResult")
+            persistenceLayer.insertOrUpdateCarbs(
+                carbs = CA(timestamp = carbsTimestamp, amount = grams.toDouble(), duration = 0L, notes = note),
+                action = Action.CARBS, source = source, note = note
+            ).subscribeOn(Schedulers.io()).subscribe(
+                { aapsLogger.debug(LTag.APS, "Split meal part stored: $grams g $type") },
+                { aapsLogger.error(LTag.APS, "Split meal part not stored: $grams g $type", it) }
+            )
+        }
+    }
+
     private fun enqueueConfirmedTreatment(ctx: Context?, now: Long, source: Sources, onResult: ((Boolean, String, Double) -> Unit)? = null) {
         val receipt = onResult?.let { WizardDeliveryReceipt(insulinAfterConstraints, carbs, it) }
+        val split = effectiveCarbSplit()
+        val parts = split.parts()
+        val handledByPart = aimiCobHandledCarbsForNotes()?.let { split.allocateHandled(it) }
+        val primaryType = parts.firstOrNull()?.first ?: split.dominantType
+        val primaryGrams = parts.firstOrNull()?.second ?: this@BolusWizard.carbs
+        val otherParts = parts.drop(1)
         val info = DetailedBolusInfo().apply {
             timestamp = now
             eventType = TE.Type.BOLUS_WIZARD
             insulin = insulinAfterConstraints
-            carbs = this@BolusWizard.carbs.toDouble()
+            // The dominant part rides with the bolus; the other parts become entries of their own below.
+            carbs = primaryGrams.toDouble()
             context = ctx
             mgdlGlucose = wizardBgToMgdl()
             glucoseType = TE.MeterType.MANUAL
             carbsTimestamp = now + T.mins(this@BolusWizard.carbTime.toLong()).msecs()
             bolusCalculatorResult = createBolusCalculatorResult()
-            notes = this@BolusWizard.notesWithAimiFoodType()
+            notes = this@BolusWizard.notesForPart(primaryType, handledByPart?.get(primaryType))
         }
         val action = when {
             insulinAfterConstraints == 0.0 -> Action.CARBS
@@ -884,6 +943,7 @@ class BolusWizard @Inject constructor(
                 if (!result.success) {
                     uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
                 } else {
+                    storeOtherParts(otherParts, info.carbsTimestamp ?: now, handledByPart, source)
                     if (useAlarm && carbs > 0 && carbTime > 0)
                         automation.scheduleTimeToEatReminder(T.mins(carbTime.toLong()).secs().toInt())
                     activateEpisode()

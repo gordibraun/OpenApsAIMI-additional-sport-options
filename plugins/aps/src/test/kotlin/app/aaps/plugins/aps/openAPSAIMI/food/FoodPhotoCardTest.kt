@@ -1,5 +1,6 @@
 package app.aaps.plugins.aps.openAPSAIMI.food
 
+import app.aaps.core.interfaces.aps.CarbSplit
 import org.json.JSONObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -17,7 +18,7 @@ class FoodPhotoCardTest {
 
     private val serverAnswer = JSONObject(
         """{"carbs_g": 40, "carbs_range": [30, 50], "fat_g": 12, "protein_g": 8,
-            "items": [{"name": "тост бриошь", "portion": "2 куска", "carbs_g": 30}, {"name": "джем", "portion": "1 ст. л.", "carbs_g": 10}],
+            "items": [{"name": "тост бриошь", "portion": "2 куска", "carbs_g": 30, "absorption": "slow"}, {"name": "джем", "portion": "1 ст. л.", "carbs_g": 10, "absorption": "fast"}],
             "absorption": "slow", "confidence": "medium", "advice": "Введите сразу, тип еды — медленная."}"""
     )
 
@@ -30,8 +31,8 @@ class FoodPhotoCardTest {
         assertEquals("12:40 · «завтрак»", v.header)
         assertEquals("Оценено", v.chip)
         assertEquals("≈ 40 г углеводов", v.headline)
-        assertEquals("от 30 до 50 г", v.subline)
-        assertEquals(listOf("• тост бриошь, 2 куска — 30 г", "• джем, 1 ст. л. — 10 г"), v.items)
+        assertEquals("от 30 до 50 г · по типу: 10 быстрых, 30 медленных", v.subline)
+        assertEquals(listOf("• тост бриошь, 2 куска — 30 г, медленные", "• джем, 1 ст. л. — 10 г, быстрые"), v.items)
         assertEquals("медленная еда (жир/белок) · жиры ~12 г · белки ~8 г · уверенность средняя", v.composition)
         assertEquals(listOf(FoodPhotoCard.Action.EAT, FoodPhotoCard.Action.CORRECT, FoodPhotoCard.Action.DECLINE), v.actions)
         assertEquals("✅ Ем: 40 г в калькулятор", FoodPhotoCard.actionLabel(v.actions.first(), v.gramsToEnter))
@@ -42,7 +43,7 @@ class FoodPhotoCardTest {
         val v = FoodPhotoCard.of(entry(FoodPhotoEntry.Status.ESTIMATED, own = 55.0), false, time)
         assertEquals("Вы поправили", v.chip)
         assertEquals("55 г углеводов — ваша цифра", v.headline)
-        assertEquals("оценка была ≈ 40 г углеводов", v.subline)
+        assertEquals("оценка была ≈ 40 г углеводов · по типу: 14 быстрых, 41 медленных", v.subline)
         assertEquals(55, v.gramsToEnter)
         assertEquals("✅ Ем: 55 г в калькулятор", FoodPhotoCard.actionLabel(FoodPhotoCard.Action.EAT, v.gramsToEnter))
     }
@@ -70,7 +71,7 @@ class FoodPhotoCardTest {
         assertEquals("Съедено", v.chip)
         assertEquals(FoodPhotoCard.Tone.GOOD, v.chipTone)
         assertEquals("40 г отправлены в калькулятор", v.headline)
-        assertEquals("в 12:40, в заметке болюса: фото 123456", v.subline)
+        assertEquals("в 12:40, 10 быстрых, 30 медленных, в заметке болюса: фото 123456", v.subline)
         assertEquals(listOf(FoodPhotoCard.Action.UNDO), v.actions)
     }
 
@@ -124,6 +125,28 @@ class FoodPhotoCardTest {
         assertFalse(entry(FoodPhotoEntry.Status.DECLINED, estimate = null).needsUpload, "declined before upload: never send")
         assertFalse(entry(FoodPhotoEntry.Status.ERROR, estimate = null).needsUpload, "refused: only a retry sends again")
         assertFalse(entry(FoodPhotoEntry.Status.ESTIMATED).needsUpload)
+    }
+
+    @Test
+    fun `the plate splits by each dish's own absorption and lands on the plate's total`() {
+        val e = FoodEstimate.fromJson(serverAnswer)!!
+        assertEquals(CarbSplit(fast = 10, slow = 30), e.split())
+        // Dishes that do not add up to the plate are scaled to it.
+        val scaled = FoodEstimate.fromJson(JSONObject("""{"carbs_g": 70, "absorption": "balanced", "items": [{"name": "пельмени", "carbs_g": 57}, {"name": "соус", "carbs_g": 12, "absorption": "fast"}, {"name": "масло", "carbs_g": 1}]}"""))!!.split()
+        assertEquals(70, scaled.total)
+        assertEquals(12, scaled.fast)
+        assertEquals(58, scaled.balanced)
+        // No dishes: everything is of the plate's type.
+        assertEquals(CarbSplit(slow = 25), FoodEstimate.fromJson(JSONObject("""{"carbs_g": 25, "absorption": "slow"}"""))!!.split())
+        // The owner's own number keeps the proportions.
+        val own = entry(FoodPhotoEntry.Status.ESTIMATED, own = 80.0).splitToEnter!!
+        assertEquals(80, own.total)
+        assertEquals(20, own.fast)
+        assertEquals(60, own.slow)
+        // The owner's own split wins outright and survives the json file.
+        val corrected = entry(FoodPhotoEntry.Status.ESTIMATED).apply { finalSplit = CarbSplit(fast = 5, balanced = 50); finalGrams = 55.0 }
+        val back = FoodPhotoEntry.listFromJson(JSONObject(FoodPhotoEntry.listToJson(listOf(corrected)).toString())).single()
+        assertEquals(CarbSplit(fast = 5, balanced = 50), back.splitToEnter)
     }
 
     @Test

@@ -111,6 +111,10 @@
     <string name="a11y_current_bg">current blood glucose</string>
     <string name="carb_time_label">Carb time</string>
     <string name="food_type_label">Тип еды</string>
+    <string name="carbs_fast_label">Быстрые</string>
+    <string name="carbs_balanced_label">Обычные</string>
+    <string name="carbs_slow_label">Медленные</string>
+    <string name="food_type_hint">Углеводы по типу: быстрые, обычные, медленные — что это значит</string>
     <string name="food_type_fast">Быстрая</string>
     <string name="food_type_balanced">Обычная</string>
     <string name="food_type_slow">Медленная</string>

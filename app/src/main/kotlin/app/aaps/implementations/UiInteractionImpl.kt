@@ -80,11 +80,14 @@ class UiInteractionImpl @Inject constructor(
         Widget.updateWidget(context, from)
     }
 
-    override fun runWizardDialog(fragmentManager: FragmentManager, carbs: Int?, name: String?) {
+    override fun runWizardDialog(fragmentManager: FragmentManager, carbs: Int?, name: String?, carbsFast: Int, carbsSlow: Int) {
         WizardDialog().also { dialog ->
             dialog.arguments = Bundle().also { bundle ->
                 carbs?.let { bundle.putDouble("carbs_input", carbs.toDouble()) }
-                name?.let { bundle.putString("notes_input", " $name - ${carbs}g") }
+                if (carbsFast > 0) bundle.putDouble("carbs_fast_input", carbsFast.toDouble())
+                if (carbsSlow > 0) bundle.putDouble("carbs_slow_input", carbsSlow.toDouble())
+                val total = (carbs ?: 0) + carbsFast + carbsSlow
+                name?.let { bundle.putString("notes_input", " $name - ${total}g") }
             }
         }.show(fragmentManager, "Food Item")
 

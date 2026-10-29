@@ -1,5 +1,6 @@
 package app.aaps.plugins.aps.openAPSAIMI.food
 
+import app.aaps.core.interfaces.aps.CarbSplit
 import app.aaps.core.keys.StringKey
 import app.aaps.core.keys.interfaces.Preferences
 import okhttp3.MediaType.Companion.toMediaType
@@ -50,9 +51,10 @@ class FoodApi @Inject constructor(private val preferences: Preferences) {
     }
 
     /** Tell the server what the owner decided. [decision] is eaten, declined or undecided (a corrected number, an undo). */
-    fun decision(serverId: String, decision: String, grams: Double?, aapsNote: String?): JSONObject {
+    fun decision(serverId: String, decision: String, grams: Double?, aapsNote: String?, split: CarbSplit? = null): JSONObject {
         check(configured()) { "адрес или токен сервера не заданы в настройках" }
         val json = JSONObject().put("id", serverId).put("decision", decision).put("grams", grams ?: JSONObject.NULL).put("aaps_note", aapsNote ?: JSONObject.NULL)
+            .put("grams_by_type", split?.let { JSONObject().put("fast", it.fast).put("balanced", it.balanced).put("slow", it.slow) } ?: JSONObject.NULL)
         val body = json.toString().toRequestBody("application/json".toMediaType())
         return call(Request.Builder().url("${base()}/v1/decision").header("X-Food-Token", token()).post(body).build())
     }

@@ -1,5 +1,6 @@
 package app.aaps.plugins.aps.openAPSAIMI.food
 
+import app.aaps.core.interfaces.aps.CarbSplit
 import kotlin.math.roundToInt
 
 /**
@@ -46,8 +47,11 @@ object FoodPhotoCard {
                 append("• ").append(it.name)
                 it.portion?.let { p -> append(", ").append(p) }
                 it.carbsG?.let { g -> append(" — ").append(g.roundToInt()).append(" г") }
+                if ((it.carbsG ?: 0.0) > 0) append(", ").append(CarbSplit.label(it.absorption ?: estimate?.absorption ?: CarbSplit.BALANCED))
             }
         }
+        val split = entry.splitToEnter
+        val splitLine = split?.takeIf { it.parts().size > 1 }?.let { "по типу: " + it.describe() }
         val composition = estimate?.let { e ->
             listOfNotNull(
                 absorptionWord(e.absorption),
@@ -77,7 +81,7 @@ object FoodPhotoCard {
                 chip = if (own != null) "Вы поправили" else "Оценено",
                 chipTone = Tone.ACCENT,
                 headline = if (own != null) "${own.roundToInt()} г углеводов — ваша цифра" else estimateLine ?: "Углеводы не названы — укажите сами",
-                subline = if (own != null) estimateLine?.let { "оценка была $it" } else rangeLine,
+                subline = listOfNotNull(if (own != null) estimateLine?.let { "оценка была $it" } else rangeLine, splitLine).joinToString(" · ").ifEmpty { null },
                 items = items, composition = composition, advice = estimate?.advice,
                 problem = entry.error,
                 actions = listOfNotNull(if (grams != null) Action.EAT else null, Action.CORRECT, Action.DECLINE),
@@ -91,6 +95,7 @@ object FoodPhotoCard {
                 headline = grams?.let { "$it г отправлены в калькулятор" } ?: "Съедено без граммов",
                 subline = listOfNotNull(
                     entry.decidedAtEpochMs?.let { "в ${timeString(it)}" },
+                    split?.takeIf { it.parts().size > 1 }?.describe(),
                     if (own != null && estimate != null && own.roundToInt() != estimate.carbsG.roundToInt()) "оценка была ≈ ${estimate.carbsG.roundToInt()} г" else null,
                     "в заметке болюса: фото ${entry.shortId}"
                 ).joinToString(", "),
@@ -128,7 +133,7 @@ object FoodPhotoCard {
 
     fun actionLabel(action: Action, gramsToEnter: Int?): String = when (action) {
         Action.EAT     -> gramsToEnter?.let { "✅ Ем: $it г в калькулятор" } ?: "✅ Ем"
-        Action.CORRECT -> "✏️ Другое число"
+        Action.CORRECT -> "✏️ Поправить граммы"
         Action.DECLINE -> "✖ Не ем"
         Action.UNDO    -> "↩ Отменить"
         Action.RETRY   -> "↻ Повторить"

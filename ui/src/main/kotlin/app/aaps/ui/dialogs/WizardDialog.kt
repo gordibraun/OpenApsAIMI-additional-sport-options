@@ -34,6 +34,7 @@ import app.aaps.core.data.model.TE
 import app.aaps.core.data.model.TT
 import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.aps.AimiMealAssist
+import app.aaps.core.interfaces.aps.CarbSplit
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.aps.RT
 import app.aaps.core.interfaces.configuration.Config
@@ -124,13 +125,14 @@ class WizardDialog : DaggerDialogFragment() {
     private var calculatedCorrection = 0.0
     private var usePercentage = false
     private var carbsPassedIntoWizard = 0.0
+    private var carbsFastPassedIntoWizard = 0.0
+    private var carbsSlowPassedIntoWizard = 0.0
     private var notesPassedIntoWizard = ""
     private var okClicked: Boolean = false // one shot guards
     private var lastForecastRequiredCarbsOverviewRefresh: Int? = null
     private var disposable: CompositeDisposable = CompositeDisposable()
     private var bolusStep = 0.0
     private var _binding: DialogWizardBinding? = null
-    private var suppressFoodTypeCallbacks = false
     private var aimiDetailsExpanded = false
     private var dialogInitialized = false
     private var initializationPending = false
@@ -169,6 +171,8 @@ class WizardDialog : DaggerDialogFragment() {
         super.onSaveInstanceState(savedInstanceState)
         savedInstanceState.putDouble("bg_input", binding.bgInput.value)
         savedInstanceState.putDouble("carbs_input", binding.carbsInput.value)
+        savedInstanceState.putDouble("carbs_fast_input", binding.carbsFastInput.value)
+        savedInstanceState.putDouble("carbs_slow_input", binding.carbsSlowInput.value)
         savedInstanceState.putDouble("correction_input", binding.correctionInput.value)
         savedInstanceState.putDouble("carb_time_input", binding.carbTimeInput.value)
         savedInstanceState.putString("food_type", currentSelectedFoodType())
@@ -179,6 +183,8 @@ class WizardDialog : DaggerDialogFragment() {
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         this.arguments?.let { bundle ->
             carbsPassedIntoWizard = bundle.getDouble("carbs_input")
+            carbsFastPassedIntoWizard = bundle.getDouble("carbs_fast_input")
+            carbsSlowPassedIntoWizard = bundle.getDouble("carbs_slow_input")
             notesPassedIntoWizard = bundle.getString("notes_input") ?: ""
         }
 
@@ -221,6 +227,14 @@ class WizardDialog : DaggerDialogFragment() {
             savedInstanceState?.getDouble("carbs_input")
                 ?: carbsPassedIntoWizard, 0.0, maxCarbs.toDouble(), 1.0, DecimalFormat("0"), false, binding.okcancel.ok, textWatcher
         )
+        binding.carbsFastInput.setParams(
+            savedInstanceState?.getDouble("carbs_fast_input")
+                ?: carbsFastPassedIntoWizard, 0.0, maxCarbs.toDouble(), 1.0, DecimalFormat("0"), false, binding.okcancel.ok, textWatcher
+        )
+        binding.carbsSlowInput.setParams(
+            savedInstanceState?.getDouble("carbs_slow_input")
+                ?: carbsSlowPassedIntoWizard, 0.0, maxCarbs.toDouble(), 1.0, DecimalFormat("0"), false, binding.okcancel.ok, textWatcher
+        )
 
         // If there is no BG using % lower that 100% leads to high BGs
         // because loop doesn't add missing insulin
@@ -262,11 +276,6 @@ class WizardDialog : DaggerDialogFragment() {
         binding.percentUsed.visibility = (calculatedPercentage != 100 || usePercentage).toVisibility()
         // ok button
         binding.okcancel.ok.setOnClickListener {
-            if (carbsNeedFoodType()) {
-                ToastUtils.warnToast(ctx, "Выбери тип углеводов")
-                calculateInsulin()
-                return@setOnClickListener
-            }
             if (okClicked) {
                 aapsLogger.debug(LTag.UI, "guarding: ok already clicked")
             } else {
@@ -349,7 +358,7 @@ class WizardDialog : DaggerDialogFragment() {
             OKDialog.show(
                 requireContext(),
                 rh.gs(R.string.food_type_label),
-                "Тип еды влияет на carb-модель AIMI. Быстрые углеводы всасываются рано и bolus считается осторожнее, обычная еда оставляет базовый режим, медленная растягивает вклад еды."
+                "Три поля — три части одной еды. Быстрые (сахар, сок, белый хлеб) всасываются рано, и болюс на них считается осторожнее; обычная еда идёт базовым режимом; медленная (жир, белок) растягивает вклад еды. Инсулин считается на сумму, а в истории каждая часть становится своей записью углеводов со своим типом, и прогноз усваивает каждую по её кривой."
             )
         }
         binding.wizardAimiLogic.setOnClickListener {
@@ -364,13 +373,14 @@ class WizardDialog : DaggerDialogFragment() {
             updateAimiDetailsVisibility()
         }
         updateAimiDetailsVisibility()
-        setupFoodTypeCheckboxes(savedInstanceState?.getString("food_type"))
         refreshCalculation()
     }
 
     private fun setA11yLabels() {
         binding.bgInputLabel.labelFor = binding.bgInput.editTextId
         binding.carbsInputLabel.labelFor = binding.carbsInput.editTextId
+        binding.carbsFastInputLabel.labelFor = binding.carbsFastInput.editTextId
+        binding.carbsSlowInputLabel.labelFor = binding.carbsSlowInput.editTextId
         binding.correctionInputLabel.labelFor = binding.correctionInput.editTextId
         binding.carbTimeInputLabel.labelFor = binding.carbTimeInput.editTextId
     }
@@ -459,52 +469,18 @@ class WizardDialog : DaggerDialogFragment() {
         if (units == GlucoseUnit.MGDL.asText) decimalFormatter.to0Decimal(value)
         else decimalFormatter.to1Decimal(value * Constants.MGDL_TO_MMOLL)
 
-    private fun setupFoodTypeCheckboxes(savedFoodType: String?) {
-        val listener = CompoundButton.OnCheckedChangeListener { button, isChecked ->
-            if (suppressFoodTypeCallbacks) return@OnCheckedChangeListener
-            if (isChecked) selectOnlyFoodType(button.id) else calculateInsulin()
-        }
-        binding.foodTypeFast.setOnCheckedChangeListener(listener)
-        binding.foodTypeBalanced.setOnCheckedChangeListener(listener)
-        binding.foodTypeSlow.setOnCheckedChangeListener(listener)
-        restoreFoodTypeSelection(savedFoodType)
-    }
+    /** The three fields as one meal. */
+    private fun currentCarbSplit(): CarbSplit = CarbSplit(
+        fast = SafeParse.stringToInt(binding.carbsFastInput.text).coerceAtLeast(0),
+        balanced = SafeParse.stringToInt(binding.carbsInput.text).coerceAtLeast(0),
+        slow = SafeParse.stringToInt(binding.carbsSlowInput.text).coerceAtLeast(0)
+    )
 
-    private fun selectOnlyFoodType(checkedId: Int) {
-        suppressFoodTypeCallbacks = true
-        binding.foodTypeFast.isChecked = checkedId == binding.foodTypeFast.id
-        binding.foodTypeBalanced.isChecked = checkedId == binding.foodTypeBalanced.id
-        binding.foodTypeSlow.isChecked = checkedId == binding.foodTypeSlow.id
-        suppressFoodTypeCallbacks = false
-        calculateInsulin()
-    }
-
-    private fun restoreFoodTypeSelection(savedFoodType: String?) {
-        suppressFoodTypeCallbacks = true
-        binding.foodTypeFast.isChecked = savedFoodType == "fast"
-        binding.foodTypeBalanced.isChecked = savedFoodType == "balanced"
-        binding.foodTypeSlow.isChecked = savedFoodType == "slow"
-        suppressFoodTypeCallbacks = false
-    }
-
-    private fun currentSelectedFoodType(): String? =
-        when {
-            binding.foodTypeFast.isChecked -> "fast"
-            binding.foodTypeSlow.isChecked -> "slow"
-            binding.foodTypeBalanced.isChecked -> "balanced"
-            else -> null
-        }
+    /** The type that sets the dose's tone: the part with a clear majority, else balanced; null without carbs. */
+    private fun currentSelectedFoodType(): String? = currentCarbSplit().takeIf { !it.isEmpty }?.dominantType
 
     private fun currentSelectedFoodTypeLabel(): String =
-        when (currentSelectedFoodType()) {
-            "fast" -> rh.gs(R.string.food_type_fast)
-            "slow" -> rh.gs(R.string.food_type_slow)
-            "balanced" -> rh.gs(R.string.food_type_balanced)
-            else -> "не выбран"
-        }
-
-    private fun carbsNeedFoodType(): Boolean =
-        SafeParse.stringToInt(binding.carbsInput.text) > 0 && currentSelectedFoodType() == null
+        currentCarbSplit().takeIf { !it.isEmpty }?.describe() ?: "нет углеводов"
 
     private fun updateAimiDetailsVisibility() {
         _binding ?: return
@@ -647,7 +623,8 @@ class WizardDialog : DaggerDialogFragment() {
         // Entered values
         val usePercentage = binding.correctionPercent.isChecked
         var bg = SafeParse.stringToDouble(binding.bgInput.text)
-        val carbs = SafeParse.stringToInt(binding.carbsInput.text)
+        val carbSplit = currentCarbSplit()
+        val carbs = carbSplit.total
         val correction = if (!usePercentage) {
             if (Round.roundTo(calculatedCorrection, bolusStep) == SafeParse.stringToDouble(binding.correctionInput.text))
                 calculatedCorrection
@@ -665,6 +642,8 @@ class WizardDialog : DaggerDialogFragment() {
         val carbsAfterConstraint = constraintChecker.applyCarbsConstraints(ConstraintObject(carbs, aapsLogger)).value()
         if (abs(carbs - carbsAfterConstraint) > 0.01) {
             binding.carbsInput.value = 0.0
+            binding.carbsFastInput.value = 0.0
+            binding.carbsSlowInput.value = 0.0
             ToastUtils.warnToast(ctx, R.string.carbs_constraint_applied)
             return
         }
@@ -705,7 +684,8 @@ class WizardDialog : DaggerDialogFragment() {
             forecastRequiredCarbs = forecastRequiredCarbs,
             activityNewInsulinFactor = activityBolusContext?.factor ?: 1.0,
             activityDescription = activityBolusContext?.description,
-            forecastRequiredCarbsSource = if (config.APS) "APS.carbsReq" else "AIMI_FINAL"
+            forecastRequiredCarbsSource = if (config.APS) "APS.carbsReq" else "AIMI_FINAL",
+            carbSplit = carbSplit
         )
 
         wizard?.let { wizard ->

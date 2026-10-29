@@ -23,6 +23,7 @@ import androidx.cardview.widget.CardView
 import androidx.core.content.FileProvider
 import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.lifecycleScope
+import app.aaps.core.interfaces.aps.CarbSplit
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.rx.AapsSchedulers
@@ -297,28 +298,54 @@ class FoodPhotoFragment : DaggerFragment() {
     }
 
     private fun eat(entry: FoodPhotoEntry) {
-        val grams = entry.gramsToEnter ?: return askGrams(entry)
-        store.decide(entry.id, FoodPhotoEntry.Status.EATEN, grams)
-        uiInteraction.runWizardDialog(childFragmentManager, grams.roundToInt(), "фото ${entry.shortId}")
+        val split = entry.splitToEnter?.takeIf { !it.isEmpty } ?: return askGrams(entry)
+        store.decide(entry.id, FoodPhotoEntry.Status.EATEN, split.total.toDouble())
+        // The wizard takes the three parts as its three fields: one bolus, one carb entry per type.
+        uiInteraction.runWizardDialog(childFragmentManager, split.balanced, "фото ${entry.shortId}", carbsFast = split.fast, carbsSlow = split.slow)
     }
 
+    /** The owner's own numbers, one per type; the estimate's split is the starting point. */
     private fun askGrams(entry: FoodPhotoEntry) {
         val ctx = requireContext()
-        val input = EditText(ctx).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-            hint = "граммы углеводов"
-            entry.gramsToEnter?.let { setText(it.roundToInt().toString()) }
-            selectAll()
+        val start = entry.splitToEnter ?: CarbSplit()
+        fun field(label: String, value: Int): Pair<TextView, EditText> {
+            val input = EditText(ctx).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                setText(if (value > 0) value.toString() else "")
+                hint = "0"
+                gravity = Gravity.END
+                setTextColor(textMain)
+            }
+            return text(label, 14f, textMain) to input
         }
-        val wrap = LinearLayout(ctx).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(input, lp()) }
+        val fast = field("Быстрые (сахар, сок, белый хлеб)", start.fast)
+        val balanced = field("Обычные", start.balanced)
+        val slow = field("Медленные (жир, белок)", start.slow)
+        val table = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+            listOf(fast, balanced, slow).forEach { (label, input) ->
+                addView(LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(label, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(input, LinearLayout.LayoutParams(dp(72), ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(text("г", 14f, textDim).apply { setPadding(dp(6), 0, 0, 0) })
+                })
+            }
+        }
         AlertDialog.Builder(ctx)
             .setTitle("Сколько граммов на самом деле?")
-            .setMessage(entry.estimatedGrams?.let { "Оценка по фото: ≈ ${it.roundToInt()} г. Ваше число заменит её и уйдёт на сервер как поправка." } ?: "Сервер ещё не ответил; ваше число будет главным.")
-            .setView(wrap)
+            .setMessage(entry.estimatedGrams?.let { "Оценка по фото: ≈ ${it.roundToInt()} г" + (entry.estimate?.split()?.takeIf { s -> s.parts().size > 1 }?.let { s -> " (" + s.describe() + ")" } ?: "") + ". Ваши числа заменят её и уйдут на сервер как поправка." } ?: "Сервер ещё не ответил; ваши числа будут главными.")
+            .setView(table)
             .setPositiveButton("Сохранить") { _, _ ->
-                val grams = input.text.toString().replace(',', '.').toDoubleOrNull()
-                if (grams == null || grams < 0 || grams > 500) toast("Нужно число от 0 до 500")
-                else store.update(entry.id) { finalGrams = grams; decisionPending = serverId != null; decidedAtEpochMs = System.currentTimeMillis() }
+                fun read(input: EditText) = input.text.toString().trim().ifEmpty { "0" }.toIntOrNull()
+                val f = read(fast.second); val b = read(balanced.second); val sl = read(slow.second)
+                if (f == null || b == null || sl == null || f < 0 || b < 0 || sl < 0 || f + b + sl > 500) toast("Нужны целые числа, вместе не больше 500 г")
+                else {
+                    val split = CarbSplit(f, b, sl)
+                    store.update(entry.id) { finalGrams = split.total.toDouble(); finalSplit = split.takeIf { !it.isEmpty }; decisionPending = serverId != null; decidedAtEpochMs = System.currentTimeMillis() }
+                }
             }
             .setNegativeButton("Отмена", null)
             .show()

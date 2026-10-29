@@ -174,13 +174,47 @@
                 android:layout_height="match_parent">
 
                 <TextView
+                    android:id="@+id/carbs_fast_input_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:labelFor="@id/carbs_fast_input"
+                    android:padding="10dp"
+                    android:text="@string/carbs_fast_label"
+                    android:textAppearance="@style/TextAppearance.AppCompat.Small"
+                    android:textStyle="bold" />
+
+                <app.aaps.core.ui.elements.NumberPicker
+                    android:id="@+id/carbs_fast_input"
+                    android:layout_width="130dp"
+                    android:layout_height="40dp"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginBottom="2dp"
+                    app:customContentDescription="@string/carbs_fast_label" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_vertical"
+                    android:gravity="start"
+                    android:padding="5dp"
+                    android:text="@string/shortgramm"
+                    android:textAppearance="?android:attr/textAppearanceSmall" />
+
+            </TableRow>
+
+            <TableRow
+                android:layout_width="match_parent"
+                android:layout_height="match_parent">
+
+                <TextView
                     android:id="@+id/carbs_input_label"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:labelFor="@id/carbs_input"
                     android:padding="10dp"
-                    android:text="@string/carbs"
+                    android:text="@string/carbs_balanced_label"
                     android:textAppearance="@style/TextAppearance.AppCompat.Small"
                     android:textStyle="bold" />
 
@@ -191,6 +225,40 @@
                     android:layout_gravity="center_horizontal"
                     android:layout_marginBottom="2dp"
                     app:customContentDescription="@string/carbs" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_vertical"
+                    android:gravity="start"
+                    android:padding="5dp"
+                    android:text="@string/shortgramm"
+                    android:textAppearance="?android:attr/textAppearanceSmall" />
+
+            </TableRow>
+
+            <TableRow
+                android:layout_width="match_parent"
+                android:layout_height="match_parent">
+
+                <TextView
+                    android:id="@+id/carbs_slow_input_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:labelFor="@id/carbs_slow_input"
+                    android:padding="10dp"
+                    android:text="@string/carbs_slow_label"
+                    android:textAppearance="@style/TextAppearance.AppCompat.Small"
+                    android:textStyle="bold" />
+
+                <app.aaps.core.ui.elements.NumberPicker
+                    android:id="@+id/carbs_slow_input"
+                    android:layout_width="130dp"
+                    android:layout_height="40dp"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginBottom="2dp"
+                    app:customContentDescription="@string/carbs_slow_label" />
 
                 <TextView
                     android:layout_width="wrap_content"
@@ -370,36 +438,9 @@
                 android:id="@+id/food_type_title"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/food_type_label"
-                android:textAppearance="@style/TextAppearance.AppCompat.Small"
-                android:textStyle="bold" />
+                android:text="@string/food_type_hint"
+                android:textAppearance="@style/TextAppearance.AppCompat.Small" />
 
-            <LinearLayout
-                android:id="@+id/food_type_group"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:orientation="horizontal">
-
-                <CheckBox
-                    android:id="@+id/food_type_fast"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/food_type_fast" />
-
-                <CheckBox
-                    android:id="@+id/food_type_balanced"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/food_type_balanced" />
-
-                <CheckBox
-                    android:id="@+id/food_type_slow"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/food_type_slow" />
-
-            </LinearLayout>
 
         </LinearLayout>
 

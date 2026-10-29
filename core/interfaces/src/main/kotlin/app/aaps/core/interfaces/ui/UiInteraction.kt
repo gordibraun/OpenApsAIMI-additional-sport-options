@@ -51,7 +51,8 @@ interface UiInteraction {
 
     fun updateWidget(context: Context, from: String)
 
-    fun runWizardDialog(fragmentManager: FragmentManager, carbs: Int? = null, name: String? = null)
+    /** [carbs] are the ordinary ones; [carbsFast] and [carbsSlow] fill the wizard's other two fields. */
+    fun runWizardDialog(fragmentManager: FragmentManager, carbs: Int? = null, name: String? = null, carbsFast: Int = 0, carbsSlow: Int = 0)
     fun runLoopDialog(fragmentManager: FragmentManager, showOkCancel: Int)
     fun runProfileSwitchDialog(fragmentManager: FragmentManager, profileName: String? = null)
     fun runTempBasalDialog(fragmentManager: FragmentManager)
