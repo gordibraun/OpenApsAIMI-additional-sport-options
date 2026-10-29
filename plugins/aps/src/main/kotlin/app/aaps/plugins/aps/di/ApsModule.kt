@@ -34,6 +34,9 @@ abstract class ApsModule {
     @ContributesAndroidInjector abstract fun contributesCarbModelFragment(): CarbModelFragment
     @ContributesAndroidInjector abstract fun contributesAimiProfileAdvisorActivity(): AimiProfileAdvisorActivity
     @ContributesAndroidInjector abstract fun contributesCoefficientsDashboardActivity(): app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsDashboardActivity
+    @ContributesAndroidInjector abstract fun contributesFoodPhotoFragment(): app.aaps.plugins.aps.openAPSAIMI.food.FoodPhotoFragment
+    @ContributesAndroidInjector abstract fun contributesFoodUploadWorker(): app.aaps.plugins.aps.openAPSAIMI.food.FoodUploadWorker
+    @ContributesAndroidInjector abstract fun contributesFoodDebugReceiver(): app.aaps.plugins.aps.openAPSAIMI.food.FoodDebugReceiver
 
     @Module
     interface Bindings {

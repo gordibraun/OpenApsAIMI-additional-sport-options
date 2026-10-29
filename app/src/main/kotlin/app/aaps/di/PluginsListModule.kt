@@ -6,6 +6,7 @@ import app.aaps.plugins.aps.carbmodel.CarbModelPlugin
 import app.aaps.plugins.aps.decisiontrace.DecisionTracePlugin
 import app.aaps.plugins.aps.loop.LoopPlugin
 import app.aaps.plugins.aps.openAPSAIMI.OpenAPSAIMIPlugin
+import app.aaps.plugins.aps.openAPSAIMI.food.FoodPhotoPlugin
 import app.aaps.plugins.aps.openAPSAMA.OpenAPSAMAPlugin
 import app.aaps.plugins.aps.openAPSAutoISF.OpenAPSAutoISFPlugin
 import app.aaps.plugins.aps.openAPSSMB.OpenAPSSMBPlugin
@@ -109,6 +110,12 @@ abstract class PluginsListModule {
     @IntoMap
     @IntKey(20)
     abstract fun bindActionsPlugin(plugin: ActionsPlugin): PluginBase
+
+    @Binds
+    @AllConfigs
+    @IntoMap
+    @IntKey(6)
+    abstract fun bindFoodPhotoPlugin(plugin: FoodPhotoPlugin): PluginBase
 
     @Binds
     @AllConfigs
@@ -270,19 +277,19 @@ abstract class PluginsListModule {
     @Binds
     @AllConfigs
     @IntoMap
-    @IntKey(6)
+    @IntKey(7)
     abstract fun bindOpenAPSAIMIPlugin(plugin: OpenAPSAIMIPlugin): PluginBase
 
     @Binds
     @AllConfigs
     @IntoMap
-    @IntKey(7)
+    @IntKey(8)
     abstract fun bindDecisionTracePlugin(plugin: DecisionTracePlugin): PluginBase
 
     @Binds
     @AllConfigs
     @IntoMap
-    @IntKey(8)
+    @IntKey(9)
     abstract fun bindPatternInsightsPlugin(plugin: PatternInsightsPlugin): PluginBase
 
     @Binds

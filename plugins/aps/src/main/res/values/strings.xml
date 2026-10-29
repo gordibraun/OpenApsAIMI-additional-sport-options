@@ -1110,4 +1110,13 @@
     <!-- AI Prefs -->
     <string name="aimi_pref_openai_key_title">Clé API OpenAI</string>
     <string name="aimi_pref_openai_key_summary">Saisissez votre clé (sk-...) pour activer le Coach AIMI.</string>
+
+    <!-- Food by photo -->
+    <string name="food_photo">Еда по фото</string>
+    <string name="food_photo_short">Еда</string>
+    <string name="food_photo_description">Фото тарелки → оценка углеводов с сервера → «Ем» подставляет граммы в калькулятор болюса. Фото — ещё не еда, пока вы не нажмёте «Ем».</string>
+    <string name="food_api_url_title">Адрес сервера оценки</string>
+    <string name="food_api_url_summary">Пришлёт бот по команде /token (вид https://…/food). Работает без VPN.</string>
+    <string name="food_api_token_title">Токен сервера</string>
+    <string name="food_api_token_summary">Из той же команды /token; хранится как пароль</string>
 </resources>
