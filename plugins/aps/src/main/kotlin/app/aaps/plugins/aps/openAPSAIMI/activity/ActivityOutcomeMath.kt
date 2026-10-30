@@ -90,6 +90,8 @@ object ActivityOutcomeMath {
         val basalPercent = if (inputs.basalProfileU > 0.05) (inputs.basalDeliveredU / inputs.basalProfileU * 100).roundToInt() else null
         val rescueCarbs = carbs >= 15.0 && (minG ?: 999) < 80
         val (verdict, why) = when {
+            // A session on record that the pulse never saw (entered for the wrong hour, as on 29.10.2026) says nothing about the tail.
+            session.hr != null && session.hr.effortMinutes < 5 -> Verdict.UNKNOWN to "по пульсу нагрузки не было (усилие ${session.hr.effortMinutes} мин из ${session.durationMinutes})"
             coverage < 0.5                        -> Verdict.UNKNOWN to "мало показаний сахара за окно (${(coverage * 100).roundToInt()} %)"
             below55 > 0                           -> Verdict.TOO_WEAK to "сахар падал ниже 55 ($below55 мин)"
             below70 >= 15                         -> Verdict.TOO_WEAK to "сахар был ниже 70 целых $below70 мин"

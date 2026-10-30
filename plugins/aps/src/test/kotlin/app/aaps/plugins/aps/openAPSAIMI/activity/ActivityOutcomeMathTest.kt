@@ -42,6 +42,14 @@ class ActivityOutcomeMathTest {
         assertEquals(1, report.smbCount)
     }
 
+    @Test fun `a session the pulse never saw gives no verdict, whatever glucose did`() {
+        val idle = sport.copy(hr = ActivityOutcomeMath.HrProfile(68, 80, 2, 0, 60))
+        val inputs = ActivityOutcomeMath.Inputs(glucose(idle) { if (it in 300..330) 62.0 else 110.0 }, listOf(start + minutes(320) to 15.0), emptyList(), 4.1, 6.0)
+        val report = ActivityOutcomeMath.evaluate(idle, inputs)
+        assertEquals(ActivityOutcomeMath.Verdict.UNKNOWN, report.verdict)
+        assertTrue(report.why.contains("по пульсу нагрузки не было"), report.why)
+    }
+
     @Test fun `too few readings give no verdict`() {
         val sparse = ActivityOutcomeMath.Inputs(glucose(sport) { 110.0 }.take(10), emptyList(), emptyList(), 5.0, 6.0)
         assertEquals(ActivityOutcomeMath.Verdict.UNKNOWN, ActivityOutcomeMath.evaluate(sport, sparse).verdict)
