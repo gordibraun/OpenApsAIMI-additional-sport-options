@@ -2,6 +2,7 @@ package app.aaps.combobench.controller
 
 import android.content.ComponentName
 import android.content.Context
+import android.util.Log
 import android.content.Intent
 import android.app.PendingIntent
 import android.os.BatteryManager
@@ -362,9 +363,41 @@ internal class ControllerHost private constructor(context: Context) {
             (if (startOffsetMinutes > 0) "начало через $startOffsetMinutes мин" else "начало сейчас") +
             ". Часы считают её в прогнозе и держат базал не выше $cap %; телефон запишет её, как только будет на связи"
         autonomy.addToJournal(JSONObject().put("at", atEpochMs).put("action", "ACTIVITY").put("text", text).put("mode", autonomy.mode().name))
+        notifyActivity(activity, "Нагрузка записана", "Телефон запишет её при связи.")
         sendEvents()
         refreshFace()
         return runner.wantsToRun()
+    }
+
+    /**
+     * The wearer asked (30.10.2026) to be told plainly when a session is on record: a notice that
+     * vibrates once and stays in the tray, naming the window and the tail, so that a session entered
+     * for the wrong time is seen at once (29.10 one was entered at 16:02 for 17:02 and ran at 21:00).
+     */
+    private fun notifyActivity(activity: ActivityRecord, title: String, trailer: String) {
+        runCatching {
+            val manager = context.getSystemService(android.app.NotificationManager::class.java)
+            manager.createNotificationChannel(
+                android.app.NotificationChannel(ACTIVITY_CHANNEL, "Нагрузка записана", android.app.NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 250, 150, 250)
+                }
+            )
+            val clock = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+            val text = "${ActivityEffect.name(activity.mode).replaceFirstChar { it.uppercase() }} ${activity.durationMinutes} мин: " +
+                "${clock.format(java.util.Date(activity.startEpochMs))}–${clock.format(java.util.Date(activity.activeEndEpochMs))}" +
+                (if (activity.tailMinutes > 0) ", хвост до ${clock.format(java.util.Date(activity.tailEndEpochMs))}" else "") + ". $trailer"
+            manager.notify(
+                ACTIVITY_NOTIFICATION_ID,
+                android.app.Notification.Builder(context, ACTIVITY_CHANNEL)
+                    .setSmallIcon(android.R.drawable.ic_menu_directions)
+                    .setContentTitle(title)
+                    .setContentText(text)
+                    .setStyle(android.app.Notification.BigTextStyle().bigText(text))
+                    .setAutoCancel(true)
+                    .build()
+            )
+        }.onFailure { Log.w("ComboController", "activity notice not shown: ${it.javaClass.simpleName}") }
     }
 
     /**
@@ -386,6 +419,7 @@ internal class ControllerHost private constructor(context: Context) {
             val text = "Нагрузка с телефона: ${ActivityEffect.name(record.mode)} ${record.durationMinutes} мин, начало $start, " +
                 "хвост ${record.tailMinutes} мин. Часы учтут её в прогнозе и не будут корректировать подъём во время неё"
             autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "ACTIVITY").put("text", text).put("mode", autonomy.mode().name))
+            notifyActivity(record, "Нагрузка записана на телефоне", "Часы учтут её.")
         }
     }
 
@@ -912,6 +946,8 @@ internal class ControllerHost private constructor(context: Context) {
         private const val MAX_SENSOR_WAIT_MS = 2 * 60_000L
         private const val SENSOR_WAIT_SLICE_MS = 5_000L
         private const val CARBS_NOTIFICATION_ID = 42
+        private const val ACTIVITY_CHANNEL = "combo-activity"
+        private const val ACTIVITY_NOTIFICATION_ID = 44
         private const val INSULIN_CHANNEL = "combo-insulin-check"
         private const val INSULIN_NOTIFICATION_ID = 43
 

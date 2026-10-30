@@ -281,7 +281,8 @@ class WatchControlActivity : DaggerActivity() {
                                     if (resultCode != android.app.Activity.RESULT_OK) { fallback.run(); return }
                                     if (!settled.compareAndSet(false, true)) return
                                     handler.removeCallbacks(fallback)
-                                    showStatus("Записано на часах: ${if (mode == "WALK") "прогулка" else "спорт"} $duration мин" + (if (start > 0) ", через $start мин" else "") + ". Телефон запишет при связи")
+                                    val startAt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(System.currentTimeMillis() + start * 60_000L))
+                                    showStatus("Записано на часах: ${if (mode == "WALK") "прогулка" else "спорт"} $duration мин с $startAt" + (if (start > 0) " (через $start мин)" else "") + ". Телефон запишет при связи")
                                     handler.postDelayed({ finish() }, 2_200)
                                 }
                             },

@@ -550,6 +550,15 @@ class ComboWatchPlugin @Inject constructor(
                         listValues = listOf(ValueWithUnit.Timestamp(start), ValueWithUnit.TEType(TE.Type.EXERCISE), ValueWithUnit.Minute(duration))
                     ).blockingGet()
                     aapsLogger.info(LTag.PUMP, "combowatch: activity $mode $duration min entered on the watch filed")
+                    val clock = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                    val tail = ActivityPlanCalculator.tailMinutes(mode, duration)
+                    uiInteraction.addNotificationValidFor(
+                        Notification.USER_MESSAGE,
+                        "Нагрузка с часов записана: ${if (mode == "SPORT") "спорт" else "прогулка"} $duration мин, " +
+                            "${clock.format(java.util.Date(start))}–${clock.format(java.util.Date(start + duration * 60_000L))}" +
+                            (if (tail > 0) ", хвост до ${clock.format(java.util.Date(start + (duration + tail) * 60_000L))}" else ""),
+                        Notification.INFO, 60
+                    )
                 }
             }
 

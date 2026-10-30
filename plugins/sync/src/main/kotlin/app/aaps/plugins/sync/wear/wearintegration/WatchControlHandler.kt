@@ -22,6 +22,8 @@ import app.aaps.core.interfaces.queue.Callback
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventMobileToWear
+import app.aaps.core.interfaces.notifications.Notification
+import app.aaps.core.interfaces.rx.events.EventNewNotification
 import app.aaps.core.interfaces.rx.events.EventRefreshOverview
 import app.aaps.core.interfaces.rx.weardata.EventData
 import app.aaps.core.interfaces.utils.DateUtil
@@ -197,11 +199,15 @@ class WatchControlHandler @Inject constructor(
             action = Action.CAREPORTAL, source = Sources.Wear, note = note,
             listValues = listOf(ValueWithUnit.Timestamp(start), ValueWithUnit.Minute(plan.durationMinutes))
         ).blockingGet()
+        val window = "${if (plan.mode == "SPORT") "спорт" else "прогулка"} ${plan.durationMinutes} мин, " +
+            "${dateUtil.timeString(start)}–${dateUtil.timeString(start + T.mins(plan.durationMinutes.toLong()).msecs())}" +
+            (if (plan.tailMinutes > 0) ", хвост до ${dateUtil.timeString(start + T.mins((plan.durationMinutes + plan.tailMinutes).toLong()).msecs())}" else "")
+        rxBus.send(EventNewNotification(Notification(Notification.USER_MESSAGE, "Нагрузка записана: $window", Notification.INFO)))
         rxBus.send(EventRefreshOverview("Watch activity recorded", now = true))
         if (plan.requiredCarbs > 0) {
             enqueueTreatment(node, 0.0, plan.requiredCarbs, now + T.mins(plan.carbsWithinMinutes.toLong()).msecs(),
-                "AIMI_ACTIVITY_V2_CARBS type=${plan.carbType} for=${plan.mode} activity", "Нагрузка и углеводы записаны")
-        } else reply(node, "Готово", "Нагрузка записана на телефоне.")
+                "AIMI_ACTIVITY_V2_CARBS type=${plan.carbType} for=${plan.mode} activity", "Нагрузка и углеводы записаны: $window")
+        } else reply(node, "Готово", "Нагрузка записана на телефоне: $window.")
         loop.invoke("Watch activity recorded", allowNotification = false)
         logger.debug(LTag.WEAR, "Watch activity recorded request=${request.requestId}")
     }

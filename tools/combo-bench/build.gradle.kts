@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 49
-            versionName = "0.49-activities-from-phone"
+            versionCode = 50
+            versionName = "0.50-activity-notice"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }
