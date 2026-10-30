@@ -202,10 +202,15 @@ class ActivityManager @Inject constructor() {
             else                     -> 0.0
         }
         val newInsulinFactor = (1.0 - manual.mode.effectFraction * newInsulinOverlap).coerceIn(0.55, 1.0)
+        // The state - which shortens the insulin's assumed duration and keeps basal off zero in the
+        // loop - belongs to the session itself. Its tail is recovery: insulin works better, nothing
+        // more; with tails of hours (30.10.2026) a tail counted as activity would hold basal up and
+        // shorten DIA through an evening.
+        val active = now in manual.startMs..activeEnd
         val state = when {
-            manual.mode == ManualMode.SPORT && currentPhase > 0.0 -> ActivityState.MODERATE
-            manual.mode == ManualMode.WALK && currentPhase > 0.0  -> ActivityState.LIGHT
-            else                                                  -> ActivityState.REST
+            manual.mode == ManualMode.SPORT && active -> ActivityState.MODERATE
+            manual.mode == ManualMode.WALK && active  -> ActivityState.LIGHT
+            else                                      -> ActivityState.REST
         }
         val phaseDescription = when {
             isUpcoming       -> "старт через ${startOffset}м"
@@ -220,7 +225,9 @@ class ActivityManager @Inject constructor() {
             intensityScore = manual.mode.effectFraction * 10.0 * max(0.3, currentPhase),
             isRecovery = tailRemaining > 0 && now > activeEnd,
             isfMultiplier = 1.0 + effectNow,
-            protectionMode = false,
+            // Through the session and its tail the loop's micro-doses are capped at half (the SMB
+            // clamp keyed on protection mode), as for the automatic recovery; 30.10.2026.
+            protectionMode = currentPhase > 0.0,
             description = "${manual.mode.label} ${manual.durationMinutes}м: $phaseDescription, " +
                 "ISF x${"%.2f".format(1.0 + effectNow)}, basal x${"%.2f".format(1.0 - effectNow)}, " +
                 "новый инсулин x${"%.2f".format(newInsulinFactor)}, " +

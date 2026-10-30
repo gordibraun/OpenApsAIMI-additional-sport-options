@@ -356,7 +356,8 @@ internal class ControllerHost private constructor(context: Context) {
     fun onHeartRate(atEpochMs: Long, bpm: Int) = synchronized(sensingLock) { applySensing(detector.onHeartRate(atEpochMs, bpm)) }
 
     fun onWorkout(atEpochMs: Long, type: String?, running: Boolean) = synchronized(sensingLock) {
-        autonomy.addToJournal(
+        // Health Services also reports plain «not exercising» states (passive, asleep); only a workout, or the end of one we follow, is worth a line.
+        if (running || detector.session?.let { !it.ended && it.fromWorkout } == true) autonomy.addToJournal(
             JSONObject().put("at", atEpochMs).put("action", "WORKOUT")
                 .put("text", "Приложение тренировок: ${if (running) "идёт" else "закончена"} ${type ?: "без типа"}").put("mode", autonomy.mode().name)
         )
@@ -587,9 +588,9 @@ internal class ControllerHost private constructor(context: Context) {
         val known = autonomy.activities()
         snapshot.activities.forEach { window ->
             val record = ActivityRecord(window.startEpochMs, window.durationMinutes, window.mode, window.tailMinutes)
-            val alreadyKnown = known.any {
-                kotlin.math.abs(it.startEpochMs - record.startEpochMs) < 60_000L && it.mode == record.mode && it.durationMinutes == record.durationMinutes
-            }
+            // Same start = same session, whatever the phone's copy says about mode or length: a session
+            // the watch sensed grows here first and the phone's record follows, never the other way.
+            val alreadyKnown = known.any { kotlin.math.abs(it.startEpochMs - record.startEpochMs) < 60_000L }
             if (alreadyKnown) return@forEach
             autonomy.addActivity(record)
             val start = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(record.startEpochMs))

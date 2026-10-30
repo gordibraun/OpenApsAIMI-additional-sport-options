@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 51
-            versionName = "0.51-sensing-and-long-tail"
+            versionCode = 52
+            versionName = "0.52-session-is-own"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }
