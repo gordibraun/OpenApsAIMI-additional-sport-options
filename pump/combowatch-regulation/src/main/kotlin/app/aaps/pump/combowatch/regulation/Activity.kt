@@ -35,13 +35,25 @@ object ActivityEffect {
         .filter { it.startEpochMs <= nowEpochMs + 6 * 60 * 60_000L && it.tailEndEpochMs >= nowEpochMs - 5 * 60_000L }
         .maxByOrNull { it.startEpochMs }
 
-    /** One during the session, fading to nothing over the tail; nothing before and after. */
+    /** One during the session, held for the first part of the tail and then fading to nothing; nothing before and after. */
     fun phaseAt(activity: ActivityRecord, epochMs: Long): Double = when {
         epochMs < activity.startEpochMs       -> 0.0
         epochMs <= activity.activeEndEpochMs  -> 1.0
         epochMs <= activity.tailEndEpochMs && activity.tailMinutes > 0 ->
-            ((activity.tailEndEpochMs - epochMs).toDouble() / (activity.tailMinutes * 60_000L)).coerceIn(0.0, 1.0)
+            ActivityPlanCalculator.tailPhase(activity.mode, activity.tailMinutes, (epochMs - activity.activeEndEpochMs) / 60_000.0)
         else                                  -> 0.0
+    }
+
+    /** The movement's glucose use: one during the session, fading over the short tail only; see ActivityPlanCalculator.useTailMinutes. */
+    fun usePhaseAt(activity: ActivityRecord, epochMs: Long): Double {
+        val useTail = ActivityPlanCalculator.useTailMinutes(activity.mode, activity.durationMinutes)
+        val useTailEnd = activity.activeEndEpochMs + useTail * 60_000L
+        return when {
+            epochMs < activity.startEpochMs      -> 0.0
+            epochMs <= activity.activeEndEpochMs -> 1.0
+            epochMs <= useTailEnd && useTail > 0 -> ((useTailEnd - epochMs).toDouble() / (useTail * 60_000L)).coerceIn(0.0, 1.0)
+            else                                 -> 0.0
+        }
     }
 
     /**
@@ -82,7 +94,7 @@ object ActivityEffect {
         return series.mapIndexed { index, value ->
             if (index == 0) value
             else {
-                accumulated += use * phaseAt(activity, nowEpochMs + index * 300_000L)
+                accumulated += use * usePhaseAt(activity, nowEpochMs + index * 300_000L)
                 (value - accumulated).roundToInt()
             }
         }

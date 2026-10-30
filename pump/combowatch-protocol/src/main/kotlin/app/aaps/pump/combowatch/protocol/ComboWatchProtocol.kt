@@ -381,6 +381,12 @@ data class PumpEvent(
          */
         ACTIVITY,
 
+        /**
+         * The owner answered «не нагрузка» to a session the watch had sensed and recorded: the
+         * phone drops its record of the same start. [timestampEpochMs] is that start.
+         */
+        ACTIVITY_CANCELLED,
+
         /** A type a newer watch sends and this build does not know. Passed over, never an error. */
         UNKNOWN
     }

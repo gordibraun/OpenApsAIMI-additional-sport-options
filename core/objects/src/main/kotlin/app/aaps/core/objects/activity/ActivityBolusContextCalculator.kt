@@ -27,7 +27,7 @@ object ActivityBolusContextCalculator {
         val overlap = when {
             now in window.start..window.activeEnd -> 1.0
             now in (window.activeEnd + 1)..window.tailEnd && window.tailMinutes > 0 ->
-                ((window.tailEnd - now).toDouble() / T.mins(window.tailMinutes).msecs()).coerceIn(0.0, 1.0)
+                ActivityPlanCalculator.tailPhase(window.mode, window.tailMinutes.toInt(), (now - window.activeEnd) / T.mins(1).msecs().toDouble())
             offset in 1..75 -> 1.0
             offset in 76..120 -> ((120 - offset).toDouble() / 45.0).coerceIn(0.0, 1.0)
             else -> 0.0

@@ -1,6 +1,7 @@
 package app.aaps.plugins.aps.openAPSAIMI.activity
 
 import app.aaps.core.data.model.TE
+import app.aaps.core.objects.activity.ActivityPlanCalculator
 import javax.inject.Inject
 import kotlin.math.max
 import kotlin.math.min
@@ -171,8 +172,16 @@ class ActivityManager @Inject constructor() {
         val currentPhase = when {
             now < manual.startMs        -> 0.0
             now <= activeEnd            -> 1.0
-            now <= tailEnd              -> ((tailEnd - now).toDouble() / minutesToMs(manual.tailMinutes).toDouble()).coerceIn(0.0, 1.0)
+            now <= tailEnd              -> ActivityPlanCalculator.tailPhase(manual.mode.label, manual.tailMinutes, (now - activeEnd) / 60_000.0)
             else                        -> 0.0
+        }
+        // The movement's glucose use outlasts the session only by the short tail; see ActivityPlanCalculator.useTailMinutes.
+        val useTail = ActivityPlanCalculator.useTailMinutes(manual.mode.label, manual.durationMinutes)
+        val useTailEnd = activeEnd + minutesToMs(useTail)
+        val useTailRemaining = when {
+            now <= activeEnd  -> useTail
+            now <= useTailEnd -> ((useTailEnd - now) / 60_000.0).roundToInt().coerceAtLeast(0)
+            else              -> 0
         }
         val isUpcoming = startOffset > 0
         val activeRemaining = when {
@@ -224,6 +233,8 @@ class ActivityManager @Inject constructor() {
             activeRemainingMinutes = activeRemaining,
             tailRemainingMinutes = tailRemaining,
             tailTotalMinutes = manual.tailMinutes,
+            useTailTotalMinutes = useTail,
+            useTailRemainingMinutes = useTailRemaining,
             glucoseUseMgdlPer5m = glucoseUse
         )
     }
@@ -294,17 +305,6 @@ class ActivityManager @Inject constructor() {
 
     private fun minutesToMs(minutes: Int): Long = minutes * 60_000L
 
-    private fun tailMinutes(mode: ManualMode, durationMinutes: Int): Int =
-        when (mode) {
-            ManualMode.WALK  -> when {
-                durationMinutes >= 90 -> 30
-                else                  -> 0
-            }
-
-            ManualMode.SPORT -> when {
-                durationMinutes >= 90 -> 180
-                durationMinutes >= 50 -> 120
-                else                  -> 60
-            }
-        }
+    /** One rule for phone, wizard and watch; see ActivityPlanCalculator.tailMinutes. */
+    private fun tailMinutes(mode: ManualMode, durationMinutes: Int): Int = ActivityPlanCalculator.tailMinutes(mode.label, durationMinutes)
 }

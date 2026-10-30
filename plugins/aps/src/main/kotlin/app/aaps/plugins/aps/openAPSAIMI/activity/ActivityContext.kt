@@ -35,5 +35,8 @@ data class ActivityContext(
     val activeRemainingMinutes: Int = 0,
     val tailRemainingMinutes: Int = 0,
     val tailTotalMinutes: Int = 0,
+    /** The movement's glucose use after the session: the short tail the forecast takes off, and what is left of it. */
+    val useTailTotalMinutes: Int = 0,
+    val useTailRemainingMinutes: Int = 0,
     val glucoseUseMgdlPer5m: Double = 0.0
 )

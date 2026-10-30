@@ -541,6 +541,16 @@ class ComboWatchPlugin @Inject constructor(
                         mode, ActivityPlanCalculator.effectPercent(mode), event.activityStartOffsetMinutes ?: 0, duration,
                         ActivityPlanCalculator.tailMinutes(mode, duration), 0, event.note
                     )
+                    // A session the watch sensed grows while it runs and is finished when it ends: the
+                    // same start again means the record is to be brought up to date, not doubled.
+                    val existing = activityRecordAt(start)
+                    if (existing != null) {
+                        if (existing.duration != duration * 60_000L || existing.note != note) {
+                            persistenceLayer.insertOrUpdateTherapyEvent(existing.copy(duration = duration * 60_000L, note = note)).blockingGet()
+                            aapsLogger.info(LTag.PUMP, "combowatch: activity at $start updated to $mode $duration min")
+                        }
+                        return
+                    }
                     persistenceLayer.insertPumpTherapyEventIfNewByTimestamp(
                         therapyEvent = TE(
                             timestamp = start, type = TE.Type.EXERCISE, duration = duration * 60_000L, note = note, glucoseUnit = GlucoseUnit.MGDL,
@@ -562,9 +572,29 @@ class ComboWatchPlugin @Inject constructor(
                 }
             }
 
+            PumpEvent.Type.ACTIVITY_CANCELLED   -> {
+                val start = event.timestampEpochMs - event.timestampEpochMs % 1000
+                val existing = activityRecordAt(start)
+                if (existing == null) {
+                    aapsLogger.debug(LTag.PUMP, "combowatch: no activity record at $start to cancel")
+                } else {
+                    persistenceLayer.invalidateTherapyEvent(
+                        existing.id, Action.CAREPORTAL_REMOVED, Sources.Pump, "Не нагрузка: ответ на часах",
+                        listOf(ValueWithUnit.Timestamp(start), ValueWithUnit.TEType(TE.Type.EXERCISE))
+                    ).blockingGet()
+                    uiInteraction.addNotificationValidFor(Notification.USER_MESSAGE, "Нагрузка отменена: на часах отвечено «не нагрузка»", Notification.INFO, 30)
+                    aapsLogger.info(LTag.PUMP, "combowatch: activity at $start cancelled from the watch")
+                }
+            }
+
             PumpEvent.Type.UNKNOWN              -> aapsLogger.debug(LTag.PUMP, "combowatch: event ${event.seq} is of a kind this build does not know")
         }
     }
+
+    /** The phone's Activity v2 record that starts at this second, if there is one. */
+    private fun activityRecordAt(start: Long): TE? =
+        persistenceLayer.getTherapyEventDataFromTime(start - 2_000L, TE.Type.EXERCISE, true)
+            .firstOrNull { it.isValid && it.note?.startsWith("AIMI_ACTIVITY_V2 ") == true && Math.abs(it.timestamp - start) < 2_000L }
 
     /** One line for the link's log on the owner's screen; null for an event not worth one. */
     private fun describe(event: PumpEvent): String? = when (event.type) {
@@ -579,6 +609,7 @@ class ComboWatchPlugin @Inject constructor(
         PumpEvent.Type.WATCH_NOTE           -> "часы сами: ${event.note}"
         PumpEvent.Type.CARBS                -> "часы: углеводы ${event.carbsGrams} г"
         PumpEvent.Type.ACTIVITY             -> "часы: нагрузка ${if (event.activityMode == "SPORT") "спорт" else "прогулка"} ${event.activityDurationMinutes} мин"
+        PumpEvent.Type.ACTIVITY_CANCELLED   -> "часы: нагрузка отменена (ответ «не нагрузка»)"
         else                                -> null
     }
 

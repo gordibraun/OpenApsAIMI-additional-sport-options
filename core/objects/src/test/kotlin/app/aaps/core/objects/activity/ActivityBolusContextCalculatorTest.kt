@@ -17,7 +17,9 @@ class ActivityBolusContextCalculatorTest {
     }
 
     @Test fun tailAndDistantStartTaper() {
-        assertEquals(0.85, ActivityBolusContextCalculator.calculate(listOf(event(-60, "SPORT", 60)), now)!!.factor, 0.0001)
+        // Half an hour into a sport tail the cut is still held in full; half-way through the fade of an eight-hour tail it is half.
+        assertEquals(0.7, ActivityBolusContextCalculator.calculate(listOf(event(-60, "SPORT", 60)), now)!!.factor, 0.0001)
+        assertEquals(0.85, ActivityBolusContextCalculator.calculate(listOf(event(-300, "SPORT", 480)), now)!!.factor, 0.0001)
         assertEquals(0.9, ActivityBolusContextCalculator.calculate(listOf(event(105, "SPORT")), now)!!.factor, 0.0001)
     }
 

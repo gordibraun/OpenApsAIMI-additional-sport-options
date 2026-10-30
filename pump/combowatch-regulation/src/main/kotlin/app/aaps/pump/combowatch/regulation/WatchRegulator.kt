@@ -355,10 +355,22 @@ class WatchRegulator {
         // the activity uses. The same cap here, so that the watch alone treats it the same way.
         ActivityEffect.current(inputs.delivery.activities, now)?.let { activity ->
             val factor = ActivityEffect.newInsulinFactor(activity, now)
-            if (factor < 1.0 - 1e-3) {
+            // The night after sport (owner's word, 30.10.2026): through the tail, from 22 to 7, no more than 80 %.
+            val hourNow = inputs.hourOfDay(now)
+            val nightAfterSport = activity.mode == "SPORT" && now > activity.activeEndEpochMs && (hourNow >= 22 || hourNow < 7)
+            val capFraction = if (nightAfterSport) min(factor, 0.8) else factor
+            if (capFraction < 1.0 - 1e-3) {
                 val startsIn = ((activity.startEpochMs - now) / 60_000.0).roundToInt()
-                val phase = if (startsIn > 0) "через $startsIn мин" else "идёт"
-                caps += Cap(factor, Rule.ACTIVITY, "$glucoseText: нагрузка (${ActivityEffect.name(activity.mode)} ${activity.durationMinutes} мин, $phase) — базал не выше ${percentOf(factor)} %")
+                val phase = when {
+                    startsIn > 0                       -> "через $startsIn мин"
+                    now <= activity.activeEndEpochMs   -> "идёт"
+                    else                               -> "хвост"
+                }
+                caps += Cap(
+                    capFraction, Rule.ACTIVITY,
+                    "$glucoseText: нагрузка (${ActivityEffect.name(activity.mode)} ${activity.durationMinutes} мин, $phase) — базал ${percentOf(capFraction)} %" +
+                        (if (nightAfterSport) ", ночь после спорта: не выше 80 %" else "")
+                )
             }
         }
 

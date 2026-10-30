@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Sensing a walk or a sport session: heart rate (also in the background) and the fitness app's workouts. -->
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
+    <uses-permission android:name="android.permission.BODY_SENSORS_BACKGROUND" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application android:name=".BenchApplication" android:label="Combo: стенд" android:allowBackup="false"
         android:dataExtractionRules="@xml/no_backup" android:icon="@android:drawable/ic_menu_info_details"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
@@ -19,6 +24,11 @@
         <activity android:name=".ManualPumpSetupActivity" android:exported="false" />
         <activity android:name=".ControlLogActivity" android:exported="false" />
         <activity android:name=".TriageActivity" android:exported="false" />
+        <activity android:name=".controller.ActivitySensingPermissionActivity" android:exported="false" />
+        <!-- Health Services hands heart rate and workout state to this service; only Health Services may bind it. -->
+        <service android:name=".controller.ActivityDetectionService" android:exported="true"
+            android:permission="com.google.android.wearable.healthservices.permission.PASSIVE_DATA_BINDING" />
+        <receiver android:name=".controller.ActivityAnswerReceiver" android:exported="false" />
         <service android:name="app.aaps.combobench.PairingForegroundService" android:exported="false" android:foregroundServiceType="connectedDevice" />
         <service android:name=".BenchListener" android:exported="true">
             <intent-filter>

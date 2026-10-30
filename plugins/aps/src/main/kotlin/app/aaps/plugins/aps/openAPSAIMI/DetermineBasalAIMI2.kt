@@ -245,6 +245,8 @@ class DetermineBasalaimiSMB2 @Inject constructor(
     private var tddPerHour = 0.0f
     private var tdd24HrsPerHour = 0.0f
     private var hourOfDay: Int = 0
+    /** Set each run from the activity context: the tail of a sport session at night; see the activity block. */
+    private var nightAfterSport: Boolean = false
     private var weekend: Int = 0
     private var recentSteps5Minutes: Int = 0
     private var recentSteps10Minutes: Int = 0
@@ -2886,14 +2888,16 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         val activeEnd = start + activeRemaining
         if (activeRemaining > 0 && minute <= activeEnd) return 1.0
 
-        val tailRemaining = activityContext.tailRemainingMinutes.coerceAtLeast(0)
+        // Glucose use outlasts the session only by the short tail; the long tail (insulin working
+        // better) is in the ISF, basal and new-insulin factors, not here.
+        val tailRemaining = activityContext.useTailRemainingMinutes.coerceAtLeast(0)
         if (tailRemaining <= 0) return 0.0
 
         val tailMinute = (minute - activeEnd).coerceAtLeast(0)
         if (tailMinute > tailRemaining) return 0.0
 
-        val startingPhase = if (activeRemaining == 0 && activityContext.startOffsetMinutes <= 0) {
-            activityContext.currentPhase.coerceIn(0.0, 1.0)
+        val startingPhase = if (activeRemaining == 0 && activityContext.startOffsetMinutes <= 0 && activityContext.useTailTotalMinutes > 0) {
+            (tailRemaining.toDouble() / activityContext.useTailTotalMinutes.toDouble()).coerceIn(0.0, 1.0)
         } else {
             1.0
         }
@@ -4331,13 +4335,22 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // Reduire la basale SI activité significative (évite accumulation IOB)
         // Light: 100%, Moderate: 80%, Intense: 60%
         val anyMealModeActive = mealTime || bfastTime || lunchTime || dinnerTime || highCarbTime
-        val basalFactor = if (activityContext.manualMode != null && activityContext.newInsulinFactor < 0.999) {
+        var basalFactor = if (activityContext.manualMode != null && activityContext.newInsulinFactor < 0.999) {
             activityContext.newInsulinFactor.toFloat().coerceIn(0.55f, 1.0f)
         } else when (activityContext.state) {
             ActivityState.REST -> 1.0f
             ActivityState.LIGHT -> 1.0f
             ActivityState.MODERATE -> if (anyMealModeActive) 0.9f else 0.8f
             ActivityState.INTENSE -> if (anyMealModeActive) 0.8f else 0.6f
+        }
+        // The night after sport (owner's word, 30.10.2026): through the tail of a sport session, from
+        // 22 to 7, the pump stays at 80 % at most and no micro-dose is given. The night of 29/30.10
+        // brought a two-hour low six hours after an evening session.
+        val hourNow = Calendar.getInstance().apply { timeInMillis = currentTime }.get(Calendar.HOUR_OF_DAY)
+        nightAfterSport = activityContext.manualMode == "SPORT" && activityContext.isRecovery && (hourNow >= 22 || hourNow < 7)
+        if (nightAfterSport) {
+            basalFactor = kotlin.math.min(basalFactor, 0.8f)
+            consoleLog.add("Ночь после спорта: базал не выше 80 %, микродозы выключены (хвост ещё ${activityContext.tailRemainingMinutes} мин)")
         }
         if (basalFactor < 1.0f) {
             this.basalaimi *= basalFactor
@@ -5215,7 +5228,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 
         val enableSMB = enablesmb(
             profile,
-            microBolusAllowed,
+            microBolusAllowed && !nightAfterSport,
             mealData,
             target_bg,
             mealModeActive,

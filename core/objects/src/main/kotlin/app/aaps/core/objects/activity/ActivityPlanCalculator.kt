@@ -64,7 +64,40 @@ object ActivityPlanCalculator {
         )
     }
 
+    /**
+     * How long after a session insulin keeps working better - the tail in which the loop's ISF is
+     * raised, basal and new insulin cut, micro-doses capped and the watch alone adds no insulin.
+     * Lengthened 30.10.2026 at the owner's word: the night of 29/30.10 brought a two-hour low six
+     * hours after an evening session whose tail had ended four hours earlier. Physiology puts the
+     * effect at 8–24 h after hard exercise; this stays on the cautious side of that.
+     */
     fun tailMinutes(mode: String, durationMinutes: Int): Int =
+        when (mode) {
+            "SPORT" -> if (durationMinutes >= 50) 480 else 360
+            else    -> when {
+                durationMinutes >= 90 -> 180
+                durationMinutes >= 30 -> 120
+                else                  -> 60
+            }
+        }
+
+    /** The first part of the tail in which the effect holds in full before it fades. */
+    fun tailHoldMinutes(mode: String): Int = if (mode == "SPORT") 60 else 30
+
+    /** The insulin effect inside the tail: full for the hold, then fading in a straight line to nothing at the tail's end. */
+    fun tailPhase(mode: String, tailMinutes: Int, minutesIntoTail: Double): Double {
+        if (tailMinutes <= 0 || minutesIntoTail < 0.0 || minutesIntoTail >= tailMinutes) return 0.0
+        val hold = tailHoldMinutes(mode).coerceAtMost(tailMinutes)
+        if (minutesIntoTail <= hold) return 1.0
+        return (1.0 - (minutesIntoTail - hold) / (tailMinutes - hold).toDouble()).coerceIn(0.0, 1.0)
+    }
+
+    /**
+     * How long after the session the movement itself still takes glucose off the forecast: the
+     * short tail of before. The long [tailMinutes] is about insulin working better, not about
+     * glucose being burnt, so forecasts and carbohydrate advice keep this one.
+     */
+    fun useTailMinutes(mode: String, durationMinutes: Int): Int =
         when (mode) {
             "SPORT" -> when {
                 durationMinutes >= 90 -> 180
@@ -72,10 +105,7 @@ object ActivityPlanCalculator {
                 else                  -> 60
             }
 
-            else -> when {
-                durationMinutes >= 90 -> 30
-                else                  -> 0
-            }
+            else    -> if (durationMinutes >= 90) 30 else 0
         }
 
     fun note(
@@ -125,12 +155,14 @@ object ActivityPlanCalculator {
         require(duration in setOf(30, 50, 90) && startOffset in setOf(0, 20, 30, 50, 60))
         val effectPercent = effectPercent(mode)
         val tail = tailMinutes(mode, duration)
-        val windowEnd = startOffset + duration + tail
+        // Forecast, deficits and carbohydrate advice follow the movement's glucose use, i.e. the short tail.
+        val useTail = useTailMinutes(mode, duration)
+        val windowEnd = startOffset + duration + useTail
         val glucoseUse = activityGlucoseUseMgdlPer5m(mode, effectPercent, basal, isf)
         val minSteps = (windowEnd / 5).coerceAtLeast(48)
         val base = forecast.ifEmpty { List(48) { currentBg } }
         val baseForecast = base + List((minSteps - base.size).coerceAtLeast(0)) { base.last() }
-        val adjustedForecast = activityAdjustedForecast(baseForecast, startOffset, duration, tail, glucoseUse)
+        val adjustedForecast = activityAdjustedForecast(baseForecast, startOffset, duration, useTail, glucoseUse)
         val forecastPoints = adjustedForecast.mapIndexed { index, value -> ((index + 1) * 5) to value }
         val minPoint = forecastPoints
             .filter { (minute, _) -> minute in max(5, startOffset)..windowEnd }
@@ -188,7 +220,7 @@ object ActivityPlanCalculator {
             else -> 15
         }
         val within = if (requiredCarbs > 0) ((firstRiskMinute ?: forecastMinMinute) - carbLead).coerceIn(0, windowEnd) else 0
-        val activityEquivalentCarbs = if (csf > 0.0) activityTotalUseMgdl(startOffset, duration, tail, glucoseUse) / csf else 0.0
+        val activityEquivalentCarbs = if (csf > 0.0) activityTotalUseMgdl(startOffset, duration, useTail, glucoseUse) / csf else 0.0
 
         return Plan(
             mode = mode,

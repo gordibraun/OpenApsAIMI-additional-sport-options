@@ -117,6 +117,17 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
         )
     }
 
+    /** Take an activity out, by its start; nothing happens when there is none. */
+    @Synchronized fun removeActivity(startEpochMs: Long) {
+        val kept = activities().filter { kotlin.math.abs(it.startEpochMs - startEpochMs) >= 60_000L }
+        files.write(
+            ACTIVITY_FILE,
+            JSONObject().put("activities", JSONArray().apply {
+                kept.forEach { put(JSONObject().put("start", it.startEpochMs).put("minutes", it.durationMinutes).put("mode", it.mode).put("tail", it.tailMinutes)) }
+            })
+        )
+    }
+
     // ---- carbohydrates entered on the watch ---------------------------------------------------------
 
     @Synchronized fun carbs(): List<CarbsRecord> = runCatching {

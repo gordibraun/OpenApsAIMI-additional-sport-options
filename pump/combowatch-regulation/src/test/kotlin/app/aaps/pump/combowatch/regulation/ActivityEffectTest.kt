@@ -14,21 +14,25 @@ class ActivityEffectTest {
         val sport = ActivityRecord(now, 90, "SPORT")
         assertThat(walk.effectFraction).isWithin(1e-9).of(0.20)
         assertThat(sport.effectFraction).isWithin(1e-9).of(0.30)
-        assertThat(walk.tailMinutes).isEqualTo(0)
-        assertThat(ActivityRecord(now, 90, "WALK").tailMinutes).isEqualTo(30)
-        assertThat(sport.tailMinutes).isEqualTo(180)
-        assertThat(ActivityRecord(now, 30, "SPORT").tailMinutes).isEqualTo(60)
+        assertThat(walk.tailMinutes).isEqualTo(120)
+        assertThat(ActivityRecord(now, 90, "WALK").tailMinutes).isEqualTo(180)
+        assertThat(sport.tailMinutes).isEqualTo(480)
+        assertThat(ActivityRecord(now, 30, "SPORT").tailMinutes).isEqualTo(360)
     }
 
     @Test fun `the pump is kept down from an hour before the start to the end, fading with the tail`() {
-        val sport = ActivityRecord(now + minutes(30), 50, "SPORT")   // starts in half an hour, 50 min, tail 120
+        val sport = ActivityRecord(now + minutes(30), 50, "SPORT")   // starts in half an hour, 50 min, tail 480 with an hour's hold
         assertThat(ActivityEffect.newInsulinFactor(sport, now)).isWithin(1e-9).of(0.7)                 // upcoming within 75 min
         assertThat(ActivityEffect.newInsulinFactor(sport, now - minutes(60))).isWithin(1e-9).of(0.8)   // 90 min before: two thirds of the cut already
         assertThat(ActivityEffect.newInsulinFactor(sport, now - minutes(100))).isWithin(1e-9).of(1.0)  // 130 min before: nothing yet
         assertThat(ActivityEffect.newInsulinFactor(sport, now + minutes(60))).isWithin(1e-9).of(0.7)   // during
-        assertThat(ActivityEffect.phaseAt(sport, now + minutes(80 + 60))).isWithin(1e-9).of(0.5)        // half-way through the tail
-        assertThat(ActivityEffect.newInsulinFactor(sport, now + minutes(80 + 60))).isWithin(1e-9).of(0.85)
-        assertThat(ActivityEffect.phaseAt(sport, now + minutes(80 + 121))).isEqualTo(0.0)
+        assertThat(ActivityEffect.phaseAt(sport, now + minutes(80 + 60))).isWithin(1e-9).of(1.0)        // an hour into the tail: still held in full
+        assertThat(ActivityEffect.newInsulinFactor(sport, now + minutes(80 + 60))).isWithin(1e-9).of(0.7)
+        assertThat(ActivityEffect.phaseAt(sport, now + minutes(80 + 270))).isWithin(1e-9).of(0.5)       // half-way through the fade
+        assertThat(ActivityEffect.phaseAt(sport, now + minutes(80 + 481))).isEqualTo(0.0)
+        // The movement's glucose use, though, outlasts the session only by the short tail of two hours.
+        assertThat(ActivityEffect.usePhaseAt(sport, now + minutes(80 + 60))).isWithin(1e-9).of(0.5)
+        assertThat(ActivityEffect.usePhaseAt(sport, now + minutes(80 + 121))).isEqualTo(0.0)
     }
 
     @Test fun `glucose use per five minutes is the phone's insulin equivalent plus the movement, within its caps`() {

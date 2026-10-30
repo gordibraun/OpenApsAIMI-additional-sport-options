@@ -335,8 +335,10 @@ class WatchRegulatorTest {
         assertThat(walk.explanation).contains("прогулка")
         fixture.activities = listOf(ActivityRecord(fixture.now, 50, "SPORT"))
         assertThat(fixture.decide().action).isEqualTo(Action.SetTbr(70, 30))
-        // Two hours after a half-hour walk nothing is left of it: the correction is back in charge.
+        // A half-hour walk is followed by a two-hour tail in which the watch adds no insulin; after it the correction is back in charge.
         fixture.activities = listOf(ActivityRecord(fixture.now - 150 * 60_000L, 30, "WALK"))
+        assertThat(fixture.decide().rule).isNotEqualTo(Rule.CORRECTION)
+        fixture.activities = listOf(ActivityRecord(fixture.now - 200 * 60_000L, 30, "WALK"))
         assertThat(fixture.decide().rule).isEqualTo(Rule.CORRECTION)
     }
 

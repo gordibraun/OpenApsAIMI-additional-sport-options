@@ -77,6 +77,17 @@ internal class ControllerHost private constructor(context: Context) {
     /** What the watch keeps for the time it may be on its own. */
     val autonomy = AutonomyStore(files)
 
+    /** Sensing a walk or a sport session from heart rate and the fitness app's workouts; see [ActivityDetector]. */
+    private val detector: ActivityDetector = runCatching {
+        if (files.exists(SENSING_FILE)) ActivityDetector.fromJson(files.read(SENSING_FILE)) else ActivityDetector()
+    }.getOrDefault(ActivityDetector())
+    private val sensingLock = Any()
+
+    init {
+        // Health Services keeps delivering to the service across restarts once registered; asking again is harmless.
+        Thread { runCatching { startSensing() }.onFailure { Log.w(ActivitySensing.TAG, "sensing not started: ${it.javaClass.simpleName}") } }.start()
+    }
+
     private val session = DriverPumpSession(
         context, files,
         onEvent = { event ->
@@ -322,7 +333,173 @@ internal class ControllerHost private constructor(context: Context) {
         // Whoever leads: is insulin doing what the forecasts said? The owner is told when it is not.
         runCatching { checkInsulinEffect(System.currentTimeMillis()) }
             .onFailure { android.util.Log.e("ComboController", "insulin check failed: ${it.javaClass.simpleName}") }
+        runCatching { onSensingTick(System.currentTimeMillis()) }
         return runner.wantsToRun() || runner.needsSettling()
+    }
+
+    // ---- sensing a walk or a sport session ------------------------------------------------------
+
+    /** Register with Health Services, or tell the owner once a day that the sensors are not allowed yet. */
+    fun startSensing() {
+        if (!ActivitySensing.granted(context)) {
+            val askedAt = runCatching { files.read(SENSING_FILE).optLong("permissionAskedAt") }.getOrDefault(0L)
+            if (System.currentTimeMillis() - askedAt > 24 * 60 * 60_000L) {
+                saveSensing { put("permissionAskedAt", System.currentTimeMillis()) }
+                notifySensingPermission()
+            }
+            return
+        }
+        val what = ActivitySensing.register(context)
+        autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", "Распознавание нагрузки включено: $what").put("mode", autonomy.mode().name))
+    }
+
+    fun onHeartRate(atEpochMs: Long, bpm: Int) = synchronized(sensingLock) { applySensing(detector.onHeartRate(atEpochMs, bpm)) }
+
+    fun onWorkout(atEpochMs: Long, type: String?, running: Boolean) = synchronized(sensingLock) {
+        autonomy.addToJournal(
+            JSONObject().put("at", atEpochMs).put("action", "WORKOUT")
+                .put("text", "Приложение тренировок: ${if (running) "идёт" else "закончена"} ${type ?: "без типа"}").put("mode", autonomy.mode().name)
+        )
+        applySensing(detector.onWorkout(atEpochMs, type, running))
+    }
+
+    fun onSensingTick(nowEpochMs: Long) = synchronized(sensingLock) { applySensing(detector.onTick(nowEpochMs)) }
+
+    fun onSensingPermissionLost() {
+        notifySensingPermission()
+    }
+
+    /** The owner's answer on the notice: SPORT or WALK names the session, NONE takes it back everywhere. */
+    fun answerSensedActivity(answer: String, startEpochMs: Long) = synchronized(sensingLock) {
+        val current = detector.session
+        if (current == null || kotlin.math.abs(current.startEpochMs - startEpochMs) > 60_000L) return@synchronized
+        when (answer) {
+            "NONE" -> {
+                detector.decline(System.currentTimeMillis())
+                autonomy.removeActivity(current.startEpochMs)
+                outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY_CANCELLED, current.startEpochMs, pumpSerial = heldPump(), note = "не нагрузка"))
+                autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", "Хозяин ответил: не нагрузка; запись с ${clock(current.startEpochMs)} снята").put("mode", autonomy.mode().name))
+                runCatching { context.getSystemService(android.app.NotificationManager::class.java).cancel(ACTIVITY_NOTIFICATION_ID) }
+                sendEvents()
+                refreshFace()
+            }
+            "SPORT", "WALK" -> {
+                val changed = detector.confirm(answer)
+                val record = ActivityRecord(current.startEpochMs, current.durationMinutes, current.mode)
+                if (changed) {
+                    autonomy.addActivity(record)
+                    outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY, record.startEpochMs, pumpSerial = heldPump(), activityMode = record.mode, activityDurationMinutes = record.durationMinutes, activityStartOffsetMinutes = 0))
+                    sendEvents()
+                }
+                notifyActivity(record, "Нагрузка записана", "Телефон запишет её при связи.")
+                refreshFace()
+            }
+        }
+        saveSensing()
+    }
+
+    private fun applySensing(signals: List<ActivityDetector.Signal>) {
+        if (signals.isEmpty()) { saveSensing(); return }
+        signals.forEach { signal ->
+            when (signal) {
+                is ActivityDetector.Signal.Started  -> {
+                    val record = ActivityRecord(signal.startEpochMs, signal.durationMinutes, signal.mode)
+                    autonomy.addActivity(record)
+                    outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY, record.startEpochMs, pumpSerial = heldPump(), activityMode = record.mode, activityDurationMinutes = record.durationMinutes, activityStartOffsetMinutes = 0))
+                    val text = "Нагрузка замечена часами: ${ActivityEffect.name(record.mode)} с ${clock(record.startEpochMs)} (${signal.why}). " +
+                        "Записана; базал не выше ${(ActivityEffect.newInsulinFactor(record, System.currentTimeMillis()) * 100).toInt()} %, микродоз нет"
+                    autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", text).put("mode", autonomy.mode().name))
+                    notifySensedActivity(record, signal.sure, signal.why)
+                    sendEvents()
+                    refreshFace()
+                }
+                is ActivityDetector.Signal.Extended -> {
+                    val current = detector.session ?: return@forEach
+                    val record = ActivityRecord(signal.startEpochMs, signal.durationMinutes, current.mode)
+                    autonomy.addActivity(record)
+                    outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY, record.startEpochMs, pumpSerial = heldPump(), activityMode = record.mode, activityDurationMinutes = record.durationMinutes, activityStartOffsetMinutes = 0))
+                    sendEvents()
+                }
+                is ActivityDetector.Signal.Ended    -> {
+                    val current = detector.session ?: return@forEach
+                    val record = ActivityRecord(signal.startEpochMs, signal.durationMinutes, current.mode)
+                    autonomy.addActivity(record)
+                    outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY, record.startEpochMs, pumpSerial = heldPump(), activityMode = record.mode, activityDurationMinutes = record.durationMinutes, activityStartOffsetMinutes = 0))
+                    autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", "Нагрузка закончилась: ${ActivityEffect.name(record.mode)} ${record.durationMinutes} мин с ${clock(record.startEpochMs)}; хвост ${record.tailMinutes} мин").put("mode", autonomy.mode().name))
+                    notifyActivity(record, "Нагрузка закончилась", "Хвост учитывается ещё ${record.tailMinutes / 60} ч.")
+                    sendEvents()
+                    refreshFace()
+                }
+            }
+        }
+        saveSensing()
+    }
+
+    private fun saveSensing(extra: JSONObject.() -> Unit = {}) {
+        runCatching {
+            val json = detector.toJson()
+            runCatching { files.read(SENSING_FILE).optLong("permissionAskedAt") }.getOrNull()?.takeIf { it > 0L }?.let { json.put("permissionAskedAt", it) }
+            json.extra()
+            files.write(SENSING_FILE, json)
+        }
+    }
+
+    private fun clock(epochMs: Long): String = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(epochMs))
+
+    /** «Нагрузка?» with the answers as buttons; a workout the fitness app reported needs only a way to deny it. */
+    private fun notifySensedActivity(record: ActivityRecord, sure: Boolean, why: String) {
+        runCatching {
+            val manager = context.getSystemService(android.app.NotificationManager::class.java)
+            manager.createNotificationChannel(
+                android.app.NotificationChannel(ACTIVITY_CHANNEL, "Нагрузка записана", android.app.NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 250, 150, 250)
+                }
+            )
+            fun answer(code: Int, answer: String) = android.app.PendingIntent.getBroadcast(
+                context, code,
+                Intent(context, ActivityAnswerReceiver::class.java).setAction(ActivityAnswerReceiver.ACTION + "." + answer)
+                    .putExtra(ActivityAnswerReceiver.EXTRA_ANSWER, answer).putExtra(ActivityAnswerReceiver.EXTRA_START, record.startEpochMs),
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+            )
+            val title = if (sure) "Нагрузка: ${ActivityEffect.name(record.mode)}" else "Нагрузка? ${ActivityEffect.name(record.mode)}"
+            val text = "С ${clock(record.startEpochMs)}: $why. Записана, базал снижен, микродоз нет." + if (sure) " Если это не нагрузка — отмените." else " Что это было?"
+            val builder = android.app.Notification.Builder(context, ACTIVITY_CHANNEL)
+                .setSmallIcon(android.R.drawable.ic_menu_directions)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(android.app.Notification.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+            if (!sure) {
+                builder.addAction(android.app.Notification.Action.Builder(null, "Спорт", answer(1, "SPORT")).build())
+                builder.addAction(android.app.Notification.Action.Builder(null, "Прогулка", answer(2, "WALK")).build())
+            }
+            builder.addAction(android.app.Notification.Action.Builder(null, "Не нагрузка", answer(3, "NONE")).build())
+            manager.notify(ACTIVITY_NOTIFICATION_ID, builder.build())
+        }.onFailure { Log.w("ComboController", "sensed activity notice not shown: ${it.javaClass.simpleName}") }
+    }
+
+    private fun notifySensingPermission() {
+        runCatching {
+            val manager = context.getSystemService(android.app.NotificationManager::class.java)
+            manager.createNotificationChannel(android.app.NotificationChannel(ACTIVITY_CHANNEL, "Нагрузка записана", android.app.NotificationManager.IMPORTANCE_DEFAULT))
+            val open = android.app.PendingIntent.getActivity(
+                context, 4, Intent(context, ActivitySensingPermissionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+            )
+            val text = "Чтобы часы сами замечали спорт и прогулки, разрешите им пульс и распознавание активности."
+            manager.notify(
+                SENSING_PERMISSION_NOTIFICATION_ID,
+                android.app.Notification.Builder(context, ACTIVITY_CHANNEL)
+                    .setSmallIcon(android.R.drawable.ic_menu_directions)
+                    .setContentTitle("Датчики нагрузки")
+                    .setContentText(text)
+                    .setStyle(android.app.Notification.BigTextStyle().bigText(text))
+                    .setContentIntent(open)
+                    .setAutoCancel(true)
+                    .build()
+            )
+        }
     }
 
     /** Why the watch is not on its own right now, or null when it is. */
@@ -948,6 +1125,8 @@ internal class ControllerHost private constructor(context: Context) {
         private const val CARBS_NOTIFICATION_ID = 42
         private const val ACTIVITY_CHANNEL = "combo-activity"
         private const val ACTIVITY_NOTIFICATION_ID = 44
+        private const val SENSING_PERMISSION_NOTIFICATION_ID = 45
+        private const val SENSING_FILE = "autonomy-activity-sensing.json"
         private const val INSULIN_CHANNEL = "combo-insulin-check"
         private const val INSULIN_NOTIFICATION_ID = 43
 

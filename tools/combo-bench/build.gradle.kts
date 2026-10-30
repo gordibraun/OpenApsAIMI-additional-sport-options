@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 50
-            versionName = "0.50-activity-notice"
+            versionCode = 51
+            versionName = "0.51-sensing-and-long-tail"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }
@@ -46,6 +46,10 @@ dependencies {
     implementation(project(":pump:combowatch-executor"))
     implementation(project(":pump:combowatch-regulation"))
     implementation(libs.com.google.android.gms.playservices.wearable)
+    // Heart rate and the fitness app's workouts, passively, for sensing a walk or a sport session.
+    implementation("androidx.health:health-services-client:1.1.0")
+    // Health Services answers with ListenableFuture, which needs Guava on the compile classpath.
+    implementation(libs.com.google.guava)
     // The controller's complications for the watch face (pump, link, forecast).
     implementation("androidx.wear.watchface:watchface-complications-data-source:1.2.1")
     testImplementation("junit:junit:4.13.2")
