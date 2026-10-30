@@ -40,7 +40,7 @@ class OverviewDecisionStatusTest {
         val result = result(floor = 55.0)
         whenever(fragment.loop.lastRun).thenReturn(Loop.LastRun().apply { constraintsProcessed = result })
         val manualSnapshot = ApsDecisionSnapshot.fromLoop(fragment.loop, fragment.aimiMealAssist, fragment.persistenceLayer, now)
-        assertThat(manualSnapshot.state).isEqualTo(ApsDecisionSnapshot.State.REVIEW_DELIVERY)
+        assertThat(manualSnapshot.state).isEqualTo(ApsDecisionSnapshot.State.WAITING_FOR_TREATMENT)
         assertThat(manualSnapshot.insulin).isNull()
 
         val overview = deliveryOverview(result)

@@ -17,7 +17,8 @@ class PendingWizardTreatmentPersistenceTest {
     private val editor = mockk<SP.Editor>()
     private val acceptedAt = 1_000_000L
     private val pending = PendingWizardTreatment(acceptedAt, acceptedAt, 0.7, 0, 0.0)
-    private fun service() = AimiMealAssistImpl(mockk(relaxed = true), sp)
+    private var now = acceptedAt + 60_000
+    private fun service() = AimiMealAssistImpl(mockk(relaxed = true), sp).apply { nowProvider = { now } }
 
     @BeforeEach fun setUp() {
         every { sp.getString(any<String>(), any()) } answers { values[firstArg<String>()] ?: secondArg<String>() }
@@ -26,13 +27,27 @@ class PendingWizardTreatmentPersistenceTest {
         every { sp.edit(any(), any()) } answers { secondArg<SP.Editor.() -> Unit>().invoke(editor) }
     }
 
-    @Test fun survivesServiceRecreationAndPreventsAnotherTreatment() {
+    @Test fun survivesServiceRecreationAndANewerTreatmentSupersedesIt() {
         assertTrue(service().beginTreatment(pending))
         val restarted = service()
         assertEquals(pending, restarted.pendingTreatment())
-        assertFalse(restarted.beginTreatment(pending.copy(acceptedAt = acceptedAt + 1)))
+        // The owner is never refused a dose over the status of the previous one (30.10.2026).
+        val newer = pending.copy(acceptedAt = acceptedAt + 1)
+        assertTrue(restarted.beginTreatment(newer))
+        assertEquals(newer, restarted.pendingTreatment())
         restarted.clearPendingTreatment()
-        assertEquals(pending, restarted.pendingTreatment())
+        assertEquals(newer, restarted.pendingTreatment())
+    }
+
+    @Test fun pendingTreatmentAgesOutInsteadOfAskingForAManualReview() {
+        val sut = service()
+        sut.beginTreatment(pending)
+        sut.completeTreatment(acceptedAt, acceptedAt, 0.0, false) // outcome unknown: never confirmed
+        now = acceptedAt + 14 * 60_000
+        assertEquals(pending, sut.pendingTreatment())
+        now = acceptedAt + 16 * 60_000
+        assertNull(sut.pendingTreatment())
+        assertNull(service().pendingTreatment(), "an aged-out treatment is gone from storage too")
     }
 
     @Test fun successfulDeliveryWaitsForActualInputInclusion() {
@@ -105,14 +120,14 @@ class PendingWizardTreatmentPersistenceTest {
         assertNull(sut.pendingTreatment())
     }
 
-    @Test fun corruptPersistedStateDoesNotAuthorizeAnotherDose() {
+    @Test fun corruptPersistedStateIsDroppedRatherThanKeptAsAGate() {
         service().beginTreatment(pending)
         values[values.keys.single()] = "not-json"
         val restarted = service()
-        assertNotNull(restarted.pendingTreatment())
-        assertFalse(restarted.beginTreatment(pending))
-        restarted.acknowledgeTreatment(null, null)
-        assertNotNull(restarted.pendingTreatment())
+        assertNull(restarted.pendingTreatment())
+        assertTrue(values.isEmpty(), "the unreadable entry is removed")
+        assertTrue(restarted.beginTreatment(pending))
+        assertEquals(pending, restarted.pendingTreatment())
     }
 
     @Test fun explicitReviewSurvivesRestartAndStillRequiresNewCalculation() {

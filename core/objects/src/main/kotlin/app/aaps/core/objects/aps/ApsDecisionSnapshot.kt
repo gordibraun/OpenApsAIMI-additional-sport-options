@@ -45,19 +45,17 @@ data class ApsDecisionSnapshot(
     val explanation: String
         get() = when (state) {
             State.CURRENT -> "Это результат автоматического расчета APS, не дополнительный ручной болюс."
-            State.WAITING_FOR_TREATMENT -> if (pendingTreatment?.manuallyReviewedAt != null)
-                "Сверка завершена. Жду новый расчёт, который учитывает сверенные записи. Повторять сверку не нужно."
-            else "Жду подтверждение предыдущего ввода инсулина или еды и расчет, который его учел."
-            State.REVIEW_DELIVERY -> buildString {
-                append("Это не продолжающееся обновление: нужна сверка предыдущего ввода.\n\n")
+            State.WAITING_FOR_TREATMENT -> buildString {
+                append("Жду расчёт, который учтёт предыдущий ввод инсулина или еды.")
                 pendingTreatment?.takeIf { it.acceptedAt > 0L }?.let { pending ->
                     val time = DateTimeFormatter.ofPattern("dd.MM HH:mm").withZone(ZoneId.systemDefault())
                         .format(Instant.ofEpochMilli(pending.acceptedAt))
-                    append("Запрос от $time: ${pending.insulin} Е, ${pending.carbs} г. Это запрос, не подтверждение подачи.\n\n")
+                    append(" Ввод от $time: ${pending.insulin} Е, ${pending.carbs} г.")
                 }
-                append("Сравните историю самой помпы с записями инсулина и еды в AAPS. В калькуляторе есть кнопка «Сверить предыдущую дозу». Не подтверждайте сверку, пока записи расходятся.\n\n")
-                append("Повторный болюс через калькулятор заблокирован. Отсутствие ответа не означает, что инсулин не введён. Это не означает остановку автоматического цикла. Если количество углеводов скрыто, это не означает, что углеводы не нужны.")
+                append(" Что подано на самом деле, видно в истории помпы и в журнале лечения.")
             }
+            // No longer produced (the manual review was removed 30.10.2026); kept so old callers compile.
+            State.REVIEW_DELIVERY -> "Предыдущий ввод ещё не учтён в расчёте. Что подано на самом деле, видно в истории помпы и в журнале лечения."
             State.STALE, State.UNAVAILABLE -> "Актуальное решение APS пока недоступно."
         }
 
@@ -74,10 +72,11 @@ data class ApsDecisionSnapshot(
             // Completion time can be newer than a treatment that was absent from the input snapshot.
             val inputTime = run?.constraintsProcessed?.iobData?.firstOrNull()?.time
                 ?: run?.constraintsProcessed?.date ?: 0L
+            // The manual review («сверка») was removed 30.10.2026: a pending dose is a short status, not a
+            // gate; it ages out in the meal assist, and the wizard is held back only by a bolus in flight.
             from(run?.constraintsProcessed, now,
                 pending != null || latestChange > inputTime,
-                pending != null && pending.manuallyReviewedAt == null &&
-                    (pending.acceptedAt <= 0L || now < pending.acceptedAt || now - pending.acceptedAt >= 5 * 60_000L),
+                reviewDelivery = false,
                 carbsInputsCurrent = latestChange <= inputTime &&
                     (pending == null || pending.carbsIncludedIn(run?.constraintsProcessed?.mealData)))
                 .copy(pendingTreatment = pending)

@@ -100,7 +100,7 @@ class ApsDecisionSnapshotTest {
         assertThat(snapshot.insulin).isNull()
     }
 
-    @Test fun persistedUnresolvedTreatmentRemainsBlockedAfterNewCalculation() {
+    @Test fun persistedUnresolvedTreatmentShowsAsPendingAndNeverAsAReviewGate() {
         val loop = mock<Loop>()
         val lastRun = Loop.LastRun().apply { constraintsProcessed = result(0.8) }
         whenever(loop.lastRun).thenReturn(lastRun)
@@ -109,7 +109,7 @@ class ApsDecisionSnapshotTest {
         val persistence = mock<PersistenceLayer>()
         whenever(persistence.getTherapyEventDataFromToTime(any(), any())).thenReturn(Single.just(emptyList()))
         assertThat(ApsDecisionSnapshot.fromLoop(loop, assist, persistence, now).state)
-            .isEqualTo(ApsDecisionSnapshot.State.REVIEW_DELIVERY)
+            .isEqualTo(ApsDecisionSnapshot.State.WAITING_FOR_TREATMENT)
     }
 
     @Test fun freshCarbWarningSurvivesInsulinPendingAndDeliveryReview() {
@@ -136,7 +136,7 @@ class ApsDecisionSnapshotTest {
     @Test fun newerCalculationCanShowCarbsWhileInsulinReceiptIsStillUnknown() {
         val pending = PendingWizardTreatment(now - 600_000, now - 600_000, 0.7, 0, 0.0)
         val snapshot = snapshotWithPendingCarbs(pending, MealData())
-        assertThat(snapshot.state).isEqualTo(ApsDecisionSnapshot.State.REVIEW_DELIVERY)
+        assertThat(snapshot.state).isEqualTo(ApsDecisionSnapshot.State.WAITING_FOR_TREATMENT)
         assertThat(snapshot.insulin).isNull()
         assertThat(snapshot.carbs).isEqualTo(4)
     }
@@ -156,25 +156,23 @@ class ApsDecisionSnapshotTest {
         assertThat(snapshot.insulin).isNull()
     }
 
-    @Test fun reviewNamesTheUnresolvedRequestInsteadOfImplyingBackgroundProgress() {
+    @Test fun pendingRequestIsNamedAsWaitingAndNeverAsksForAManualReview() {
         val pending = PendingWizardTreatment(now - 600_000, now - 600_000, 1.4, now - 600_000, 18.0)
         val snapshot = snapshotWithPendingCarbs(pending, MealData())
         assertThat(snapshot.pendingTreatment).isEqualTo(pending)
-        assertThat(snapshot.statusLabel).isEqualTo("Сверка")
+        assertThat(snapshot.state).isEqualTo(ApsDecisionSnapshot.State.WAITING_FOR_TREATMENT)
+        assertThat(snapshot.statusLabel).isEqualTo("Обновление")
         assertThat(snapshot.explanation).contains("1.4 Е, 18.0 г")
-        assertThat(snapshot.explanation).contains("Это не продолжающееся обновление")
-        assertThat(snapshot.explanation).contains("Не подтверждайте сверку")
-        assertThat(snapshot.explanation).contains("«Сверить предыдущую дозу»")
+        assertThat(snapshot.explanation.lowercase()).doesNotContain("сверк")
         assertThat(snapshot.insulin).isNull()
     }
 
-    @Test fun completedReviewWaitsForCalculationWithoutAskingForAnotherReview() {
+    @Test fun anOldManualReviewMarkChangesNothingAnyMore() {
         val pending = PendingWizardTreatment(now - 600_000, now - 600_000, 1.4, now - 600_000, 18.0,
             manuallyReviewedAt = now - 500)
         val snapshot = snapshotWithPendingCarbs(pending, MealData())
         assertThat(snapshot.state).isEqualTo(ApsDecisionSnapshot.State.WAITING_FOR_TREATMENT)
-        assertThat(snapshot.explanation).contains("Сверка завершена")
-        assertThat(snapshot.explanation).contains("Повторять сверку не нужно")
+        assertThat(snapshot.explanation.lowercase()).doesNotContain("сверк")
         assertThat(snapshot.pendingTreatment).isEqualTo(pending)
         assertThat(snapshot.insulin).isNull()
     }

@@ -32,6 +32,9 @@ class AimiMealAssistImpl @Inject constructor(
         val label: String
     )
 
+    /** The clock, replaceable in tests. */
+    internal var nowProvider: () -> Long = { System.currentTimeMillis() }
+
     private val activeEpisodesRef = AtomicReference<List<AimiMealEpisode>>(emptyList())
     private val lastAcceptedTreatmentAtRef = AtomicLong(0L)
     private val pendingKey = "aimi_pending_wizard_treatment_v1"
@@ -189,18 +192,27 @@ class AimiMealAssistImpl @Inject constructor(
     override fun pendingTreatment(): PendingWizardTreatment? {
         val saved = sp.getString(pendingKey, "")
         if (saved.isEmpty()) return null
-        return try {
+        val pending = try {
             Json.decodeFromString<PendingWizardTreatment>(saved)
         } catch (e: Exception) {
             logger.error("Cannot read pending wizard delivery", e)
-            // Corrupt or unknown persisted delivery must not silently authorize another dose.
-            PendingWizardTreatment(0L, 0L, 0.0, 0L, 0.0)
+            sp.edit(commit = true) { remove(pendingKey) }
+            return null
         }
+        // A dose the loop has not folded in within this long is history, not a gate: the owner asked
+        // (30.10.2026) for the manual «сверка» to go, having never once learned anything from it.
+        val age = nowProvider() - pending.acceptedAt
+        if (pending.acceptedAt <= 0L || age > PENDING_TREATMENT_MAX_AGE_MS) {
+            sp.edit(commit = true) { remove(pendingKey) }
+            logger.debug(LTag.APS, "Pending wizard delivery from ${pending.acceptedAt} let go after ${age / 60_000} min")
+            return null
+        }
+        return pending
     }
 
     @Synchronized
     override fun beginTreatment(treatment: PendingWizardTreatment): Boolean {
-        if (pendingTreatment() != null) return false
+        // A newer dose supersedes the status of the previous one; it never refuses the owner.
         sp.edit(commit = true) { putString(pendingKey, Json.encodeToString(treatment)) }
         markTreatmentAccepted(treatment.acceptedAt)
         return true
@@ -357,5 +369,6 @@ class AimiMealAssistImpl @Inject constructor(
         private const val MAX_ACTIVE_EPISODES = 12
         private const val DOMINANT_TYPE_SHARE = 0.75
         private const val TOP_UP_MEAL_WINDOW_MINUTES = 20L
+        private const val PENDING_TREATMENT_MAX_AGE_MS = 15 * 60_000L
     }
 }

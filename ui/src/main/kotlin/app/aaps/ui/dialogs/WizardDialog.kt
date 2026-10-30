@@ -198,7 +198,7 @@ class WizardDialog : DaggerDialogFragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        binding.deliveryReview.setOnClickListener { reviewPendingDelivery() }
+        binding.deliveryReview.visibility = View.GONE
         aimiDetailsExpanded = savedInstanceState?.getBoolean("aimi_details_expanded") ?: false
         loadCheckedStates()
         processCobCheckBox()
@@ -563,45 +563,12 @@ class WizardDialog : DaggerDialogFragment() {
         }
     }
 
-    @SuppressLint("SetTextI18n")
-    private fun reviewPendingDelivery() {
-        val pending = aimiMealAssist.pendingTreatment() ?: return
-        if (commandQueue.size() > 0 || commandQueue.performing() != null) {
-            OKDialog.show(requireContext(), "Сверка дозы", "Дождитесь завершения обмена с помпой. Запрос ещё может выполняться.")
-            return
-        }
-        val check = android.widget.CheckBox(requireContext()).apply {
-            text = "Я проверил историю на помпе и записи инсулина и еды в AAPS: фактически введённое и съеденное учтено верно."
-            setPadding(24, 16, 24, 16)
-        }
-        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
-            .setTitle("Сверка предыдущего ввода")
-            .setMessage("Запрос от ${dateUtil.dateAndTimeString(pending.acceptedAt)}: ${pending.insulin} Е, ${pending.carbs} г. Это запрос, не доказательство подачи.\n\nОтсутствие ответа не означает, что инсулин не введён. Сначала сравните историю самой помпы с записями AAPS. Подтверждение ниже не вводит инсулин и не изменяет историю; потребуется новый расчёт.")
-            .setView(check)
-            .setNegativeButton(android.R.string.cancel, null)
-            .setPositiveButton("Сверка завершена") { _, _ ->
-                if (check.isChecked && commandQueue.size() == 0 && commandQueue.performing() == null) {
-                    aimiMealAssist.confirmManualTreatmentReview(pending.acceptedAt, dateUtil.now())
-                    calculateInsulin()
-                    rxBus.send(EventRefreshOverview("Wizard delivery review", now = true))
-                }
-            }.create()
-        dialog.setOnShowListener {
-            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).isEnabled = false
-            check.setOnCheckedChangeListener { _, checked -> dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).isEnabled = checked }
-        }
-        dialog.show()
-    }
-
     private fun calculateInsulin() {
         if (_binding == null) return
         if (!dialogInitialized) {
             showCalculationUnavailable("Данные профиля ещё не загружены. Введённые значения сохраняются; расчёт обновится автоматически.")
             return
         }
-        val pendingDelivery = aimiMealAssist.pendingTreatment()
-        binding.deliveryReview.visibility = if (pendingDelivery != null && pendingDelivery.manuallyReviewedAt == null &&
-            dateUtil.now() - pendingDelivery.acceptedAt >= 5 * 60_000L) View.VISIBLE else View.GONE
         val profileStore = activePlugin.activeProfileSource.profile ?: run {
             dialogInitialized = false
             showCalculationUnavailable("Профили пока недоступны. Расчёт обновится после их загрузки.")
@@ -799,10 +766,10 @@ class WizardDialog : DaggerDialogFragment() {
                     binding.totalReason.visibility = View.VISIBLE
                     binding.totalReason.text = "Не удалось прочитать данные для подтверждения дозы. Инсулин не будет отправлен; ошибка записана в журнал."
                 }
-                if (config.APS && wizard.calculatedTotalInsulin > 0.0 && aimiMealAssist.pendingTreatment() != null) {
+                if (config.APS && wizard.calculatedTotalInsulin > 0.0 && commandQueue.bolusInQueue()) {
                     binding.okcancel.ok.isEnabled = false
                     binding.totalReason.visibility = View.VISIBLE
-                    binding.totalReason.text = ApsDecisionSnapshot.fromLoop(loop, aimiMealAssist, persistenceLayer, dateUtil.now()).explanation
+                    binding.totalReason.text = "Предыдущий болюс ещё подаётся. Дождитесь его окончания."
                 }
             } else {
                 // Здесь Не хватает углеводов выводится

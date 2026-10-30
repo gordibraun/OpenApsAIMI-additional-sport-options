@@ -733,7 +733,9 @@ class BolusWizard @Inject constructor(
                 return null
             }
         } else {
-            val pending = givingInsulin && (commandQueue.bolusInQueue() || aimiMealAssist.pendingTreatment() != null)
+            // A dose still in the queue holds a new one back; a dose the loop has not yet folded in does not
+            // (the manual «сверка» that used to follow was removed 30.10.2026 at the owner's request).
+            val pending = givingInsulin && commandQueue.bolusInQueue()
             val constrained = constraintChecker.applyBolusConstraints(ConstraintObject(calculatedTotalInsulin, aapsLogger)).value()
             val currentInputs = currentConfirmationInputs()
             val rejection = confirmationState.rejection(calculationInputs, currentInputs, pending, calculatedAt, now)
