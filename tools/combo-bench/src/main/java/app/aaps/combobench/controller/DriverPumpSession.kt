@@ -552,7 +552,7 @@ internal class DriverPumpSession(
 
             is Pump.Event.QuickBolusInfused    -> {
                 val at = event.timestamp.toEpochMilliseconds()
-                synchronized(boluses) { boluses.add(BolusReceipt(event.bolusId, at, event.bolusAmount)) }
+                synchronized(boluses) { boluses.add(BolusReceipt(event.bolusId, at, event.bolusAmount, quick = true)) }
                 onEvent(PumpEvent(0, PumpEvent.Type.BOLUS_INFUSED, at, bolusId = event.bolusId, bolusTenthsIU = event.bolusAmount, bolusKind = BolusKind.NORMAL))
             }
 

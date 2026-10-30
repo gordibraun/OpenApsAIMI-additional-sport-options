@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 47
-            versionName = "0.47-food-isf"
+            versionCode = 48
+            versionName = "0.48-reconcile-by-amount"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

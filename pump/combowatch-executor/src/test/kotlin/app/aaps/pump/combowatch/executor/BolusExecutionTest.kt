@@ -37,7 +37,8 @@ class BolusExecutionTest {
 
     private fun snapshot() = PumpSnapshot(now, tbrRunning = false, null, null, 90, "FULL_BATTERY", "10392647")
 
-    private fun receipt(tenths: Int = 3, at: Long = now + 5_000) = BolusReceipt(bolusId = 42L, timestampEpochMs = at, tenthsIU = tenths)
+    private fun receipt(tenths: Int = 3, at: Long = now + 5_000, id: Long = 42L, quick: Boolean = false) =
+        BolusReceipt(bolusId = id, timestampEpochMs = at, tenthsIU = tenths, quick = quick)
 
     private fun gate(max: Int = 30) = CommandGate({ now }, { max })
 
@@ -105,6 +106,55 @@ class BolusExecutionTest {
 
         assertFalse(executor.awaitingReconciliation)
         assertEquals(Outcome.DONE, journal.entry("b1")?.outcome)
+    }
+
+    @Test fun `the pump's history settles an unclear bolus by the command's own amount, not the newest entry`() {
+        // 30.10.2026: 5.1 U command, link lost mid-delivery; by the time the watch read the history the
+        // owner had given 3.5 U by hand. The history lists the newer bolus first.
+        val journal = SimpleCommandJournal()
+        val session = RecordingSession { PumpSession.SessionResult.Unknown("link lost") }
+        val executor = ComboExecutor(gate(max = 70), journal, session) { now }
+        executor.execute(bolus("b1", tenths = 51, kind = BolusKind.NORMAL), lease())
+
+        executor.reconcile(
+            snapshot(), bolusesInHistory = listOf(
+                receipt(tenths = 35, at = now + 64_000, id = 934323, quick = true),
+                receipt(tenths = 51, at = now + 13_000, id = 934319)
+            )
+        )
+
+        val entry = journal.entry("b1")
+        assertEquals(Outcome.DONE, entry?.outcome)
+        assertTrue(entry?.reason.orEmpty().contains("51 tenths delivered (bolus 934319)"), entry?.reason.orEmpty())
+    }
+
+    @Test fun `a quick bolus given by hand never settles a command as delivered`() {
+        val journal = SimpleCommandJournal()
+        val session = RecordingSession { PumpSession.SessionResult.Unknown("link lost") }
+        val executor = ComboExecutor(gate(max = 70), journal, session) { now }
+        executor.execute(bolus("b1", tenths = 51, kind = BolusKind.NORMAL), lease())
+
+        executor.reconcile(snapshot(), bolusesInHistory = listOf(receipt(tenths = 51, at = now + 30_000, id = 7, quick = true)))
+
+        assertEquals(Outcome.FAILED, journal.entry("b1")?.outcome)
+    }
+
+    @Test fun `a bolus cut short by the link is matched by time when no entry has the asked amount`() {
+        val journal = SimpleCommandJournal()
+        val session = RecordingSession { PumpSession.SessionResult.Unknown("link lost") }
+        val executor = ComboExecutor(gate(max = 70), journal, session) { now }
+        executor.execute(bolus("b1", tenths = 51, kind = BolusKind.NORMAL), lease())
+
+        executor.reconcile(
+            snapshot(), bolusesInHistory = listOf(
+                receipt(tenths = 20, at = now + 25 * 60_000, id = 9),   // far later: somebody else's
+                receipt(tenths = 16, at = now + 12_000, id = 8)          // ours, interrupted at 1.6 U
+            )
+        )
+
+        val entry = journal.entry("b1")
+        assertEquals(Outcome.DONE, entry?.outcome)
+        assertTrue(entry?.reason.orEmpty().contains("16 tenths delivered (bolus 8), asked 51"), entry?.reason.orEmpty())
     }
 
     @Test fun `the pump's history settles an unclear bolus as not delivered`() {

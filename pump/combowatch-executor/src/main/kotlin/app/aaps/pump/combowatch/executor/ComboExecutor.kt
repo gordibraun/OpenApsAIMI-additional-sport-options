@@ -175,13 +175,21 @@ class ComboExecutor(
         val unresolved = journal.unresolved(excludingId = inFlightId) ?: return
         when (unresolved.kind) {
             CommandKind.DELIVER_BOLUS -> {
-                val delivered = bolusesInHistory.firstOrNull {
-                    it.timestampEpochMs >= unresolved.startedAtEpochMs - PUMP_CLOCK_TOLERANCE_MS
-                }
+                // The history comes newest first and may hold boluses that are not ours: 30.10.2026 a
+                // quick bolus the owner gave by hand a minute after a 5.1 U command was taken for it.
+                // Only standard boluses started around the command count, the one with the command's
+                // amount first, else the earliest (a bolus cut short by the link shows fewer tenths).
+                val started = unresolved.startedAtEpochMs
+                val candidates = bolusesInHistory
+                    .filter { !it.quick && it.timestampEpochMs in (started - PUMP_CLOCK_TOLERANCE_MS)..(started + BOLUS_MATCH_WINDOW_MS) }
+                    .sortedBy { it.timestampEpochMs }
+                val delivered = candidates.firstOrNull { it.tenthsIU == unresolved.bolusTenthsIU } ?: candidates.firstOrNull()
                 if (delivered != null)
                     journal.markFinished(
                         unresolved.id, Outcome.DONE,
-                        "reconciled from pump history: ${delivered.tenthsIU} tenths delivered (bolus ${delivered.bolusId})"
+                        "reconciled from pump history: ${delivered.tenthsIU} tenths delivered (bolus ${delivered.bolusId})" +
+                            (if (delivered.tenthsIU != unresolved.bolusTenthsIU) ", asked ${unresolved.bolusTenthsIU ?: "?"}" else "") +
+                            (if (bolusesInHistory.size > 1) ", ${bolusesInHistory.size} boluses in history" else "")
                     )
                 else
                     journal.markFinished(unresolved.id, Outcome.FAILED, "reconciled from pump history: no bolus recorded")
@@ -214,6 +222,9 @@ class ComboExecutor(
          * minutes of each other and corrects the pump when they drift further.
          */
         const val PUMP_CLOCK_TOLERANCE_MS = 3 * 60_000L
+
+        /** How long after a command started a bolus in the history may still be the one it asked for. */
+        const val BOLUS_MATCH_WINDOW_MS = 20 * 60_000L
 
         private const val RECONCILE_VALID_MS = 10 * 60_000L
     }

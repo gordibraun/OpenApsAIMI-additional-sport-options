@@ -283,24 +283,31 @@ data class ComboResult(
     }
 }
 
-/** A bolus as the pump's history recorded it. [bolusId] is the pump's own id and makes it unique. */
+/**
+ * A bolus as the pump's history recorded it. [bolusId] is the pump's own id and makes it unique.
+ * [quick] marks a quick bolus, given with the pump's own buttons: the remote never produces one, so
+ * it can never be the answer to a command.
+ */
 data class BolusReceipt(
     val bolusId: Long,
     val timestampEpochMs: Long,
-    val tenthsIU: Int
+    val tenthsIU: Int,
+    val quick: Boolean = false
 ) {
 
     fun toJson(): JSONObject = JSONObject()
         .put("bolusId", bolusId)
         .put("timestamp", timestampEpochMs)
         .put("tenthsIU", tenthsIU)
+        .put("quick", quick)
 
     companion object {
 
         fun fromJson(json: JSONObject) = BolusReceipt(
             bolusId = json.getLong("bolusId"),
             timestampEpochMs = json.getLong("timestamp"),
-            tenthsIU = json.getInt("tenthsIU")
+            tenthsIU = json.getInt("tenthsIU"),
+            quick = json.optBoolean("quick", false)
         )
     }
 }
