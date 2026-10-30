@@ -10,6 +10,7 @@
 #
 # Debuggable AAPS builds only (phone and watch). Env: PHONE_SERIAL, WATCH_SERIAL (else detected by
 # ro.build.characteristics), AAPS_PACKAGE, TUNNEL_PORT (4444), WATCH_ADB_PORT (5555), TUNNEL_IDLE_MIN (120).
+# Measured 30.10.2026: ~0.5 MB/s through the phone, i.e. ~30 s for a 12 MB APK.
 set -euo pipefail
 PKG=${AAPS_PACKAGE:-info.nightscout.androidaps}
 LISTEN=${TUNNEL_PORT:-4444}
@@ -64,6 +65,8 @@ case "$cmd" in
     sleep 1; echo "phone: $(status_file "$P")" ;;
   status)
     P=$(phone)
+    adb -s "$P" shell am broadcast -n "$RECEIVER" --es cmd status >/dev/null 2>&1 || true
+    sleep 1
     echo "phone: $(status_file "$P")"
     adb devices | grep "$TUNNEL" || echo "no adb connection to $TUNNEL" ;;
   bootstrap)
