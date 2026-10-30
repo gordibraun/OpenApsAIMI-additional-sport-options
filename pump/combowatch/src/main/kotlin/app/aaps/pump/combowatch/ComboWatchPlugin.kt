@@ -336,7 +336,7 @@ class ComboWatchPlugin @Inject constructor(
                 enact.success = false
                 enact.enacted = false
                 enact.bolusDelivered = 0.0
-                enact.comment = rh.gs(R.string.combowatch_outcome_unknown)
+                enact.comment = rh.gs(R.string.combowatch_bolus_outcome_unknown, requestedTenths / 10.0)
             }
         }
         aapsLogger.debug(LTag.PUMP, "combowatch: bolus ${result.outcome} delivered=${enact.bolusDelivered} ${result.reason ?: ""}")
@@ -344,7 +344,10 @@ class ComboWatchPlugin @Inject constructor(
     }
 
     // Once the watch has started a bolus it runs to its end; there is no channel to interrupt it.
+    // 30.10.2026: a Stop button that did nothing made the owner believe the bolus had been stopped
+    // and give it again by hand on the pump, so the dialog is told not to offer one.
     override fun stopBolusDelivering() = Unit
+    override fun canStopBolusDelivering(): Boolean = false
 
     // ---- not carried by this driver ------------------------------------------------------------
 

@@ -143,6 +143,13 @@ interface Pump {
     fun stopBolusDelivering()
 
     /**
+     * Whether [stopBolusDelivering] can interrupt a bolus this driver has started. A driver that
+     * hands the bolus to another device with no way to call it back answers false, and the progress
+     * dialog then shows no Stop button instead of one that does nothing.
+     */
+    fun canStopBolusDelivering(): Boolean = true
+
+    /**
      * Request a TRB in absolute units [U/h]
      *
      * Driver is responsible for conversion to % if absolute rate is not supported by pump

@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 @Singleton
@@ -71,7 +72,19 @@ class AimiMealAssistImpl @Inject constructor(
         val recommendationBeforeManualCorrection =
             if (activityNewInsulinFactor < 0.999) recommendationBeforeActivity * activityNewInsulinFactor
             else recommendationBeforeActivity
-        val rawRecommendation = max(0.0, recommendationBeforeManualCorrection + manualCorrection)
+        val uncappedRecommendation = max(0.0, recommendationBeforeManualCorrection + manualCorrection)
+        // The protective-carb rule drops a negative base (insulin already on board, a falling sugar) and
+        // credits only the loop's "carbs required" instead - a minimum against a low, usually fewer grams
+        // than that insulin is worth. Left alone, a pre-bolus given minutes before the meal is dosed
+        // twice (30.10.2026: 2.5 U on board, 11 g credited, 5.1 U proposed where the arithmetic said 3.8).
+        // So AIMI may lower the wizard's own arithmetic (protective carbs, food type) but never raise it.
+        val arithmeticBeforeActivity = max(0.0, topUpAdjustedBaseWithoutCarbs + input.wizardInsulinFromCarbs * foodFactor)
+        val arithmeticBeforeManualCorrection =
+            if (activityNewInsulinFactor < 0.999) arithmeticBeforeActivity * activityNewInsulinFactor
+            else arithmeticBeforeActivity
+        val arithmeticRecommendation = max(0.0, arithmeticBeforeManualCorrection + manualCorrection)
+        val cappedByArithmetic = uncappedRecommendation > arithmeticRecommendation + 1e-9
+        val rawRecommendation = min(uncappedRecommendation, arithmeticRecommendation)
         val expectedEventualBg = when {
             netCarbs > 0 && rawRecommendation > 0.0 -> targetBg
             input.carbs > 0                          -> max(targetBg, input.bg)
@@ -111,6 +124,12 @@ class AimiMealAssistImpl @Inject constructor(
                 }
                 if (manualCorrection != 0.0) {
                     append(", ручная коррекция ${"%.2f".format(manualCorrection)}U")
+                }
+                if (cappedByArithmetic) {
+                    append(
+                        ", не выше арифметики калькулятора с полным зачётом инсулина на борту: " +
+                            "${"%.2f".format(uncappedRecommendation)}U -> ${"%.2f".format(arithmeticRecommendation)}U"
+                    )
                 }
                 append(" -> bolus ${"%.2f".format(roundedRecommendation)}U")
             }

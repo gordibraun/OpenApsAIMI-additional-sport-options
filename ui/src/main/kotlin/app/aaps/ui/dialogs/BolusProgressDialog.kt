@@ -12,6 +12,7 @@ import app.aaps.core.data.ue.Sources
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.logging.UserEntryLogger
+import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.pump.BolusProgressData
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.resources.ResourceHelper
@@ -36,8 +37,12 @@ class BolusProgressDialog : DaggerDialogFragment() {
     @Inject lateinit var commandQueue: CommandQueue
     @Inject lateinit var aapsSchedulers: AapsSchedulers
     @Inject lateinit var uel: UserEntryLogger
+    @Inject lateinit var activePlugin: ActivePlugin
 
     private val disposable = CompositeDisposable()
+
+    /** False when the pump driver cannot call a started bolus back: then there is no Stop button to mislead with. */
+    private val canStop: Boolean get() = activePlugin.activePump.canStopBolusDelivering()
 
     private var running = true
     private var helpActivity: TranslatedDaggerAppCompatActivity? = null
@@ -73,6 +78,10 @@ class BolusProgressDialog : DaggerDialogFragment() {
             binding.stop.visibility = View.INVISIBLE
             uel.log(Action.CANCEL_BOLUS, Sources.Overview, BolusProgressData.status)
             commandQueue.cancelAllBoluses(BolusProgressData.id)
+        }
+        if (!canStop) {
+            binding.stop.visibility = View.GONE
+            binding.noStop.visibility = View.VISIBLE
         }
         binding.progressbar.max = 100
         binding.status.text = BolusProgressData.status
@@ -123,7 +132,7 @@ class BolusProgressDialog : DaggerDialogFragment() {
             .observeOn(aapsSchedulers.main)
             .subscribe {
                 aapsLogger.debug(LTag.UI, "StopDeliveryButton enabled=${it.isEnabled}")
-                binding.stop.isEnabled = it.isEnabled
+                binding.stop.isEnabled = it.isEnabled && canStop
             }
     }
 

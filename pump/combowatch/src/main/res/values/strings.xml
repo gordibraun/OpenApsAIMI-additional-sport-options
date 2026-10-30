@@ -7,6 +7,7 @@
     <string name="combowatch_not_supported">Через часы эта команда не передаётся; выполните её в прямом режиме</string>
     <string name="combowatch_awaiting_reconciliation">Исход прошлой команды не выяснен, часы сверяются с помпой</string>
     <string name="combowatch_outcome_unknown">Исход не выяснен: часы сверяются с помпой, повторять команду нельзя</string>
+    <string name="combowatch_bolus_outcome_unknown">Исход болюса %1$.1f ЕД не выяснен: скорее всего, он уже идёт на помпе. Ничего не подавайте повторно: через 1–2 минуты часы сверятся с помпой и запишут поданное. Остановить с телефона нельзя.</string>
     <string name="combowatch_bolus_delivered">Болюс %1$.1f ЕД подан через часы</string>
     <string name="combowatch_bolus_partial">Болюс подан не полностью: %1$.1f ЕД из %2$.1f</string>
     <string name="combowatch_unknown_tbr_detected">На помпе найден неизвестный временный базал %1$d%% (осталось %2$d мин); драйвер на часах его отменил</string>

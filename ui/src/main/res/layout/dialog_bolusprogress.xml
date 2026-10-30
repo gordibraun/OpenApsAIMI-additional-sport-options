@@ -75,6 +75,21 @@
         android:scaleY="5"
         tools:progress="50" />
 
+    <TextView
+        android:id="@+id/no_stop"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:layout_marginTop="20dp"
+        android:layout_marginEnd="10dp"
+        android:layout_marginBottom="20dp"
+        android:gravity="center_horizontal"
+        android:text="@string/bolus_cannot_be_stopped_from_phone"
+        android:textAppearance="?android:attr/textAppearanceMedium"
+        android:textColor="#fd0101"
+        android:visibility="gone"
+        tools:visibility="visible" />
+
     <com.google.android.material.button.MaterialButton
         style="@style/GrayButton"
         android:id="@+id/stop"

@@ -111,6 +111,40 @@ class AimiMealAssistImplTest {
     }
 
     @Test
+    fun `pre-bolus on board is never dosed twice when the loop asks for fewer carbs than it is worth`() {
+        // 30.10.2026 11:05: 2.5 U given by hand 23 min earlier (bolus IOB 2.87), sugar 132 falling 8/5 min,
+        // 50 g slow food, the loop asking for 11 g. Wizard arithmetic 4.36 U = 7.13 (carbs) - 2.77 (rest).
+        val input = baseInput(
+            carbs = 50, requiredCarbs = 11,
+            wizardCalculatedBolus = 4.36, wizardInsulinFromCarbs = 7.13,
+            selectedFoodType = "slow", bg = 132.0, delta = -8.0, bolusIob = 2.87, basalIob = -0.317
+        )
+
+        val decision = sut.evaluate(input)
+
+        // Was 5.10 U: 11 g credited for 2.77 U worth 19 g. Now the arithmetic with the slow-food factor:
+        // -2.77 + 7.13 * 0.92 = 3.79 -> 3.80 U.
+        assertEquals(3.80, decision.recommendedBolus, 1e-9)
+        assertTrue(decision.explanation.contains("не выше арифметики калькулятора"), decision.explanation)
+    }
+
+    @Test
+    fun `cap at wizard arithmetic never raises a lower protective-carb proposal`() {
+        // The loop asks for more carbs than the insulin on board is worth: AIMI's own number stays.
+        val input = baseInput(
+            carbs = 50, requiredCarbs = 30,
+            wizardCalculatedBolus = 4.36, wizardInsulinFromCarbs = 7.13,
+            selectedFoodType = "slow", bg = 132.0, delta = -8.0, bolusIob = 2.87, basalIob = -0.317
+        )
+
+        val decision = sut.evaluate(input)
+
+        // (50 - 30) / 50 * 7.13 * 0.92 = 2.62 -> 2.60 U, below the arithmetic's 3.80.
+        assertEquals(2.60, decision.recommendedBolus, 1e-9)
+        assertTrue(!decision.explanation.contains("не выше арифметики калькулятора"), decision.explanation)
+    }
+
+    @Test
     fun `fast carbs receive reduced carb bolus without prebolus boost`() {
         val balanced = sut.evaluate(
             baseInput(

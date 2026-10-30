@@ -177,6 +177,7 @@
 
     <!--    BolusProgressDialog-->
     <string name="stop_pressed">STOP PRESSED</string>
+    <string name="bolus_cannot_be_stopped_from_phone">This bolus cannot be stopped from the phone: the watch is delivering it. It can be stopped only with the pump\'s own buttons.</string>
 
     <!--QuickWizard-->
     <string name="a11y_only_on_watch">only on watch</string>
