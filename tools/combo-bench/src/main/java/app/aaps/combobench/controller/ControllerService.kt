@@ -249,11 +249,12 @@ class ControllerActivityReceiver : BroadcastReceiver() {
         val duration = intent.getIntExtra("duration", 0).takeIf { it in ALLOWED_DURATIONS } ?: return
         val startOffset = intent.getIntExtra("startOffset", 0).takeIf { it in ALLOWED_START_OFFSETS } ?: return
         val at = intent.getLongExtra("timestamp", 0L).takeIf { it > 0L } ?: System.currentTimeMillis()
-        val regulateNow = runCatching { ControllerHost.get(context).keepActivity(mode, duration, startOffset, intent.getStringExtra("carbType"), at) }
+        val kept = runCatching { ControllerHost.get(context).keepActivity(mode, duration, startOffset, intent.getStringExtra("carbType"), at) }
             .onFailure { Log.e("ComboController", "activity not kept: ${it.javaClass.simpleName}") }
-            .getOrDefault(false)
+        // The watch screen sends this as an ordered broadcast and shows «Записано» only on this answer.
+        if (isOrderedBroadcast) resultCode = if (kept.isSuccess) android.app.Activity.RESULT_OK else android.app.Activity.RESULT_CANCELED
         // With the phone away the basal is adjusted now, not at the next reading - on the service's thread, not here.
-        if (regulateNow) ControllerService.start(context, ControllerService.PATH_GLUCOSE, null)
+        if (kept.getOrDefault(false)) ControllerService.start(context, ControllerService.PATH_GLUCOSE, null)
     }
 
     private companion object {

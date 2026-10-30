@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 48
-            versionName = "0.48-reconcile-by-amount"
+            versionCode = 49
+            versionName = "0.49-activities-from-phone"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

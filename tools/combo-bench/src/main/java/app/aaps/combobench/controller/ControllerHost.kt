@@ -280,6 +280,7 @@ internal class ControllerHost private constructor(context: Context) {
                 autonomy.saveSnapshot(snapshot)
                 // The phone's forecast is what the system expected: kept to check insulin's effect against later.
                 snapshot.phoneForecast?.let { autonomy.addForecastMade(snapshot.madeAtEpochMs, it, byWatch = false) }
+                keepPhoneActivities(snapshot)
             }
         }
         observeLeadership()
@@ -364,6 +365,28 @@ internal class ControllerHost private constructor(context: Context) {
         sendEvents()
         refreshFace()
         return runner.wantsToRun()
+    }
+
+    /**
+     * Walks and sport sessions the phone has on record, however they were entered, kept here too: on
+     * its own the watch then neither corrects the rise of a session nor forgets its tail. 29.10.2026
+     * the phone knew of a session the watch did not, and the watch alone gave three micro-doses into it.
+     */
+    private fun keepPhoneActivities(snapshot: RegulationSnapshot) {
+        if (snapshot.activities.isEmpty()) return
+        val known = autonomy.activities()
+        snapshot.activities.forEach { window ->
+            val record = ActivityRecord(window.startEpochMs, window.durationMinutes, window.mode, window.tailMinutes)
+            val alreadyKnown = known.any {
+                kotlin.math.abs(it.startEpochMs - record.startEpochMs) < 60_000L && it.mode == record.mode && it.durationMinutes == record.durationMinutes
+            }
+            if (alreadyKnown) return@forEach
+            autonomy.addActivity(record)
+            val start = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(record.startEpochMs))
+            val text = "Нагрузка с телефона: ${ActivityEffect.name(record.mode)} ${record.durationMinutes} мин, начало $start, " +
+                "хвост ${record.tailMinutes} мин. Часы учтут её в прогнозе и не будут корректировать подъём во время неё"
+            autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "ACTIVITY").put("text", text).put("mode", autonomy.mode().name))
+        }
     }
 
     /** The owner's bolus limit as the phone last said it, even under a lease that has since run out. */

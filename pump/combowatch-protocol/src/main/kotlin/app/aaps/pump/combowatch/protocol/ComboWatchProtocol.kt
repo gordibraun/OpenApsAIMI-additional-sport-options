@@ -539,11 +539,29 @@ data class RegulationSnapshot(
      * that a meal entered on the watch gets the dose the phone's wizard would give. The forecast
      * keeps [sensitivityMgdlPerU], the run's own.
      */
-    val foodSensitivityMgdlPerU: Double? = null
+    val foodSensitivityMgdlPerU: Double? = null,
+    /**
+     * Walks and sport sessions the phone has on record - its Activity v2 entries, however they were
+     * entered - so that the watch on its own treats them as the phone would: no correction of the
+     * rise during a session, and the tail after it. 29.10.2026 the watch alone gave three micro-doses
+     * into a session the phone had been told of.
+     */
+    val activities: List<ActivityWindow> = emptyList()
 ) {
 
     /** A temporary basal as an absolute rate, and when it was due to end. */
     data class AssumedTbr(val rateUph: Double, val endsAtEpochMs: Long)
+
+    /** A walk or a sport session: when it starts, how long it is, and the tail after it in which its effect fades. */
+    data class ActivityWindow(val startEpochMs: Long, val durationMinutes: Int, val mode: String, val tailMinutes: Int) {
+
+        fun toJson(): JSONObject = JSONObject().put("start", startEpochMs).put("minutes", durationMinutes).put("mode", mode).put("tail", tailMinutes)
+
+        companion object {
+
+            fun fromJson(json: JSONObject) = ActivityWindow(json.getLong("start"), json.getInt("minutes"), json.getString("mode"), json.optInt("tail", 0))
+        }
+    }
 
     /**
      * Whether every number in it is a number. One that is not cannot be written to a message, and
@@ -570,6 +588,7 @@ data class RegulationSnapshot(
             assumedTbr?.let { put("assumedTbr", JSONObject().put("rate", it.rateUph).put("endsAt", it.endsAtEpochMs)) }
             phoneForecast?.let { forecast -> put("phoneForecast", JSONArray().apply { forecast.forEach { put(it) } }) }
             foodSensitivityMgdlPerU?.let { put("foodSensitivity", it) }
+            if (activities.isNotEmpty()) put("activities", JSONArray().apply { activities.forEach { put(it.toJson()) } })
         }
 
     companion object {
@@ -591,7 +610,8 @@ data class RegulationSnapshot(
             insulinRemaining = json.getJSONArray("insulinRemaining").let { array -> List(array.length()) { array.getDouble(it) } },
             assumedTbr = json.optJSONObject("assumedTbr")?.let { AssumedTbr(it.getDouble("rate"), it.getLong("endsAt")) },
             foodSensitivityMgdlPerU = json.optDouble("foodSensitivity").takeIf { it.isFinite() && it > 0.0 },
-            phoneForecast = json.optJSONArray("phoneForecast")?.let { array -> List(array.length()) { array.getInt(it) } }
+            phoneForecast = json.optJSONArray("phoneForecast")?.let { array -> List(array.length()) { array.getInt(it) } },
+            activities = json.optJSONArray("activities")?.let { array -> List(array.length()) { ActivityWindow.fromJson(array.getJSONObject(it)) } } ?: emptyList()
         )
     }
 }

@@ -54,15 +54,23 @@ class WatchControlHandler @Inject constructor(
     private val mealAssist: AimiMealAssist,
     private val mealCalculator: WatchMealCalculator
 ) {
-    private data class Preview(val request: EventData.WatchControlRequest, val plan: ActivityPlanCalculator.Plan?, val wizard: BolusWizard?)
+    private data class Preview(val request: EventData.WatchControlRequest, val plan: ActivityPlanCalculator.Plan?, val wizard: BolusWizard?, val adviceProblem: String? = null)
     private val pending = PendingWatchActions<Preview>()
 
     fun preview(request: EventData.WatchControlRequest) = safely(request.sourceNodeId) {
         require(dateUtil.now() - request.createdAt in -30_000L..90_000L) { "Запрос устарел. Откройте ввод заново." }
         validate(request)
-        val plan = if (request.kind == "ACTIVITY") activityPlan(request) else null
+        // A walk or a sport session is recorded whatever the state of the forecast; only the
+        // carbohydrate advice needs a fresh loop run, and without one it is simply not given.
+        var adviceProblem: String? = null
+        val plan = if (request.kind == "ACTIVITY") {
+            runCatching { activityPlan(request) }.getOrElse { e ->
+                adviceProblem = e.message ?: "нет данных для совета"
+                ActivityPlanCalculator.recordOnly(request.mode, request.duration, request.startOffset, request.carbType)
+            }
+        } else null
         val wizard = if (request.kind == "MEAL") mealCalculator.calculate(request.carbs, request.carbType) else null
-        val token = pending.issue(request.sourceNodeId, request.requestId, dateUtil.now(), Preview(request.copy(), plan, wizard))
+        val token = pending.issue(request.sourceNodeId, request.requestId, dateUtil.now(), Preview(request.copy(), plan, wizard, adviceProblem))
             ?: error("Этот запрос уже обработан. Откройте ввод заново.")
         val summary = when (request.kind) {
             "CARBS" -> "Записать углеводы: ${request.carbs} г.\n${foodLabel(request.carbType)}.\nИнсулин: 0 Е."
@@ -74,7 +82,11 @@ class WatchControlHandler @Inject constructor(
                 "${if (it.mode == "WALK") "Прогулка" else "Спорт"}: ${it.durationMinutes} мин.\n" +
                     "Начало: ${if (it.startOffsetMinutes == 0) "сейчас" else "через ${it.startOffsetMinutes} мин"}.\n" +
                     "Учет после нагрузки: ${it.tailMinutes} мин.\n" +
-                    if (it.requiredCarbs > 0) "Будут записаны ${it.requiredCarbs} г ${if (it.carbType == "fast") "быстрых" else "обычных"} углеводов через ${it.carbsWithinMinutes} мин. Подтвердите только если планируете их принять." else "Дополнительные углеводы по прогнозу не требуются."
+                    (if (it.requiredCarbs > 0) "Будут записаны ${it.requiredCarbs} г ${if (it.carbType == "fast") "быстрых" else "обычных"} углеводов через ${it.carbsWithinMinutes} мин. Подтвердите только если планируете их принять."
+                    else adviceProblem?.let { problem -> "Совет по углеводам недоступен: $problem Нагрузка всё равно будет записана." } ?: "Дополнительные углеводы по прогнозу не требуются.") +
+                    (activitiesOnRecord().takeIf { records -> records.isNotEmpty() }?.let { records ->
+                        "\nЗаменит записанную ранее нагрузку: " + records.joinToString { record -> dateUtil.timeString(record.timestamp) }
+                    } ?: "")
             }
         }
         reply(request.sourceNodeId, "Подтверждение", summary, EventData.WatchControlConfirmed(token))
@@ -93,11 +105,14 @@ class WatchControlHandler @Inject constructor(
             }
         } else if (request.kind == "ACTIVITY") {
             val old = requireNotNull(preview.plan)
-            val current = activityPlan(request)
-            require(current.requiredCarbs == old.requiredCarbs && current.carbsWithinMinutes == old.carbsWithinMinutes) {
-                "Прогноз изменился. Снова выберите нагрузку для нового подтверждения."
+            val current = runCatching { activityPlan(request) }.getOrNull()
+            if (current != null && old.requiredCarbs > 0) {
+                require(current.requiredCarbs == old.requiredCarbs && current.carbsWithinMinutes == old.carbsWithinMinutes) {
+                    "Прогноз изменился. Снова выберите нагрузку для нового подтверждения."
+                }
             }
-            recordActivity(command.sourceNodeId, request, current)
+            // The session is recorded even when the advice cannot be recomputed now; then no carbohydrates are planned.
+            recordActivity(command.sourceNodeId, request, current ?: old.copy(requiredCarbs = 0, carbsWithinMinutes = 0))
         } else {
             val note = if (request.kind == "CARBS") "С часов AIMI_CARB_TYPE type=${request.carbType}" else "С часов"
             enqueueTreatment(command.sourceNodeId, request.insulin, request.carbs, dateUtil.now(), note)
@@ -142,11 +157,6 @@ class WatchControlHandler @Inject constructor(
         }
         val forecast = result.predictions()?.AIMI_FINAL?.map { it.toDouble() }.orEmpty()
         require(forecast.isNotEmpty()) { "Прогноз пока недоступен." }
-        val existing = persistence.getTherapyEventDataFromTime(dateUtil.now() - T.hours(12).msecs(), TE.Type.EXERCISE, true)
-        require(existing.none { it.isValid &&
-            (ActivityPlanCalculator.endWithTail(it.timestamp, it.duration, it.note) ?: 0) > dateUtil.now() }) {
-            "Нагрузка уже активна, запланирована или действует ее хвост. Проверьте ее на телефоне перед новой."
-        }
         val plan = ActivityPlanCalculator.build(
             request.mode, request.duration, request.startOffset, request.carbType,
             profile.getBasal(), profile.getIsfMgdl("Activity v2"), profile.getIc(), profile.getTargetMgdl(), profile.getTargetLowMgdl(),
@@ -158,9 +168,25 @@ class WatchControlHandler @Inject constructor(
         return plan
     }
 
+    /** The phone's own activity records that are still planned, running or in their tail. */
+    private fun activitiesOnRecord(): List<TE> =
+        persistence.getTherapyEventDataFromTime(dateUtil.now() - T.hours(12).msecs(), TE.Type.EXERCISE, true)
+            .filter { it.isValid && (ActivityPlanCalculator.endWithTail(it.timestamp, it.duration, it.note) ?: 0) > dateUtil.now() }
+
     private fun recordActivity(node: String, request: EventData.WatchControlRequest, plan: ActivityPlanCalculator.Plan) {
         val now = dateUtil.now()
         val start = now + T.mins(plan.startOffsetMinutes.toLong()).msecs()
+        // A newer entry is the owner's latest word: a session planned earlier for another time gives
+        // way instead of standing in the way (29.10.2026 a session planned for 17:02 was long over by
+        // the time of the real one, and nothing could be entered while it stood).
+        activitiesOnRecord().forEach { earlier ->
+            runCatching {
+                persistence.invalidateTherapyEvent(
+                    earlier.id, Action.CAREPORTAL_REMOVED, Sources.Wear, "Заменена новой нагрузкой с часов",
+                    listOf(ValueWithUnit.Timestamp(earlier.timestamp), ValueWithUnit.TEType(TE.Type.EXERCISE))
+                ).blockingGet()
+            }.onFailure { logger.warn(LTag.WEAR, "earlier activity ${earlier.id} not replaced: ${it.message}") }
+        }
         val note = ActivityPlanCalculator.note(plan.mode, plan.effectPercent, plan.startOffsetMinutes,
             plan.durationMinutes, plan.tailMinutes, plan.requiredCarbs, plan.carbType)
         persistence.insertPumpTherapyEventIfNewByTimestamp(

@@ -1,5 +1,6 @@
 package app.aaps.wear.interaction.actions
 
+import android.content.Context
 import android.content.Intent
 import app.aaps.wear.combo.ComboWatchMode
 import app.aaps.wear.combo.ComboRelay
@@ -205,6 +206,29 @@ class WatchControlActivity : DaggerActivity() {
                 includeFontPadding = false
             }
             buttons.add(this)
+            // The phone's own check and record of this entry, as always; also where an entry for
+            // the watch's controller goes when the controller does not answer.
+            fun requestPhone() {
+                if (sp.getInt("watch_control_api_version", 0) < if (requestKind == "MEAL") 2 else 1) {
+                    showStatus("Нужно обновить AAPS на телефоне и дождаться синхронизации.")
+                    rxBus.send(EventWearToMobile(EventData.ActionResendData("Watch controls compatibility")))
+                    buttons.forEach { it.isEnabled = true }
+                    return
+                }
+                buttons.forEach { it.isEnabled = false }
+                showStatus("Ожидание подтверждения телефона")
+                rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
+                    UUID.randomUUID().toString(), System.currentTimeMillis(), requestKind,
+                    insulin = if (kind == "INSULIN") amount / 10.0 else 0.0,
+                    carbs = if (kind == "CARBS") amount else 0,
+                    mode = mode, duration = duration, startOffset = start,
+                    carbType = if (kind == "CARBS") foodType else carbType
+                )))
+                handler.postDelayed({
+                    showStatus("Нет ответа? Проверьте связь и AAPS на телефоне.")
+                    buttons.forEach { it.isEnabled = true }
+                }, 20_000)
+            }
             setOnClickListener {
                 // With the pump driven through this watch, carbohydrates alone are the watch's
                 // business: its pump controller keeps them for its own forecast and hands them to
@@ -228,10 +252,21 @@ class WatchControlActivity : DaggerActivity() {
                 }
                 // The same for a walk or a sport session: the controller counts it in the watch's
                 // own forecast and basal at once, and the phone records it when it is in touch.
+                // Sent as an ordered broadcast: «Записано» is shown only once the controller has
+                // answered that it kept the entry; without an answer the entry goes to the phone
+                // instead, so that it is never lost in silence (29.10.2026).
                 if (requestKind == "ACTIVITY" && ComboWatchMode.isWatchMode(this@WatchControlActivity)) {
                     buttons.forEach { it.isEnabled = false }
+                    showStatus("Записываю на часах…")
+                    val settled = java.util.concurrent.atomic.AtomicBoolean(false)
+                    val fallback = Runnable {
+                        if (!settled.compareAndSet(false, true)) return@Runnable
+                        showStatus("Контроллер часов не ответил, записываю на телефоне")
+                        requestPhone()
+                    }
+                    handler.postDelayed(fallback, 4_000)
                     runCatching {
-                        sendBroadcast(
+                        sendOrderedBroadcast(
                             Intent(ComboRelay.ACTION_ACTIVITY)
                                 .setComponent(ComponentName(ComboRelay.CONTROLLER_PACKAGE, ComboRelay.CONTROLLER_ACTIVITY_RECEIVER))
                                 .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
@@ -240,11 +275,19 @@ class WatchControlActivity : DaggerActivity() {
                                 .putExtra("startOffset", start)
                                 .putExtra("carbType", carbType)
                                 .putExtra("timestamp", System.currentTimeMillis()),
-                            ComboRelay.PERMISSION_RELAY
+                            ComboRelay.PERMISSION_RELAY,
+                            object : android.content.BroadcastReceiver() {
+                                override fun onReceive(context: Context, intent: Intent) {
+                                    if (resultCode != android.app.Activity.RESULT_OK) { fallback.run(); return }
+                                    if (!settled.compareAndSet(false, true)) return
+                                    handler.removeCallbacks(fallback)
+                                    showStatus("Записано на часах: ${if (mode == "WALK") "прогулка" else "спорт"} $duration мин" + (if (start > 0) ", через $start мин" else "") + ". Телефон запишет при связи")
+                                    handler.postDelayed({ finish() }, 2_200)
+                                }
+                            },
+                            handler, android.app.Activity.RESULT_CANCELED, null, null
                         )
-                    }
-                    showStatus("Записано на часах: ${if (mode == "WALK") "прогулка" else "спорт"} $duration мин" + if (start > 0) ", через $start мин" else "")
-                    handler.postDelayed({ finish() }, 1_800)
+                    }.onFailure { fallback.run() }
                     return@setOnClickListener
                 }
                 // A meal with the pump driven through this watch: is the phone here at all? Three
@@ -299,25 +342,8 @@ class WatchControlActivity : DaggerActivity() {
                     }
                     return@setOnClickListener
                 }
-                if (sp.getInt("watch_control_api_version", 0) < if (requestKind == "MEAL") 2 else 1) {
-                    showStatus("Нужно обновить AAPS на телефоне и дождаться синхронизации.")
-                    rxBus.send(EventWearToMobile(EventData.ActionResendData("Watch controls compatibility")))
-                    return@setOnClickListener
-                }
                 if (kind != "ACTIVITY" && amount == 0) { showStatus("Укажите количество"); return@setOnClickListener }
-                buttons.forEach { it.isEnabled = false }
-                showStatus("Ожидание подтверждения телефона")
-                rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
-                    UUID.randomUUID().toString(), System.currentTimeMillis(), requestKind,
-                    insulin = if (kind == "INSULIN") amount / 10.0 else 0.0,
-                    carbs = if (kind == "CARBS") amount else 0,
-                    mode = mode, duration = duration, startOffset = start,
-                    carbType = if (kind == "CARBS") foodType else carbType
-                )))
-                handler.postDelayed({
-                    showStatus("Нет ответа? Проверьте связь и AAPS на телефоне.")
-                    buttons.forEach { it.isEnabled = true }
-                }, 20_000)
+                requestPhone()
             }
         }
         if (kind == "CARBS") {

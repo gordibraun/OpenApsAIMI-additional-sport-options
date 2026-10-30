@@ -1,13 +1,16 @@
 package app.aaps.pump.combowatch
 
 import app.aaps.core.data.model.BS
+import app.aaps.core.data.model.TE
 import app.aaps.core.interfaces.aps.Loop
+import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.aps.RT
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.pump.PumpSync
+import app.aaps.core.objects.activity.ActivityPlanCalculator
 import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -26,6 +29,7 @@ class RegulationSnapshotBuilder @Inject constructor(
     private val loop: dagger.Lazy<Loop>,
     private val activePlugin: dagger.Lazy<ActivePlugin>,
     private val iobCobCalculator: dagger.Lazy<IobCobCalculator>,
+    private val persistenceLayer: dagger.Lazy<PersistenceLayer>,
     private val pumpSync: PumpSync,
     private val aapsLogger: AAPSLogger
 ) {
@@ -46,9 +50,33 @@ class RegulationSnapshotBuilder @Inject constructor(
         return snapshot.copy(
             // The permission to act on it runs from the last time the phone was in touch.
             validUntilEpochMs = nowEpochMs + VALID_FOR_MS,
-            cobG = maxOf(snapshot.cobG, carbohydratesOnBoardNow())
+            cobG = maxOf(snapshot.cobG, carbohydratesOnBoardNow()),
+            activities = activitiesOnRecord(nowEpochMs)
         )
     }
+
+    /**
+     * The walks and sport sessions the phone has on record that still matter: started within the last
+     * half day or due within six hours, with their tails. Read anew for every snapshot, because one
+     * entered after the loop run must reach the watch before the phone goes away.
+     */
+    private fun activitiesOnRecord(nowEpochMs: Long): List<RegulationSnapshot.ActivityWindow> = runCatching {
+        persistenceLayer.get().getTherapyEventDataFromTime(nowEpochMs - 12 * 60 * 60_000L, TE.Type.EXERCISE, true)
+            .filter { it.isValid && it.note?.contains(ACTIVITY_NOTE_PREFIX) == true }
+            .mapNotNull { event ->
+                val tokens = event.note.orEmpty().split(' ').mapNotNull { part ->
+                    val at = part.indexOf('=')
+                    if (at <= 0 || at >= part.lastIndex) null else part.substring(0, at) to part.substring(at + 1)
+                }.toMap()
+                val mode = tokens["mode"]?.takeIf { it == "WALK" || it == "SPORT" } ?: return@mapNotNull null
+                val duration = (tokens["duration"]?.toIntOrNull() ?: (event.duration / 60_000L).toInt()).coerceAtLeast(5)
+                val tail = (tokens["tail"]?.toIntOrNull() ?: ActivityPlanCalculator.tailMinutes(mode, duration)).coerceIn(0, 360)
+                RegulationSnapshot.ActivityWindow(event.timestamp, duration, mode, tail)
+            }
+            .filter { it.startEpochMs <= nowEpochMs + 6 * 60 * 60_000L && it.startEpochMs + (it.durationMinutes + it.tailMinutes) * 60_000L >= nowEpochMs - 5 * 60_000L }
+            .sortedBy { it.startEpochMs }
+    }.onFailure { aapsLogger.debug(LTag.PUMP, "combowatch: activities not read for the snapshot: ${it.message}") }
+        .getOrDefault(emptyList())
 
     /**
      * Carbohydrates entered since the run are not in it. The meal bolus that follows them will be
@@ -110,6 +138,9 @@ class RegulationSnapshotBuilder @Inject constructor(
 
         /** Without the phone for longer than this the watch stops acting on what the phone last knew. */
         const val VALID_FOR_MS = 24 * 60 * 60_000L
+
+        /** The note the phone's Activity v2 puts on an exercise record. */
+        const val ACTIVITY_NOTE_PREFIX = "AIMI_ACTIVITY_V2 "
 
         /** The curve is read every two and a half minutes for eight hours, as the watch expects it. */
         private const val INSULIN_SAMPLES = 193

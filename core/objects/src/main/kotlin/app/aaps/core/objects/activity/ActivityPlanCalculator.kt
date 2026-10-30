@@ -46,6 +46,24 @@ object ActivityPlanCalculator {
     fun effectPercent(mode: String): Int =
         if (mode == "SPORT") 30 else 20
 
+    /**
+     * The window and the tail only, with no carbohydrate advice: what is recorded when the forecast
+     * an advice needs is not available. The session itself must never go unrecorded for that
+     * (30.10.2026: the owner's entries used to be refused on a stale loop run).
+     */
+    fun recordOnly(mode: String, durationMinutes: Int, startOffsetMinutes: Int, carbType: String?): Plan {
+        val tail = tailMinutes(mode, durationMinutes)
+        return Plan(
+            mode = mode, effectPercent = effectPercent(mode), startOffsetMinutes = startOffsetMinutes, durationMinutes = durationMinutes,
+            tailMinutes = tail, activityWindowEndMinutes = startOffsetMinutes + durationMinutes + tail,
+            requiredCarbs = 0, baseRequiredCarbs = 0, activityRequiredCarbs = 0, carbsWithinMinutes = 0, carbType = carbType,
+            forecastMin = Double.NaN, forecastMinMinute = 0, lateForecastMin = null, lateForecastMinMinute = null,
+            glucoseUseMgdlPer5m = 0.0, carbSensitivityMgdlPerGram = 0.0, activityEquivalentCarbs = 0.0, activityCarbFloorMgdl = 0.0,
+            baseDeficitMgdl = 0.0, activityDeficitMgdl = 0.0, totalDeficitMgdl = 0.0, firstRiskMinute = null, firstActivityImpactMinute = null,
+            carbLeadMinutes = 0
+        )
+    }
+
     fun tailMinutes(mode: String, durationMinutes: Int): Int =
         when (mode) {
             "SPORT" -> when {

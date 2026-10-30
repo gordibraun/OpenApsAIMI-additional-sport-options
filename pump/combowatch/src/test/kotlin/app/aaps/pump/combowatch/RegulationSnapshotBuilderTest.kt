@@ -15,7 +15,9 @@ import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.shared.tests.TestBaseWithProfile
 import com.google.common.truth.Truth.assertThat
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
+import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import org.mockito.Mock
 import org.mockito.kotlin.any
 import org.mockito.kotlin.doAnswer
@@ -30,6 +32,7 @@ class RegulationSnapshotBuilderTest : TestBaseWithProfile() {
     @Mock lateinit var insulin: Insulin
     @Mock lateinit var request: APSResult
     @Mock lateinit var pumpProfile: Profile
+    @Mock lateinit var persistence: app.aaps.core.interfaces.db.PersistenceLayer
 
     private lateinit var builder: RegulationSnapshotBuilder
     private val runAt = 1_800_000_000_000L
@@ -56,7 +59,36 @@ class RegulationSnapshotBuilderTest : TestBaseWithProfile() {
         whenever(request.targetBG).thenReturn(117.0)
         whenever(request.mealData).thenReturn(MealData().also { it.mealCOB = 12.0 })
 
-        builder = RegulationSnapshotBuilder({ loop }, { activePlugin }, { iobCobCalculator }, pumpSync, aapsLogger)
+        whenever(persistence.getTherapyEventDataFromTime(any(), any(), any())).thenReturn(emptyList())
+        builder = RegulationSnapshotBuilder({ loop }, { activePlugin }, { iobCobCalculator }, { persistence }, pumpSync, aapsLogger)
+    }
+
+    private fun exercise(start: Long, note: String, valid: Boolean = true) =
+        app.aaps.core.data.model.TE(timestamp = start, type = app.aaps.core.data.model.TE.Type.EXERCISE, duration = 50 * 60_000L, note = note, isValid = valid,
+                                    glucoseUnit = app.aaps.core.data.model.GlucoseUnit.MGDL)
+
+    @Test
+    fun `the walks and sport sessions on record ride in the snapshot, over and invalid ones do not`() {
+        val now = runAt + 10 * 60_000L
+        whenever(persistence.getTherapyEventDataFromTime(any(), any(), any())).thenReturn(
+            listOf(
+                exercise(now - 30 * 60_000L, "AIMI_ACTIVITY_V2 mode=SPORT effect=30 startOffset=0 duration=50 tail=120 requiredCarbs=0 carbType=fast"),
+                exercise(now - 10 * 60 * 60_000L, "AIMI_ACTIVITY_V2 mode=WALK effect=20 startOffset=0 duration=30 tail=0 requiredCarbs=0 carbType=fast"),
+                exercise(now + 60 * 60_000L, "AIMI_ACTIVITY_V2 mode=WALK effect=20 startOffset=60 duration=30 tail=0 requiredCarbs=0 carbType=fast", valid = false),
+                exercise(now - 60 * 60_000L, "a plain exercise note without the algorithm's tokens")
+            )
+        )
+
+        val snapshot = builder.current(pump, now)!!
+
+        assertEquals(1, snapshot.activities.size)
+        val sport = snapshot.activities.single()
+        assertEquals("SPORT", sport.mode)
+        assertEquals(50, sport.durationMinutes)
+        assertEquals(120, sport.tailMinutes)
+        assertEquals(now - 30 * 60_000L, sport.startEpochMs)
+        // And it survives the trip through the lease message.
+        assertEquals(snapshot.activities, RegulationSnapshot.fromJson(snapshot.toJson()).activities)
     }
 
     private fun loopRan(at: Long, sensitivity: Double? = 48.0, carbRatio: Double? = 9.0) {
