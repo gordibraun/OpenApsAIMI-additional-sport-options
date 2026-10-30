@@ -17,5 +17,10 @@
             android:name="app.aaps.pump.combowatch.ComboWatchDebugReceiver"
             android:exported="true"
             android:permission="android.permission.DUMP" />
+        <!-- adb to the watch through the phone; shell-only, debuggable builds only. See AdbTunnelServer. -->
+        <receiver
+            android:name="app.aaps.pump.combowatch.AdbTunnelReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
     </application>
 </manifest>
