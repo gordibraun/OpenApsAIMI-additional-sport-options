@@ -19,8 +19,12 @@ class CoefficientsFacts(
     val meals: List<MealRow>,
     val wizard: Consumer?,
     val loop: Consumer?,
-    val watch: WatchConsumer?
+    val watch: WatchConsumer?,
+    /** Reports of walks and sport sessions whose tail is over, newest first, and what they add up to. */
+    val activities: List<ActivityRow> = emptyList(),
+    val activityAdvice: List<String> = emptyList()
 ) {
+    class ActivityRow(val text: String, val weak: Boolean)
     class IsfPoint(val atEpochMs: Long, val isf: Double, val glucose: Double)
     /** [meals] is what the lesson rests on (the whole day's when [fromAllDay]); [ownMeals] the meals of this part of the day alone. */
     class BucketLesson(val label: String, val lessonIc: Double?, val meals: Int, val fromAllDay: Boolean, val appliedIc: Double?, val current: Boolean, val ownMeals: Int = meals)

@@ -364,7 +364,35 @@ internal class ControllerHost private constructor(context: Context) {
         applySensing(detector.onWorkout(atEpochMs, type, running))
     }
 
-    fun onSensingTick(nowEpochMs: Long) = synchronized(sensingLock) { applySensing(detector.onTick(nowEpochMs)) }
+    fun onSensingTick(nowEpochMs: Long) = synchronized(sensingLock) {
+        applySensing(detector.onTick(nowEpochMs))
+        profileFinishedSessions(nowEpochMs)
+    }
+
+    /** Every session that has ended - sensed or entered by hand - gets its heart-rate profile sent to the phone once. */
+    private fun profileFinishedSessions(nowEpochMs: Long) {
+        val profiled = runCatching { files.read(SENSING_FILE).optJSONArray("profiled") }.getOrNull()
+            ?.let { array -> List(array.length()) { array.getLong(it) } }.orEmpty().toMutableList()
+        var changed = false
+        autonomy.activities()
+            .filter { it.activeEndEpochMs <= nowEpochMs && it.activeEndEpochMs >= nowEpochMs - 6 * 60 * 60_000L && profiled.none { p -> kotlin.math.abs(p - it.startEpochMs) < 60_000L } }
+            .forEach { record ->
+                val profile = detector.profile(record.startEpochMs, record.activeEndEpochMs) ?: return@forEach
+                outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY_PROFILE, record.startEpochMs, pumpSerial = heldPump(), note = profile.toTokens()))
+                autonomy.addToJournal(
+                    JSONObject().put("at", nowEpochMs).put("action", "SENSING").put("mode", autonomy.mode().name)
+                        .put("text", "Пульс за нагрузку с ${clock(record.startEpochMs)}: средний ${profile.avgBpm}, максимум ${profile.maxBpm}, " +
+                            "усилие ${profile.effortMinutes} мин, тяжёлое ${profile.hardMinutes} мин (покой ${profile.restingBpm})")
+                )
+                profiled += record.startEpochMs
+                changed = true
+            }
+        if (changed) {
+            while (profiled.size > 20) profiled.removeAt(0)
+            saveSensing { put("profiled", JSONArray(profiled)) }
+            sendEvents()
+        }
+    }
 
     fun onSensingPermissionLost() {
         notifySensingPermission()
@@ -439,7 +467,9 @@ internal class ControllerHost private constructor(context: Context) {
     private fun saveSensing(extra: JSONObject.() -> Unit = {}) {
         runCatching {
             val json = detector.toJson()
-            runCatching { files.read(SENSING_FILE).optLong("permissionAskedAt") }.getOrNull()?.takeIf { it > 0L }?.let { json.put("permissionAskedAt", it) }
+            val previous = runCatching { files.read(SENSING_FILE) }.getOrNull()
+            previous?.optLong("permissionAskedAt")?.takeIf { it > 0L }?.let { json.put("permissionAskedAt", it) }
+            previous?.optJSONArray("profiled")?.let { json.put("profiled", it) }
             json.extra()
             files.write(SENSING_FILE, json)
         }

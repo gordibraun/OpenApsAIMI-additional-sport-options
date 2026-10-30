@@ -73,6 +73,21 @@ class ActivityDetectorTest {
         assertEquals(10, ended.durationMinutes)
     }
 
+    @Test fun `a window's heart rate is summed up as average, maximum and minutes of effort`() {
+        val detector = ActivityDetector(restingDefaultBpm = 60)
+        pulse(detector, 0, 9, 80)     // ten easy minutes
+        pulse(detector, 10, 29, 100)  // twenty minutes of effort (>= 90)
+        pulse(detector, 30, 39, 110)  // ten hard minutes (>= 105)
+        val profile = detector.profile(t0, t0 + minutes(39))!!
+        assertEquals(40, profile.samples)
+        assertEquals(97, profile.avgBpm)
+        assertEquals(110, profile.maxBpm)
+        assertEquals(30, profile.effortMinutes)
+        assertEquals(10, profile.hardMinutes)
+        assertTrue(profile.toTokens().startsWith("hr_avg=97 hr_max=110"))
+        assertNull(detector.profile(t0 + minutes(100), t0 + minutes(110)))
+    }
+
     @Test fun `state survives a restart through json`() {
         val detector = ActivityDetector(restingDefaultBpm = 60)
         pulse(detector, 0, 8, 110)

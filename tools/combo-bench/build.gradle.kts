@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 52
-            versionName = "0.52-session-is-own"
+            versionCode = 53
+            versionName = "0.53-heart-rate-profile"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

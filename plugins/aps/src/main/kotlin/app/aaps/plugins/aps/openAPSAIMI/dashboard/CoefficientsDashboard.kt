@@ -23,6 +23,7 @@ object CoefficientsDashboard {
     class LessonRow(val period: String, val lesson: String, val meals: String, val applied: String, val current: Boolean)
     class Trend(val title: String, val points: List<Double>, val labels: List<String>, val summary: String)
     class MealLine(val text: String, val icEff: Double?, val belowProfile: Boolean?)
+    class ActivityLine(val text: String, val weak: Boolean)
 
     class View(
         val title: String,
@@ -33,7 +34,9 @@ object CoefficientsDashboard {
         val lessons: List<LessonRow>,
         val trend: Trend?,
         val meals: List<MealLine>,
-        val legend: List<String>
+        val legend: List<String>,
+        val activities: List<ActivityLine> = emptyList(),
+        val activityAdvice: List<String> = emptyList()
     ) {
         /** Every string a person reads, for the tests. */
         fun allTexts(): List<String> = listOf(title, updated, isf.title, isf.value, isf.unit, isf.meaning, ic.title, ic.value, ic.unit, ic.meaning) +
@@ -41,7 +44,7 @@ object CoefficientsDashboard {
             usedIn.flatMap { listOf(it.who, it.whenText, it.values) } +
             lessons.flatMap { listOf(it.period, it.lesson, it.meals, it.applied) } +
             listOfNotNull(trend?.title, trend?.summary) + (trend?.labels ?: emptyList()) +
-            meals.map { it.text } + legend
+            meals.map { it.text } + legend + activities.map { it.text } + activityAdvice
     }
 
     fun build(facts: CoefficientsFacts, time: (Long) -> String, dayAndTime: (Long) -> String): View {
@@ -125,7 +128,9 @@ object CoefficientsDashboard {
                 "ISF: на сколько мг/дл одна единица снижает сахар.",
                 "IC: сколько граммов еды покрывает одна единица.",
                 "Учитель: по закрытым обедам ведёт IC к реальному, не быстрее 15 % в день."
-            )
+            ),
+            activities = facts.activities.map { ActivityLine(it.text, it.weak) },
+            activityAdvice = facts.activityAdvice
         )
     }
 

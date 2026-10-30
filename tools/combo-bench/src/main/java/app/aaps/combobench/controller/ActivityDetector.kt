@@ -129,6 +129,23 @@ class ActivityDetector(
         return extendIfOutgrown(current, nowEpochMs)?.let { listOf(it) } ?: emptyList()
     }
 
+    /** The heart rate within a window as a few numbers; null without at least three samples. */
+    data class HrProfile(val avgBpm: Int, val maxBpm: Int, val effortMinutes: Int, val hardMinutes: Int, val restingBpm: Int, val samples: Int) {
+
+        fun toTokens(): String = "hr_avg=$avgBpm hr_max=$maxBpm hr_effort=$effortMinutes hr_hard=$hardMinutes hr_rest=$restingBpm hr_samples=$samples"
+    }
+
+    fun profile(startEpochMs: Long, endEpochMs: Long): HrProfile? {
+        val inWindow = heartRate.filter { it.first in startEpochMs..endEpochMs }.map { it.second }
+        if (inWindow.size < 3) return null
+        val resting = restingBpm
+        return HrProfile(
+            avgBpm = inWindow.average().toInt(), maxBpm = inWindow.max(),
+            effortMinutes = inWindow.count { it >= resting + ELEVATED_BPM }, hardMinutes = inWindow.count { it >= resting + HARD_BPM },
+            restingBpm = resting, samples = inWindow.size
+        )
+    }
+
     /** The owner: «не нагрузка». The session is forgotten and the pulse is not asked about again for a while. */
     fun decline(nowEpochMs: Long) {
         session = null

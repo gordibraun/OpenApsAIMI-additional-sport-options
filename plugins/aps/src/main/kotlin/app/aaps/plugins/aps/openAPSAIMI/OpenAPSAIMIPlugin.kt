@@ -129,7 +129,8 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     private val context: Context,
     private val apsResultProvider: Provider<APSResult>,
     private val isfStateStore: IsfStateStore,
-    private val mealCarbRatioLearner: app.aaps.plugins.aps.openAPSAIMI.learning.MealCarbRatioLearner
+    private val mealCarbRatioLearner: app.aaps.plugins.aps.openAPSAIMI.learning.MealCarbRatioLearner,
+    private val activityOutcomeReporter: app.aaps.plugins.aps.openAPSAIMI.activity.ActivityOutcomeReporter
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.APS)
@@ -262,7 +263,14 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
             mealsEvaluated = learner.mealsEvaluated,
             mealsWithResult = learner.mealsWithResult,
             meals = learner.meals.map { app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.MealRow(it.startEpochMs, it.grams, it.bolusesU, it.neededU, it.effectiveIc, it.bgStart, it.bgEnd) },
-            wizard = wizard, loop = loop, watch = watch
+            wizard = wizard, loop = loop, watch = watch,
+            activities = activityOutcomeReporter.reports().take(10).map {
+                app.aaps.plugins.aps.openAPSAIMI.dashboard.CoefficientsFacts.ActivityRow(
+                    app.aaps.plugins.aps.openAPSAIMI.activity.ActivityOutcomeMath.line(it) { at -> dateUtil.dateAndTimeString(at) },
+                    it.verdict == app.aaps.plugins.aps.openAPSAIMI.activity.ActivityOutcomeMath.Verdict.TOO_WEAK
+                )
+            },
+            activityAdvice = activityOutcomeReporter.suggestions().map { it.text }
         )
     }
 
@@ -626,6 +634,9 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         // Meals that have run their course teach the carb ratio; getIc() below asks the learner.
         runCatching { mealCarbRatioLearner.update(dateUtil.now()) }
             .onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner update failed: ${it.javaClass.simpleName}: ${it.message}") }
+        // A walk or a sport session whose tail has run out gets its report: what glucose did, was the tail fair.
+        runCatching { activityOutcomeReporter.update(dateUtil.now()) }
+            .onFailure { aapsLogger.warn(LTag.APS, "ActivityOutcomeReporter update failed: ${it.javaClass.simpleName}: ${it.message}") }
         aapsLogger.info(LTag.APS, "IC for this run: ${"%.2f".format(profile.getIc())} (profile ${"%.2f".format(profile.getIcTimeFromMidnight(MidnightUtils.secondsFromMidnight()))}); ${mealCarbRatioLearner.describe()}")
         val currentBasalForInvoke =
             if (forecastOnly && pump.baseBasalRate < 0.01) {

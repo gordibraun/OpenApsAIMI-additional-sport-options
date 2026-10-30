@@ -86,7 +86,8 @@ class IsfRestartTest {
         determineBasalaimiSMB2 = mockk(relaxed = true), profiler = mockk(relaxed = true),
         context = mockk(relaxed = true), apsResultProvider = mockk(relaxed = true),
         isfStateStore = IsfStateStore(sp, logger),
-        mealCarbRatioLearner = mockk(relaxed = true)
+        mealCarbRatioLearner = mockk(relaxed = true),
+        activityOutcomeReporter = mockk(relaxed = true)
     )
 
     @Test fun realPluginContinuesTheSameDynamicCalculationAfterRestart() {

@@ -572,6 +572,19 @@ class ComboWatchPlugin @Inject constructor(
                 }
             }
 
+            PumpEvent.Type.ACTIVITY_PROFILE     -> {
+                val start = event.timestampEpochMs - event.timestampEpochMs % 1000
+                val existing = activityRecordAt(start)
+                val tokens = event.note?.takeIf { it.contains("hr_avg=") }
+                if (existing == null || tokens == null) {
+                    aapsLogger.debug(LTag.PUMP, "combowatch: heart-rate profile for $start has no record to join")
+                } else {
+                    val note = existing.note.orEmpty().split(' ').filterNot { it.startsWith("hr_") }.joinToString(" ") + " " + tokens
+                    persistenceLayer.insertOrUpdateTherapyEvent(existing.copy(note = note)).blockingGet()
+                    aapsLogger.info(LTag.PUMP, "combowatch: heart-rate profile joined to the activity at $start: $tokens")
+                }
+            }
+
             PumpEvent.Type.ACTIVITY_CANCELLED   -> {
                 val start = event.timestampEpochMs - event.timestampEpochMs % 1000
                 val existing = activityRecordAt(start)
@@ -610,6 +623,7 @@ class ComboWatchPlugin @Inject constructor(
         PumpEvent.Type.CARBS                -> "часы: углеводы ${event.carbsGrams} г"
         PumpEvent.Type.ACTIVITY             -> "часы: нагрузка ${if (event.activityMode == "SPORT") "спорт" else "прогулка"} ${event.activityDurationMinutes} мин"
         PumpEvent.Type.ACTIVITY_CANCELLED   -> "часы: нагрузка отменена (ответ «не нагрузка»)"
+        PumpEvent.Type.ACTIVITY_PROFILE     -> "часы: пульс за нагрузку ${event.note?.substringAfter("hr_avg=")?.substringBefore(' ') ?: "?"} в среднем"
         else                                -> null
     }
 

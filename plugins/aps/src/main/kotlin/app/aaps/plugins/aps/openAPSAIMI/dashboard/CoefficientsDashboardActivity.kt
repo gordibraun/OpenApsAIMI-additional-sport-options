@@ -129,6 +129,13 @@ class CoefficientsDashboardActivity : TranslatedDaggerAppCompatActivity() {
             v.meals.forEach { m -> addView(text(m.text, 13f, if (m.belowProfile == true) orange else textDim).apply { setPadding(0, dp(4), 0, 0) }) }
         })
 
+        // Walks and sport sessions: what glucose did through the tail, and whether the tail was fair.
+        if (v.activities.isNotEmpty() || v.activityAdvice.isNotEmpty()) root.addView(cardView {
+            addView(text("Нагрузки и их хвосты", 15f, textMain, bold = true))
+            v.activityAdvice.forEach { addView(text(it, 13f, purple).apply { setPadding(0, dp(4), 0, 0) }) }
+            v.activities.forEach { a -> addView(text(a.text, 13f, if (a.weak) orange else textDim).apply { setPadding(0, dp(4), 0, 0) }) }
+        })
+
         root.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(6), dp(10), dp(6), 0)

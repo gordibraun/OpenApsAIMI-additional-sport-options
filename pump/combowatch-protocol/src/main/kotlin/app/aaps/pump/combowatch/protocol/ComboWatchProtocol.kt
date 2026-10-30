@@ -387,6 +387,12 @@ data class PumpEvent(
          */
         ACTIVITY_CANCELLED,
 
+        /**
+         * The heart rate the watch saw during a session, once it is over: [note] carries
+         * `hr_avg= hr_max= hr_effort= hr_hard= hr_rest=`, [timestampEpochMs] is the session's start.
+         */
+        ACTIVITY_PROFILE,
+
         /** A type a newer watch sends and this build does not know. Passed over, never an error. */
         UNKNOWN
     }
