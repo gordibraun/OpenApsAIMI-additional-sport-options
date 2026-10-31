@@ -120,7 +120,7 @@ abstract class PluginsListModule {
     @Binds
     @AllConfigs
     @IntoMap
-    @IntKey(12)
+    @IntKey(7)
     abstract fun bindBridgePlugin(plugin: app.aaps.plugins.aps.openAPSAIMI.bridge.BridgePlugin): PluginBase
 
     @Binds
@@ -283,25 +283,25 @@ abstract class PluginsListModule {
     @Binds
     @AllConfigs
     @IntoMap
-    @IntKey(7)
+    @IntKey(8)
     abstract fun bindOpenAPSAIMIPlugin(plugin: OpenAPSAIMIPlugin): PluginBase
 
     @Binds
     @AllConfigs
     @IntoMap
-    @IntKey(8)
+    @IntKey(9)
     abstract fun bindDecisionTracePlugin(plugin: DecisionTracePlugin): PluginBase
 
     @Binds
     @AllConfigs
     @IntoMap
-    @IntKey(9)
+    @IntKey(11)
     abstract fun bindPatternInsightsPlugin(plugin: PatternInsightsPlugin): PluginBase
 
     @Binds
     @AllConfigs
     @IntoMap
-    @IntKey(11)
+    @IntKey(12)
     abstract fun bindCarbModelPlugin(plugin: CarbModelPlugin): PluginBase
 
     @Binds
