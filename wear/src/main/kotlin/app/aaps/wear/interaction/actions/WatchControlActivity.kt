@@ -30,6 +30,9 @@ import app.aaps.wear.R
 import app.aaps.wear.interaction.utils.RotaryScrollView
 import androidx.core.view.InputDeviceCompat
 import androidx.core.view.MotionEventCompat
+import app.aaps.wear.interaction.utils.RotaryStepper
+import androidx.core.view.ViewConfigurationCompat
+import android.view.ViewConfiguration
 import com.google.android.gms.wearable.Wearable
 import dagger.android.DaggerActivity
 import io.reactivex.rxjava3.disposables.Disposable
@@ -51,8 +54,7 @@ class WatchControlActivity : DaggerActivity() {
     private lateinit var root: LinearLayout
     private lateinit var scroll: RotaryScrollView
     private var amountChange: ((Int) -> Unit)? = null
-    private var rotaryLastAt = 0L
-    private var rotaryRun = 0
+    private val rotary by lazy { RotaryStepper(ViewConfigurationCompat.getScaledVerticalScrollFactor(ViewConfiguration.get(this), this)) }
     private var deliveryStrip: TextView? = null
     private val deliveryListener: () -> Unit = { runOnUiThread { refreshDeliveryStrip() } }
     private val deliveryTick = object : Runnable {
@@ -60,17 +62,15 @@ class WatchControlActivity : DaggerActivity() {
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
-        // On the amount screens the crown changes the amount, faster the longer it is turned, as the
-        // phone wizard's fields do; elsewhere it scrolls the page.
+        // On the amount screens the crown changes the amount: one unit per detent of travel however
+        // many events the watch splits it into, larger steps only after a long turn (RotaryStepper);
+        // elsewhere it scrolls the page.
         val change = amountChange
         if (change != null && event.action == MotionEvent.ACTION_SCROLL && event.isFromSource(InputDeviceCompat.SOURCE_ROTARY_ENCODER)) {
-            val now = System.currentTimeMillis()
-            if (now - rotaryLastAt > 300L) rotaryRun = 0
-            val step = when { rotaryRun < 6 -> 1; rotaryRun < 14 -> 2; else -> 5 }
-            val delta = -event.getAxisValue(MotionEventCompat.AXIS_SCROLL)
-            if (delta != 0f) change(if (delta > 0) step else -step)
-            rotaryLastAt = now
-            rotaryRun++
+            val px = -event.getAxisValue(MotionEventCompat.AXIS_SCROLL) *
+                ViewConfigurationCompat.getScaledVerticalScrollFactor(ViewConfiguration.get(this), this)
+            val step = rotary.onScroll(px, System.currentTimeMillis())
+            if (step != 0) change(step)
             return true
         }
         return (::scroll.isInitialized && scroll.handleRotary(event)) || super.dispatchGenericMotionEvent(event)
