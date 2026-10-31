@@ -30,7 +30,10 @@ class BridgeUploadWorker(
     @Inject lateinit var api: BridgeApi
     @Inject lateinit var rxBus: RxBus
 
-    override suspend fun doWorkAndLog(): Result {
+    override suspend fun doWorkAndLog(): Result = synchronized(LOCK) { work() }
+
+    /** One pass at a time: the one-off upload and the periodic poll must not send the same report twice (31.10.2026: two threads for one report). */
+    private fun work(): Result {
         store.importWatchInbox()
         if (!api.configured()) {
             store.pending().forEach { (_, m) -> store.markError(m.clientId, BridgeStore.NOT_CONFIGURED, giveUp = false) }
@@ -109,6 +112,7 @@ class BridgeUploadWorker(
 
     companion object {
 
+        private val LOCK = Any()
         const val CHANNEL = "bridge"
         private const val NOTIFICATION_ID = 7500
         private const val MAX_ATTACHMENT_BYTES = 6L * 1024 * 1024
