@@ -36,8 +36,13 @@ interface PumpSession {
             val bolus: BolusReceipt? = null
         ) : SessionResult
 
-        /** The session ended without establishing what the pump did. */
-        data class Unknown(val reason: String) : SessionResult
+        /**
+         * The session ended without establishing what the pump did. [bolusesSeen] are the boluses
+         * the pump's history showed *during this session* before it ended: when the link dies
+         * after the driver has read the record of the bolus it was delivering, that record is the
+         * only copy - the next session's history delta no longer holds it.
+         */
+        data class Unknown(val reason: String, val bolusesSeen: List<BolusReceipt> = emptyList()) : SessionResult
     }
 
     fun run(command: ComboCommand): SessionResult
@@ -124,7 +129,8 @@ class ComboExecutor(
 
                 is PumpSession.SessionResult.Unknown -> {
                     journal.markFinished(command.id, Outcome.UNKNOWN, sessionResult.reason)
-                    ComboResult(command.id, Outcome.UNKNOWN, nowEpochMs(), reason = sessionResult.reason)
+                    settleFromSession(command, sessionResult)
+                        ?: ComboResult(command.id, Outcome.UNKNOWN, nowEpochMs(), reason = sessionResult.reason)
                 }
             }
         } catch (throwable: Throwable) {
@@ -175,15 +181,7 @@ class ComboExecutor(
         val unresolved = journal.unresolved(excludingId = inFlightId) ?: return
         when (unresolved.kind) {
             CommandKind.DELIVER_BOLUS -> {
-                // The history comes newest first and may hold boluses that are not ours: 30.10.2026 a
-                // quick bolus the owner gave by hand a minute after a 5.1 U command was taken for it.
-                // Only standard boluses started around the command count, the one with the command's
-                // amount first, else the earliest (a bolus cut short by the link shows fewer tenths).
-                val started = unresolved.startedAtEpochMs
-                val candidates = bolusesInHistory
-                    .filter { !it.quick && it.timestampEpochMs in (started - PUMP_CLOCK_TOLERANCE_MS)..(started + BOLUS_MATCH_WINDOW_MS) }
-                    .sortedBy { it.timestampEpochMs }
-                val delivered = candidates.firstOrNull { it.tenthsIU == unresolved.bolusTenthsIU } ?: candidates.firstOrNull()
+                val delivered = matchBolus(unresolved.startedAtEpochMs, unresolved.bolusTenthsIU, bolusesInHistory)
                 if (delivered != null)
                     journal.markFinished(
                         unresolved.id, Outcome.DONE,
@@ -212,6 +210,38 @@ class ComboExecutor(
             else                      ->
                 journal.markFinished(unresolved.id, Outcome.FAILED, "reconciled from pump: tbr=${snapshot.tbrPercentage ?: "none"}")
         }
+    }
+
+    /**
+     * A session that died after the pump's history had already shown the command's bolus settles
+     * it on the spot. 31.10.2026 09:12: the pump recorded a 2.6 U bolus, the driver read that
+     * record, and the link broke three seconds later; the next session's history delta was empty
+     * (the dying session had consumed it) and the command was wrongly closed as failed - the
+     * phone was told the insulin had not been given. The session's own receipts are the same
+     * evidence [reconcile] would use, read a minute earlier.
+     */
+    private fun settleFromSession(command: ComboCommand, result: PumpSession.SessionResult.Unknown): ComboResult? {
+        if (command.kind != CommandKind.DELIVER_BOLUS || result.bolusesSeen.isEmpty()) return null
+        val entry = journal.entry(command.id) ?: return null
+        val delivered = matchBolus(entry.startedAtEpochMs, command.bolusTenthsIU, result.bolusesSeen) ?: return null
+        val reason = "settled from the session's own history: ${delivered.tenthsIU} tenths delivered (bolus ${delivered.bolusId})" +
+            (if (delivered.tenthsIU != command.bolusTenthsIU) ", asked ${command.bolusTenthsIU ?: "?"}" else "") +
+            "; link lost afterwards: ${result.reason}"
+        journal.markFinished(command.id, Outcome.DONE, reason)
+        return ComboResult(command.id, Outcome.DONE, nowEpochMs(), reason = reason, bolus = delivered)
+    }
+
+    /**
+     * The history comes newest first and may hold boluses that are not ours: 30.10.2026 a quick
+     * bolus the owner gave by hand a minute after a 5.1 U command was taken for it. Only standard
+     * boluses started around the command count, the one with the command's amount first, else
+     * the earliest (a bolus cut short by the link shows fewer tenths).
+     */
+    private fun matchBolus(startedAt: Long, tenths: Int?, history: List<BolusReceipt>): BolusReceipt? {
+        val candidates = history
+            .filter { !it.quick && it.timestampEpochMs in (startedAt - PUMP_CLOCK_TOLERANCE_MS)..(startedAt + BOLUS_MATCH_WINDOW_MS) }
+            .sortedBy { it.timestampEpochMs }
+        return candidates.firstOrNull { it.tenthsIU == tenths } ?: candidates.firstOrNull()
     }
 
     companion object {

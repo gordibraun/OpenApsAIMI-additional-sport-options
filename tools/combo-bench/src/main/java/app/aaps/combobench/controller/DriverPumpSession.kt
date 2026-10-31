@@ -88,12 +88,16 @@ internal class DriverPumpSession(
 
     private val context = context.applicationContext
 
+    /** Receipts the pump's history showed during the running command; cleared when the next command starts. */
+    private val sessionBoluses = mutableListOf<BolusReceipt>()
+
     /**
      * The fork's AndroidBluetoothDevice watchdog and disconnect() make reads return empty lists and
      * writes succeed silently, which leaves ComboCtl spinning instead of failing. Turn that into
      * [ComboIOException] so the driver's own error paths run and every timeout here can fire.
      */
     private class FailingWhenClosedTransport(private val inner: AndroidBluetoothDevice) : BluetoothDevice(Dispatchers.IO) {
+
         @Volatile var closed = false
             private set
         override val address = inner.address
@@ -140,6 +144,7 @@ internal class DriverPumpSession(
         }.getOrDefault(true)
         val record = SessionRecord(files, command)
         record.phase(if (DriverProfile.confirmedStepPacing) "PACING_CONFIRMED_STEPS" else "PACING_STANDARD")
+        synchronized(sessionBoluses) { sessionBoluses.clear() }
         val result = try {
             when (command.kind) {
                 CommandKind.STATUS        -> status(record)
@@ -148,12 +153,16 @@ internal class DriverPumpSession(
                 CommandKind.CANCEL_TBR    -> tbr(command, record)
             }
         } catch (e: Exception) {
-            // Anything that escaped the per-command handling ended at a point this code cannot name.
-            PumpSession.SessionResult.Unknown("${e.javaClass.simpleName}: ${e.message?.take(120) ?: ""}")
+            // Anything that escaped the per-command handling ended at a point this code cannot name -
+            // but the boluses the pump's history showed before that point are kept for the executor.
+            PumpSession.SessionResult.Unknown("${e.javaClass.simpleName}: ${e.message?.take(120) ?: ""}", bolusesSeen())
         }
         record.finish(result)
         result
     }
+
+    /** Boluses the pump's history showed during the current command's session(s); see [PumpSession.SessionResult.Unknown]. */
+    private fun bolusesSeen(): List<BolusReceipt> = synchronized(sessionBoluses) { sessionBoluses.toList() }
 
     // ---- STATUS ---------------------------------------------------------------------------------
 
@@ -199,12 +208,12 @@ internal class DriverPumpSession(
                     delivered?.toReceipt()
                 )
             } catch (e: Pump.BolusAbortedDueToErrorException) {
-                return@withPump PumpSession.SessionResult.Unknown("bolus aborted by a pump error; amount delivered not established")
+                return@withPump PumpSession.SessionResult.Unknown("bolus aborted by a pump error; amount delivered not established", bolusesSeen())
             }
             // Anything else propagates and is reported as unknown by the caller: the bolus command
             // had been sent, and only the pump's history can say what it did with it.
             val receipt = delivered?.toReceipt()
-                ?: return@withPump PumpSession.SessionResult.Unknown("bolus sent but the pump's history showed no record of it")
+                ?: return@withPump PumpSession.SessionResult.Unknown("bolus sent but the pump's history showed no record of it", bolusesSeen())
             record.phase("BOLUS_RECORDED", JSONObject().put("tenthsIU", receipt.tenthsIU).put("bolusId", receipt.bolusId))
             runCatching { withTimeout(TherapySessionPolicy.STATUS_TIMEOUT_MS) { pump.updateStatus() } }
             PumpSession.SessionResult.Done(snapshotOrNull(pump, connected), bolus = receipt)
@@ -411,7 +420,7 @@ internal class DriverPumpSession(
         val flows = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val work = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val driverLog = DriverLog()
-        val boluses = mutableListOf<BolusReceipt>()
+        val boluses = sessionBoluses
 
         val receiver = object : BroadcastReceiver() {
             @Suppress("DEPRECATION")
@@ -685,6 +694,7 @@ internal class SessionRecord(private val files: BenchFiles, command: ComboComman
             is PumpSession.SessionResult.Failed  -> json.put("outcome", "FAILED").put("reason", result.reason)
                 .put("snapshot", result.snapshot?.toJson() ?: JSONObject.NULL).put("bolus", result.bolus?.toJson() ?: JSONObject.NULL)
             is PumpSession.SessionResult.Unknown -> json.put("outcome", "UNKNOWN").put("reason", result.reason)
+                .put("bolusesSeen", JSONArray().also { arr -> result.bolusesSeen.forEach { arr.put(it.toJson()) } })
         }
         save()
     }

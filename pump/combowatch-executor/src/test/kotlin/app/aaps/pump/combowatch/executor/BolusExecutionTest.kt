@@ -94,6 +94,43 @@ class BolusExecutionTest {
         assertEquals(listOf("b1"), session.runs)
     }
 
+    @Test fun `a session that read the bolus from the pump's history before the link died settles it at once`() {
+        // 31.10.2026 09:12: 2.6 U recorded by the pump and read by the driver, link lost 3 s later;
+        // the next session's history delta was empty and the bolus was wrongly reported as not given.
+        val journal = SimpleCommandJournal()
+        val session = RecordingSession {
+            PumpSession.SessionResult.Unknown("link lost after the bolus", bolusesSeen = listOf(receipt(tenths = 3, at = now + 6_000, id = 935339L)))
+        }
+        val executor = ComboExecutor(gate(), journal, session) { now }
+
+        val result = executor.execute(bolus("b1"), lease())
+
+        assertEquals(Outcome.DONE, result.outcome)
+        assertEquals(935339L, result.bolus?.bolusId)
+        assertFalse(executor.awaitingReconciliation)
+        // The next session's empty history delta must not turn the delivered bolus into a failure.
+        executor.reconcile(snapshot(), bolusesInHistory = emptyList())
+        assertEquals(Outcome.DONE, journal.entry("b1")?.outcome)
+        executor.execute(bolus("b2"), lease())
+        assertEquals(listOf("b1", "b2"), session.runs)
+    }
+
+    @Test fun `receipts a dying session saw that are not the command's leave it unclear`() {
+        val journal = SimpleCommandJournal()
+        val session = RecordingSession {
+            PumpSession.SessionResult.Unknown(
+                "link lost",
+                bolusesSeen = listOf(receipt(tenths = 51, at = now + 30_000, id = 7, quick = true), receipt(tenths = 3, at = now - 3_600_000))
+            )
+        }
+        val executor = ComboExecutor(gate(), journal, session) { now }
+
+        val result = executor.execute(bolus("b1"), lease())
+
+        assertEquals(Outcome.UNKNOWN, result.outcome)
+        assertTrue(executor.awaitingReconciliation)
+    }
+
     @Test fun `the pump's history settles an unclear bolus as delivered`() {
         val journal = SimpleCommandJournal()
         val session = RecordingSession { PumpSession.SessionResult.Unknown("link lost") }
