@@ -203,6 +203,7 @@ internal class AutonomyRunner(
                     JSONObject().put("at", now).put("byWatch", true).put("series", JSONArray(series))
                         .put("iobU", decision.iobNowU ?: JSONObject.NULL)
                         .put("carbsToTargetG", decision.carbsToTargetG ?: JSONObject.NULL)
+                        .put("carbsWithinMin", decision.carbsWithinMin ?: JSONObject.NULL)
                 )
             }
             decision.carbsHintG?.let { grams ->

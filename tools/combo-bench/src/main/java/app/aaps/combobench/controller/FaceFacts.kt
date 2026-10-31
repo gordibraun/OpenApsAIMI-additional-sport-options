@@ -34,6 +34,10 @@ class FaceFacts(
     val iobU: Double? = null,
     /** Carbohydrates on board, grams, when known. */
     val cobG: Double? = null,
+    /** True when [carbsNeededG] is the phone's own figure (what its notice says), not the watch's arithmetic. */
+    val carbsNeededByPhone: Boolean = false,
+    /** Within how many minutes the phone asks for them; null when it does not say. */
+    val carbsNeededWithinMin: Int? = null,
     /** The phone's glucose target, mg/dL, when known. */
     val targetMgdl: Double? = null,
     /** The walk or sport session entered on the watch that matters now, if any. */

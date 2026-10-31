@@ -168,8 +168,26 @@ internal class ControllerHost private constructor(context: Context) {
         }
     }
 
+    @Volatile private var lastFaceCarbsLogged: Int? = -1
+    private var lastPhoneCarbsAsk: Pair<Int, Long>? = null
+
+    /**
+     * The phone's own «eat N g» reaches the wrist as a notice too, but only when it is worth a
+     * buzz (at least [FaceGraph.MIN_CARBS_SHOWN_G] g, wanted within an hour) and once per figure;
+     * a few grams over two hours stay a line on the face.
+     */
+    private fun maybeAskCarbsFromPhone(snapshot: RegulationSnapshot) {
+        val grams = snapshot.carbsRequiredG?.takeIf { it >= FaceGraph.MIN_CARBS_SHOWN_G } ?: return
+        val within = snapshot.carbsRequiredWithinMin ?: return
+        if (within > PHONE_CARBS_ASK_URGENT_MIN) return
+        val now = System.currentTimeMillis()
+        lastPhoneCarbsAsk?.let { (lastGrams, at) -> if (lastGrams == grams && now - at < PHONE_CARBS_ASK_REPEAT_MS) return }
+        lastPhoneCarbsAsk = grams to now
+        notifyCarbs(grams, "Телефон просит $grams г углеводов в течение $within мин; на циферблате то же число.", subtitle = "Так же говорит телефон")
+    }
+
     /** A notification that vibrates: the one thing the watch asks of its wearer by itself. */
-    private fun notifyCarbs(grams: Int, why: String) {
+    private fun notifyCarbs(grams: Int, why: String, subtitle: String = "Одной остановки базала не хватит") {
         runCatching {
             val manager = context.getSystemService(android.app.NotificationManager::class.java)
             manager.createNotificationChannel(
@@ -183,8 +201,8 @@ internal class ControllerHost private constructor(context: Context) {
                 android.app.Notification.Builder(context, CARBS_CHANNEL)
                     .setSmallIcon(android.R.drawable.stat_notify_error)
                     .setContentTitle("Съешьте около $grams г углеводов")
-                    .setContentText("Одной остановки базала не хватит")
-                    .setStyle(android.app.Notification.BigTextStyle().bigText("Одной остановки базала не хватит. $why"))
+                    .setContentText(subtitle)
+                    .setStyle(android.app.Notification.BigTextStyle().bigText("$subtitle. $why"))
                     .setCategory(android.app.Notification.CATEGORY_ALARM)
                     .setAutoCancel(true)
                     .build()
@@ -290,6 +308,7 @@ internal class ControllerHost private constructor(context: Context) {
             runCatching {
                 val snapshot = RegulationSnapshot.fromJson(saved)
                 autonomy.saveSnapshot(snapshot)
+                maybeAskCarbsFromPhone(snapshot)
                 // The phone's forecast is what the system expected: kept to check insulin's effect against later.
                 snapshot.phoneForecast?.let { autonomy.addForecastMade(snapshot.madeAtEpochMs, it, byWatch = false) }
                 keepPhoneActivities(snapshot)
@@ -1009,13 +1028,32 @@ internal class ControllerHost private constructor(context: Context) {
         // arithmetic on the phone's forecast and coefficients otherwise. Nothing while no low is
         // forecast, however far from the target.
         val forecastAt = if (alone) own?.optLong("at", 0L) ?: 0L else phoneSnapshot?.madeAtEpochMs ?: 0L
-        val needed = if (alone) own?.optInt("carbsToTargetG", 0)?.takeIf { it > 0 }
-        else phoneSnapshot?.let { s -> forecast?.series?.takeIf { it.isNotEmpty() }?.let { CarbsNeeded.gramsToAvoidLow(it, s.sensitivityMgdlPerU, s.carbRatioGPerU) } }
+        // With the phone leading, its own figure comes first: the same grams its «Предложены углеводы»
+        // notice shows, so that the two screens never disagree (31.10.2026: phone 5 g, watch nothing).
+        val phoneAsks = if (alone) null else phoneSnapshot?.carbsRequiredG
+        // Without the phone's own figure (an older phone build) the phone's rule is run here on its forecast;
+        // alone, the watch has run the same rule on its own forecast (WatchRegulator, carbsToTargetG).
+        val phoneLike = if (alone || phoneAsks != null) null
+        else phoneSnapshot?.let { s -> forecast?.series?.takeIf { it.isNotEmpty() }?.let { CarbsNeeded.likeThePhone(it, s.targetMgdl, s.sensitivityMgdlPerU, s.carbRatioGPerU) } }
+        val needed = when {
+            alone             -> own?.optInt("carbsToTargetG", 0)?.takeIf { it > 0 }
+            phoneAsks != null -> phoneAsks.takeIf { it > 0 }
+            else              -> phoneLike?.grams?.takeIf { it > 0 }
+        }
+        val neededWithin = when {
+            alone             -> own?.optInt("carbsWithinMin", 0)?.takeIf { it > 0 }
+            phoneAsks != null -> phoneSnapshot?.carbsRequiredWithinMin
+            else              -> phoneLike?.withinMinutes
+        }
         // Carbohydrates entered on this watch after that forecast are not in it yet: they come off
         // the hint at once, and off the phone's carbs-on-board figure, which it gets with the next
         // lease and counts at its next loop, up to five minutes later.
         val ownCarbsSinceForecast = autonomy.carbs().filter { it.atEpochMs > forecastAt }.sumOf { it.grams }
         val carbsNeeded = needed?.let { it - ownCarbsSinceForecast }?.takeIf { it > 0 }
+        if (carbsNeeded != lastFaceCarbsLogged) {
+            lastFaceCarbsLogged = carbsNeeded
+            android.util.Log.i("ComboFace", "face: carbs needed ${carbsNeeded ?: 0} g within ${neededWithin ?: 0} min (${if (alone) "the phone's rule on the watch's forecast" else if (phoneAsks != null) "the phone's own figure" else "the phone's rule on the phone's forecast"})")
+        }
         // Insulin on board: the phone's figure (the watch's own when alone) plus the boluses the pump
         // reported after that figure was made. A dose given from this watch, or by hand on the pump,
         // is in the pump's history the next time the watch reads it, long before the phone's next
@@ -1047,6 +1085,8 @@ internal class ControllerHost private constructor(context: Context) {
             deltaPer5Min = GlucoseTrend.from(allReadings, now)?.takeIf { it.known }?.delta,
             iobU = iob,
             cobG = cob,
+            carbsNeededByPhone = !alone && phoneAsks != null,
+            carbsNeededWithinMin = neededWithin,
             targetMgdl = phoneSnapshot?.targetMgdl?.takeIf { it.isFinite() && it > 0 },
             activity = activity,
             carbsNeededG = carbsNeeded
@@ -1148,6 +1188,9 @@ internal class ControllerHost private constructor(context: Context) {
         /** How far back the face's graph reaches. */
         private const val FACE_HISTORY_MS = 90 * 60_000L
         private const val CARBS_CHANNEL = "combo-autonomy-carbs"
+        /** The phone's carbs ask buzzes the wrist only when wanted within this many minutes, and once per figure per this long. */
+        private const val PHONE_CARBS_ASK_URGENT_MIN = 60
+        private const val PHONE_CARBS_ASK_REPEAT_MS = 20 * 60_000L
 
 
         /** The longest the pump is held back for the sensor; a window and a session, with room to spare. */

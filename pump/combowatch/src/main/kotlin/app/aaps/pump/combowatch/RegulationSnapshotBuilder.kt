@@ -128,6 +128,10 @@ class RegulationSnapshotBuilder @Inject constructor(
             insulinRemaining = remaining,
             assumedTbr = assumed,
             phoneForecast = result?.predBGs?.AIMI_FINAL,
+            // The phone's own «eat N g within M min», so that the watch face shows the same figure (31.10.2026:
+            // the phone asked for 5 g while the watch, by its own floor-80 arithmetic, showed nothing).
+            carbsRequiredG = request.carbsReq.coerceAtLeast(0),
+            carbsRequiredWithinMin = request.carbsReqWithin.takeIf { request.carbsReq > 0 && it > 0 },
             // What the phone's wizard corrects by, so that the watch's meal calculation matches it.
             foodSensitivityMgdlPerU = runCatching { activePlugin.get().activeAPS.getAverageIsfMgdl(madeAt, "combowatch") }.getOrNull()?.takeIf { it.isFinite() && it > 0.0 }
         ).takeIf { it.isWellFormed }

@@ -401,8 +401,8 @@ class WatchRegulatorTest {
         assertThat(decision.forecastMinMgdl!!).isLessThan(80)
         assertThat(decision.carbsToTargetG).isNotNull()
         assertThat(decision.carbsToTargetG!!).isAtLeast(1)
-        // Flat at 100 with nothing on board: under the target, but no low in sight, nothing to eat for.
-        assertThat(Fixture().glucose(100.0, per5 = 0.0).decide().carbsToTargetG).isNull()
+        // Flat at 100 with nothing on board: by the phone's rule at most a few grams to the target, below what either screen shows.
+        assertThat(Fixture().glucose(100.0, per5 = 0.0).decide().carbsToTargetG ?: 0).isLessThan(CarbsNeeded.PHONE_SHOW_FROM_G)
         // Lowest 70: lifted to 90 takes 20 mg/dL, 4 g. At or above the floor nothing is asked, however far from the target.
         assertThat(CarbsNeeded.gramsToAvoidLow(listOf(100, 90, 70), 50.0, 10.0)).isEqualTo(4)
         assertThat(CarbsNeeded.gramsToAvoidLow(listOf(80, 79, 80), 50.0, 10.0)).isEqualTo(3)

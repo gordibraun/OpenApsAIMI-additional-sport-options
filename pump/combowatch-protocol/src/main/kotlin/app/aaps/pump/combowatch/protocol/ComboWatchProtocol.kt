@@ -553,6 +553,14 @@ data class RegulationSnapshot(
      */
     val foodSensitivityMgdlPerU: Double? = null,
     /**
+     * What the phone's algorithm asks the owner to eat, in grams (0 = nothing), and within how many
+     * minutes - the figure of the phone's own «Предложены углеводы» notice, so that the watch face
+     * shows the same number. Null when the phone's build does not say; the watch then falls back
+     * to its own arithmetic on the phone's forecast.
+     */
+    val carbsRequiredG: Int? = null,
+    val carbsRequiredWithinMin: Int? = null,
+    /**
      * Walks and sport sessions the phone has on record - its Activity v2 entries, however they were
      * entered - so that the watch on its own treats them as the phone would: no correction of the
      * rise during a session, and the tail after it. 29.10.2026 the watch alone gave three micro-doses
@@ -600,6 +608,8 @@ data class RegulationSnapshot(
             assumedTbr?.let { put("assumedTbr", JSONObject().put("rate", it.rateUph).put("endsAt", it.endsAtEpochMs)) }
             phoneForecast?.let { forecast -> put("phoneForecast", JSONArray().apply { forecast.forEach { put(it) } }) }
             foodSensitivityMgdlPerU?.let { put("foodSensitivity", it) }
+            carbsRequiredG?.let { put("carbsRequired", it) }
+            carbsRequiredWithinMin?.let { put("carbsRequiredWithin", it) }
             if (activities.isNotEmpty()) put("activities", JSONArray().apply { activities.forEach { put(it.toJson()) } })
         }
 
@@ -622,6 +632,8 @@ data class RegulationSnapshot(
             insulinRemaining = json.getJSONArray("insulinRemaining").let { array -> List(array.length()) { array.getDouble(it) } },
             assumedTbr = json.optJSONObject("assumedTbr")?.let { AssumedTbr(it.getDouble("rate"), it.getLong("endsAt")) },
             foodSensitivityMgdlPerU = json.optDouble("foodSensitivity").takeIf { it.isFinite() && it > 0.0 },
+            carbsRequiredG = if (json.has("carbsRequired")) json.optInt("carbsRequired").coerceAtLeast(0) else null,
+            carbsRequiredWithinMin = if (json.has("carbsRequiredWithin")) json.optInt("carbsRequiredWithin").takeIf { it > 0 } else null,
             phoneForecast = json.optJSONArray("phoneForecast")?.let { array -> List(array.length()) { array.getInt(it) } },
             activities = json.optJSONArray("activities")?.let { array -> List(array.length()) { ActivityWindow.fromJson(array.getJSONObject(it)) } } ?: emptyList()
         )

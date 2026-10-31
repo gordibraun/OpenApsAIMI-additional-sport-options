@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 54
-            versionName = "0.54-bolus-settled-from-session"
+            versionCode = 56
+            versionName = "0.56-carbs-like-the-phone"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

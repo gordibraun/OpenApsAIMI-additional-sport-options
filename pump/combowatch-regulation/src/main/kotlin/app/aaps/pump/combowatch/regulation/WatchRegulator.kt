@@ -135,14 +135,18 @@ class WatchRegulator {
         /** Insulin on board now, units, by the watch's forecast model; null without a usable snapshot. For the face. */
         val iobNowU: Double? = null,
         /**
-         * Grams of carbohydrate that would lift the lowest point of the forecast, with what runs
-         * now, back up to the target; null when the forecast stays at or above it. For the face.
+         * Grams of carbohydrate by the phone's own rule ([CarbsNeeded.likeThePhone]) on the forecast
+         * with what runs now: the lowest point between +20 and +120 min lifted to the target plus
+         * the pressure buffer; null when nothing is asked. For the face, so that the watch alone
+         * shows what the phone would.
          */
         val carbsToTargetG: Int? = null,
         /** Tenths of a unit of microbolus to give now; zero when none. */
         val smbTenthsIU: Int = 0,
         /** The phone's "insulin required" on the watch's forecast, units; null when the rules asked for less basal instead. */
-        val insulinReqU: Double? = null
+        val insulinReqU: Double? = null,
+        /** Within how many minutes [carbsToTargetG] is wanted (the minute of the forecast's lowest point). */
+        val carbsWithinMin: Int? = null
     )
 
     /**
@@ -533,11 +537,24 @@ class WatchRegulator {
         val asRunning = if (running == null || forecast == null) null else runCatching {
             forecast.series(basalNow * runningPercent / 100.0, ceil(remainingMinutes).toInt().coerceAtLeast(1))
         }.getOrNull()
-        val carbsToTarget = snapshot?.let { CarbsNeeded.gramsToAvoidLow(asRunning ?: atProfile ?: emptyList(), it.sensitivityMgdlPerU, it.carbRatioGPerU, floorMgdl = floorMgdl) }
+        val iobNowU = forecast?.let { runCatching { it.iobNowU() }.getOrNull()?.takeIf { iob -> iob.isFinite() } }
+        // The face's grams by the phone's own rule, with the phone's pressure buffer from what this
+        // watch knows: its boluses of the last half hour, insulin on board, the night without a meal.
+        val carbsLikePhone = snapshot?.let { s ->
+            CarbsNeeded.likeThePhone(
+                asRunning ?: atProfile ?: emptyList(), s.targetMgdl, s.sensitivityMgdlPerU, s.carbRatioGPerU,
+                bufferMgdl = CarbsNeeded.pressureBufferMgdl(
+                    recentSmb30U = inputs.delivery.boluses.filter { it.atEpochMs in (now - 30 * 60_000L)..now }.sumOf { it.units },
+                    iobU = iobNowU ?: 0.0,
+                    nightNoMeal = inputs.hourOfDay(now) in 0..5 && s.cobG <= 0.0,
+                ),
+            )
+        }
         return Decision(
             action, rule, wantedPercent, text, carbsHint, trend, forecastMin, forecastEnd, atProfile, asRunning, hold,
-            forecast?.let { runCatching { it.iobNowU() }.getOrNull()?.takeIf { iob -> iob.isFinite() } },
-            carbsToTarget, smbTenths, insulinReq
+            iobNowU,
+            carbsLikePhone?.grams?.takeIf { it > 0 }, smbTenths, insulinReq,
+            carbsWithinMin = carbsLikePhone?.takeIf { it.grams > 0 }?.withinMinutes,
         )
     }
 

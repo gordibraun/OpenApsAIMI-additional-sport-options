@@ -24,7 +24,7 @@ internal object FaceGraph {
     private const val HISTORY_MIN = 60
 
     /** Under this the shortfall to the target is not worth eating for. */
-    private const val MIN_CARBS_SHOWN_G = 5
+    const val MIN_CARBS_SHOWN_G = 5
     private const val FORECAST_MIN = 90
 
     /** Forecast dots this far apart; the series itself is five minutes apart. */
@@ -101,8 +101,9 @@ internal object FaceGraph {
             text.color = if (f.minMgdl < 80) 0xFFFF7043.toInt() else 0xFFB0BEC5.toInt()
             canvas.drawText("мин ${f.minMgdl} · ${if (f.byWatch) "часы" else "тел"}", PLOT_RIGHT, BOTTOM_BASELINE, text)
         }
-        // What to eat so that the forecast comes back up to the target; a few grams are not worth a line.
-        facts?.carbsNeededG?.takeIf { it >= MIN_CARBS_SHOWN_G }?.let { grams ->
+        // What to eat: the phone's own figure whenever the phone gives one (shown as is, so both screens
+        // agree), otherwise the watch's arithmetic, where a few grams are not worth a line.
+        facts?.carbsNeededG?.takeIf { facts.carbsNeededByPhone || it >= MIN_CARBS_SHOWN_G }?.let { grams ->
             text.textSize = BOTTOM_TEXT_SIZE; text.typeface = Typeface.DEFAULT_BOLD; text.textAlign = Paint.Align.LEFT
             text.color = 0xFFFFB74D.toInt()
             canvas.drawText("нужно $grams г", PLOT_LEFT, BOTTOM_BASELINE, text)
@@ -131,6 +132,9 @@ internal object FaceGraph {
         val f = facts?.forecast ?: return "График глюкозы: данных нет"
         return "График: последний час и прогноз на полтора часа, минимум ${f.minMgdl}, через четыре часа ${f.endMgdl}; " +
             (facts.iobU?.let { "активный инсулин %.1f ЕД".format(Locale.getDefault(), it) } ?: "активный инсулин неизвестен") +
-            (facts.carbsNeededG?.takeIf { it > 0 }?.let { "; чтобы не упасть ниже 80, нужно $it г углеводов" } ?: "")
+            (facts.carbsNeededG?.takeIf { it > 0 }?.let {
+                (if (facts.carbsNeededByPhone) "; телефон просит $it г углеводов" else "; по правилу телефона нужно $it г углеводов") +
+                    (facts.carbsNeededWithinMin?.let { m -> " в течение $m мин" } ?: "")
+            } ?: "")
     }
 }
