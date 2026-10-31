@@ -1010,39 +1010,44 @@ internal class ControllerHost private constructor(context: Context) {
         val led = leadership.current()
         // The phone's forecast travels with every lease; the watch's own stands only while it is alone.
         val phoneSnapshot = autonomy.snapshot()
-        val own = if (alone) autonomy.faceForecast() else null
-        val forecast = if (alone) {
+        // The watch's own forecast serves the face only while fresh: when the phone has just gone
+        // quiet, the last own forecast may be hours old (see [FaceFreshness]); the phone's snapshot
+        // then stays the base, and nothing older than its limits is shown at all.
+        val own = if (alone) autonomy.faceForecast()?.takeIf { FaceFreshness.ownUsable(now, it.optLong("at", 0L)) } else null
+        val useOwn = own != null
+        val phoneFresh = phoneSnapshot?.takeIf { FaceFreshness.phoneForecastUsable(now, it.madeAtEpochMs) }
+        val forecast = if (useOwn) {
             val series = own?.optJSONArray("series")?.let { array -> List(array.length()) { array.getInt(it) } }.orEmpty()
             if (series.isNotEmpty()) FaceFacts.Forecast(series.min(), series.last(), own?.optLong("at", now) ?: now, byWatch = true, series = series)
-            else autonomy.journal().lastOrNull()?.let { entry ->
+            else autonomy.journal().lastOrNull()?.takeIf { FaceFreshness.ownUsable(now, it.optLong("at", 0L)) }?.let { entry ->
                 val min = entry.optInt("forecastMin", -1); val end = entry.optInt("forecastEnd", -1)
                 if (min > 0 && end > 0) FaceFacts.Forecast(min, end, entry.optLong("at", now), byWatch = true) else null
             }
         } else {
-            phoneSnapshot?.phoneForecast?.takeIf { it.isNotEmpty() }
-                ?.let { FaceFacts.Forecast(it.min(), it.last(), phoneSnapshot.madeAtEpochMs, byWatch = false, series = it) }
+            phoneFresh?.phoneForecast?.takeIf { it.isNotEmpty() }
+                ?.let { FaceFacts.Forecast(it.min(), it.last(), phoneFresh.madeAtEpochMs, byWatch = false, series = it) }
         }
         val allReadings = autonomy.readings()
         val activity = ActivityEffect.current(autonomy.activities(), now)
         // Grams that keep the forecast out of a low: the watch's own number when alone, the same
         // arithmetic on the phone's forecast and coefficients otherwise. Nothing while no low is
         // forecast, however far from the target.
-        val forecastAt = if (alone) own?.optLong("at", 0L) ?: 0L else phoneSnapshot?.madeAtEpochMs ?: 0L
+        val forecastAt = if (useOwn) own?.optLong("at", 0L) ?: 0L else phoneFresh?.madeAtEpochMs ?: 0L
         // With the phone leading, its own figure comes first: the same grams its «Предложены углеводы»
         // notice shows, so that the two screens never disagree (31.10.2026: phone 5 g, watch nothing).
-        val phoneAsks = if (alone) null else phoneSnapshot?.carbsRequiredG
+        val phoneAsks = if (useOwn) null else phoneFresh?.carbsRequiredG
         // Without the phone's own figure (an older phone build) the phone's rule is run here on its forecast;
         // alone, the watch has run the same rule on its own forecast (WatchRegulator, carbsToTargetG).
-        val phoneLike = if (alone || phoneAsks != null) null
-        else phoneSnapshot?.let { s -> forecast?.series?.takeIf { it.isNotEmpty() }?.let { CarbsNeeded.likeThePhone(it, s.targetMgdl, s.sensitivityMgdlPerU, s.carbRatioGPerU) } }
+        val phoneLike = if (useOwn || phoneAsks != null) null
+        else phoneFresh?.let { s -> forecast?.series?.takeIf { it.isNotEmpty() }?.let { CarbsNeeded.likeThePhone(it, s.targetMgdl, s.sensitivityMgdlPerU, s.carbRatioGPerU) } }
         val needed = when {
-            alone             -> own?.optInt("carbsToTargetG", 0)?.takeIf { it > 0 }
+            useOwn            -> own?.optInt("carbsToTargetG", 0)?.takeIf { it > 0 }
             phoneAsks != null -> phoneAsks.takeIf { it > 0 }
             else              -> phoneLike?.grams?.takeIf { it > 0 }
         }
         val neededWithin = when {
-            alone             -> own?.optInt("carbsWithinMin", 0)?.takeIf { it > 0 }
-            phoneAsks != null -> phoneSnapshot?.carbsRequiredWithinMin
+            useOwn            -> own?.optInt("carbsWithinMin", 0)?.takeIf { it > 0 }
+            phoneAsks != null -> phoneFresh?.carbsRequiredWithinMin
             else              -> phoneLike?.withinMinutes
         }
         // Carbohydrates entered on this watch after that forecast are not in it yet: they come off
@@ -1052,7 +1057,7 @@ internal class ControllerHost private constructor(context: Context) {
         val carbsNeeded = needed?.let { it - ownCarbsSinceForecast }?.takeIf { it > 0 }
         if (carbsNeeded != lastFaceCarbsLogged) {
             lastFaceCarbsLogged = carbsNeeded
-            android.util.Log.i("ComboFace", "face: carbs needed ${carbsNeeded ?: 0} g within ${neededWithin ?: 0} min (${if (alone) "the phone's rule on the watch's forecast" else if (phoneAsks != null) "the phone's own figure" else "the phone's rule on the phone's forecast"})")
+            android.util.Log.i("ComboFace", "face: carbs needed ${carbsNeeded ?: 0} g within ${neededWithin ?: 0} min (${if (useOwn) "the phone's rule on the watch's forecast" else if (phoneAsks != null) "the phone's own figure" else if (phoneFresh == null) "no fresh forecast" else "the phone's rule on the phone's forecast"})")
         }
         // Insulin on board: the phone's figure (the watch's own when alone) plus the boluses the pump
         // reported after that figure was made. A dose given from this watch, or by hand on the pump,
@@ -1060,11 +1065,12 @@ internal class ControllerHost private constructor(context: Context) {
         // snapshot (19 Oct 2026: the face kept the old IOB for up to ten minutes after a bolus).
         // Decay over those few minutes is ignored, as with the carbohydrates below; once the phone
         // has counted a bolus its snapshot is newer than the bolus and it leaves this sum.
-        val iobBaseAt = if (alone) own?.optLong("at", 0L) ?: 0L else phoneSnapshot?.madeAtEpochMs ?: 0L
+        val phoneForIob = phoneSnapshot?.takeIf { FaceFreshness.phoneIobUsable(now, it.madeAtEpochMs) }
+        val iobBaseAt = if (useOwn) own?.optLong("at", 0L) ?: 0L else phoneForIob?.madeAtEpochMs ?: 0L
         val bolusesSinceIobBase = autonomy.delivery().boluses.filter { it.atEpochMs > iobBaseAt }.sumOf { it.units }
-        val iob = (if (alone) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneSnapshot?.iobU)?.let { it + bolusesSinceIobBase }
+        val iob = (if (useOwn) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneForIob?.iobU)?.let { it + bolusesSinceIobBase }
         val ownCarbsSinceSnapshot = phoneSnapshot?.let { s -> autonomy.carbs().filter { it.atEpochMs > s.madeAtEpochMs }.sumOf { it.grams } } ?: 0
-        val cob = if (alone) null else phoneSnapshot?.cobG?.let { it + ownCarbsSinceSnapshot }
+        val cob = if (useOwn) null else phoneFresh?.cobG?.let { it + ownCarbsSinceSnapshot }
         return FaceFacts(
             heldPump = held,
             phoneHeardEpochMs = phoneLastHeardEpochMs,
