@@ -120,6 +120,12 @@ abstract class PluginsListModule {
     @Binds
     @AllConfigs
     @IntoMap
+    @IntKey(12)
+    abstract fun bindBridgePlugin(plugin: app.aaps.plugins.aps.openAPSAIMI.bridge.BridgePlugin): PluginBase
+
+    @Binds
+    @AllConfigs
+    @IntoMap
     @IntKey(30)
     abstract fun bindInsulinOrefRapidActingPlugin(plugin: InsulinOrefRapidActingPlugin): PluginBase
 

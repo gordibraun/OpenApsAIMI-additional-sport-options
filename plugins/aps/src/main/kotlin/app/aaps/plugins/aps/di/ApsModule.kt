@@ -37,6 +37,9 @@ abstract class ApsModule {
     @ContributesAndroidInjector abstract fun contributesFoodPhotoFragment(): app.aaps.plugins.aps.openAPSAIMI.food.FoodPhotoFragment
     @ContributesAndroidInjector abstract fun contributesFoodUploadWorker(): app.aaps.plugins.aps.openAPSAIMI.food.FoodUploadWorker
     @ContributesAndroidInjector abstract fun contributesFoodDebugReceiver(): app.aaps.plugins.aps.openAPSAIMI.food.FoodDebugReceiver
+    @ContributesAndroidInjector abstract fun contributesBridgeFragment(): app.aaps.plugins.aps.openAPSAIMI.bridge.BridgeFragment
+    @ContributesAndroidInjector abstract fun contributesBridgeUploadWorker(): app.aaps.plugins.aps.openAPSAIMI.bridge.BridgeUploadWorker
+    @ContributesAndroidInjector abstract fun contributesBridgeSosReceiver(): app.aaps.plugins.aps.openAPSAIMI.bridge.BridgeSosReceiver
 
     @Module
     interface Bindings {

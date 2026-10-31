@@ -27,6 +27,13 @@
                 <action android:name="app.aaps.food.ADD_PHOTO" />
             </intent-filter>
         </receiver>
+        <receiver
+            android:name=".openAPSAIMI.bridge.BridgeSosReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="app.aaps.bridge.WATCH_SOS" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

@@ -392,6 +392,8 @@ data class PumpEvent(
          * `hr_avg= hr_max= hr_effort= hr_hard= hr_rest=`, [timestampEpochMs] is the session's start.
          */
         ACTIVITY_PROFILE,
+        /** The owner pressed «Сообщить Claude» on the watch; [PumpEvent.note] is the watch's diagnostic pack (JSON). */
+        SOS,
 
         /** A type a newer watch sends and this build does not know. Passed over, never an error. */
         UNKNOWN

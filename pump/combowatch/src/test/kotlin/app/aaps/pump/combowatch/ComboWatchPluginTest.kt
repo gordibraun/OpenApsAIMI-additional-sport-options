@@ -46,6 +46,7 @@ import org.mockito.kotlin.whenever
  */
 class ComboWatchPluginTest : TestBaseWithProfile() {
 
+
     @Mock lateinit var commandQueue: CommandQueue
     @Mock lateinit var pumpSync: PumpSync
     @Mock lateinit var link: ComboWatchLink
@@ -65,7 +66,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         doReturn("another pump on the watch").whenever(rh).gs(eq(R.string.combowatch_other_pump), anyString(), anyString())
         doReturn("bolus of another pump").whenever(rh).gs(eq(R.string.combowatch_bolus_of_other_pump), anyDouble(), anyString(), anyString())
         plugin = ComboWatchPlugin(
-            aapsLogger, rh, preferences, commandQueue, link, pumpSync, constraintsChecker, uiInteraction, pumpEnactResultProvider, snapshots, persistenceLayer
+            context, aapsLogger, rh, preferences, commandQueue, link, pumpSync, constraintsChecker, uiInteraction, pumpEnactResultProvider, snapshots, persistenceLayer
         )
     }
 

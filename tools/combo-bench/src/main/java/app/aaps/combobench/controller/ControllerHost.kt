@@ -992,6 +992,38 @@ internal class ControllerHost private constructor(context: Context) {
         return granted
     }
 
+    /**
+     * The owner's «Сообщить Claude» on the watch: the bench's own diagnostic pack goes to the phone
+     * as an event - queued like any other when the phone is away - and the phone's «Связь» tab sends
+     * it on with its own data. Nothing on the pump changes.
+     */
+    fun sendSos(chip: String): Boolean {
+        val now = System.currentTimeMillis()
+        val pack = JSONObject().put("at", now).put("chip", chip).put("bench", app.aaps.combobench.BuildConfig.VERSION_NAME)
+        runCatching { if (files.exists(HEARTBEAT_FILE)) pack.put("heartbeat", files.read(HEARTBEAT_FILE)) }
+        runCatching { if (files.exists(LEASE_FILE)) pack.put("lease", files.read(LEASE_FILE)) }
+        pack.put("phoneHeardAt", phoneLastHeardEpochMs)
+        runCatching { pack.put("face", FaceGraph.describe(faceFacts())) }
+        pack.put("commands", JSONArray().also { arr ->
+            recentCommands(8).forEach { e ->
+                arr.put(JSONObject().put("at", e.startedAtEpochMs).put("kind", e.kind?.name).put("outcome", e.outcome?.name).put("reason", e.reason).put("tenths", e.bolusTenthsIU).put("tbr", e.tbrPercentage))
+            }
+        })
+        pack.put("sessions", JSONArray().also { arr ->
+            context.filesDir.listFiles { f -> f.name.startsWith("controller-session-") && f.name.endsWith(".json") }
+                ?.sortedByDescending { it.lastModified() }?.take(2)?.forEach { f ->
+                    runCatching { JSONObject(f.readText()) }.getOrNull()?.let { s -> s.remove("driverLogs"); s.remove("snapshot"); s.remove("profile"); arr.put(s) }
+                }
+        })
+        pack.put("decisions", JSONArray(autonomy.journal().takeLast(6)))
+        pack.put("readings", JSONArray().also { arr -> autonomy.readings().takeLast(6).forEach { arr.put(JSONObject().put("at", it.atEpochMs).put("mgdl", it.mgdl)) } })
+        if (pack.toString().length > 60_000) pack.remove("sessions")
+        outbox.append(PumpEvent(0, PumpEvent.Type.SOS, now, pumpSerial = heldPump(), note = pack.toString()))
+        autonomy.addToJournal(JSONObject().put("at", now).put("action", "SOS").put("text", "Сигнал Claude с часов: $chip").put("mode", autonomy.mode().name))
+        sendEvents()
+        return true
+    }
+
     /** The last commands that reached this watch and what came of them, oldest first; for the owner's journal. */
     fun recentCommands(limit: Int): List<CommandJournal.Entry> = journal.entries().takeLast(limit)
 

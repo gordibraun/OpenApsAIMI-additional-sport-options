@@ -67,6 +67,20 @@ class ControlLogActivity : Activity() {
         val host = ControllerHost.get(this)
         val now = System.currentTimeMillis()
         runCatching { host.faceFacts() }.getOrNull()?.let { line(summary(it, now), 13f, Color.rgb(255, 195, 50)) }
+        line("Сообщить Claude (данные часов приложатся сами):", 12f, Color.GRAY)
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            for ((label, chip) in listOf("Сахар" to "glucose", "Доза" to "dose", "Помпа" to "pump", "Другое" to "other")) {
+                addView(android.widget.Button(this@ControlLogActivity).apply {
+                    text = label; textSize = 11f; isAllCaps = false
+                    setOnClickListener {
+                        val ok = runCatching { host.sendSos(chip) }.getOrDefault(false)
+                        android.widget.Toast.makeText(this@ControlLogActivity, if (ok) "Отправлено телефону, допишите словами во вкладке «Связь»" else "Не удалось отправить", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+            column.addView(this)
+        }
         val items = mutableListOf<Triple<Long, String, Int>>()
         for (entry in runCatching { host.leadershipEntries() }.getOrDefault(emptyList()))
             items += Triple(entry.atEpochMs, "▶ ${clock.format(Date(entry.atEpochMs))} ${entry.text}", Color.rgb(93, 193, 238))

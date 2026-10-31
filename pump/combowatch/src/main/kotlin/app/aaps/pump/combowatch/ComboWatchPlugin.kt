@@ -15,6 +15,9 @@ import app.aaps.core.data.pump.defs.PumpDescription
 import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
 import app.aaps.core.interfaces.db.PersistenceLayer
+import android.content.Context
+import android.content.Intent
+import java.io.File
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.notifications.Notification
@@ -74,6 +77,7 @@ import kotlin.math.roundToInt
  */
 @Singleton
 class ComboWatchPlugin @Inject constructor(
+    private val context: Context,
     aapsLogger: AAPSLogger,
     rh: ResourceHelper,
     preferences: Preferences,
@@ -585,6 +589,16 @@ class ComboWatchPlugin @Inject constructor(
                 }
             }
 
+            PumpEvent.Type.SOS                  -> {
+                // The watch's own diagnostic pack goes to the «Связь» tab's inbox; the bridge sends it on.
+                runCatching {
+                    val dir = File(context.filesDir, "bridge/inbox").also { it.mkdirs() }
+                    File(dir, "watch-${event.timestampEpochMs}.json").writeText(event.note ?: "{}")
+                    context.sendBroadcast(Intent("app.aaps.bridge.WATCH_SOS").setPackage(context.packageName))
+                }.onFailure { aapsLogger.error(LTag.PUMP, "combowatch: the watch's SOS pack was not stored", it) }
+                uiInteraction.addNotificationValidFor(Notification.USER_MESSAGE, "Сигнал с часов принят: смотрите вкладку «Связь»", Notification.INFO, 60)
+            }
+
             PumpEvent.Type.ACTIVITY_CANCELLED   -> {
                 val start = event.timestampEpochMs - event.timestampEpochMs % 1000
                 val existing = activityRecordAt(start)
@@ -622,6 +636,7 @@ class ComboWatchPlugin @Inject constructor(
         PumpEvent.Type.WATCH_NOTE           -> "часы сами: ${event.note}"
         PumpEvent.Type.CARBS                -> "часы: углеводы ${event.carbsGrams} г"
         PumpEvent.Type.ACTIVITY             -> "часы: нагрузка ${if (event.activityMode == "SPORT") "спорт" else "прогулка"} ${event.activityDurationMinutes} мин"
+        PumpEvent.Type.SOS                  -> "часы: сигнал владельца Claude"
         PumpEvent.Type.ACTIVITY_CANCELLED   -> "часы: нагрузка отменена (ответ «не нагрузка»)"
         PumpEvent.Type.ACTIVITY_PROFILE     -> "часы: пульс за нагрузку ${event.note?.substringAfter("hr_avg=")?.substringBefore(' ') ?: "?"} в среднем"
         else                                -> null
