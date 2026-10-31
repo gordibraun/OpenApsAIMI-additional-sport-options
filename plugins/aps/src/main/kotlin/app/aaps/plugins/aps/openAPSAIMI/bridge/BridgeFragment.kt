@@ -248,6 +248,8 @@ class BridgeFragment : DaggerFragment() {
 
     private fun refresh() {
         if (!isAdded) return
+        // A pack the watch dropped while there was no network shows up in the list at once, as a report waiting to leave.
+        runCatching { store.importWatchInbox() }
         val pending = store.pendingCount()
         statusView.text = when {
             !api.configured() -> "Сервер не настроен: ${BridgeStore.NOT_CONFIGURED}"
