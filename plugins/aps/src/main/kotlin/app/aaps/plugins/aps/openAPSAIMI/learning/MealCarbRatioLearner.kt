@@ -126,7 +126,7 @@ class MealCarbRatioLearner @Inject constructor(
             (using?.let { "Применяется ${u1(it)} г/ЕД (профиль ${u1(base)}), сейчас ${bucket.label}." } ?: "Применяется профильный ${u1(base)} г/ЕД: у учителя пока нет урока.") +
                 (if (!enabled()) " Учитель выключен." else "")
         )
-        sb.appendLine("Уроки по времени суток (медиана за ${MealCarbRatioMath.KEEP_DAYS} дн, к уроку идём не быстрее 15 % в день, в пределах 0,5–1,5 от профиля):")
+        sb.appendLine("Уроки по времени суток (медиана по последним ${MealCarbRatioMath.RECENT_PER_BUCKET} приёмам своего времени суток, иначе по ${MealCarbRatioMath.RECENT_ALL_DAY} за день; к уроку идём не быстрее 15 % в день, в пределах 0,7–1,5 от профиля):")
         for (b in MealCarbRatioMath.Bucket.entries) {
             val lesson = lessons[b]
             val a = applied[b]
@@ -171,8 +171,12 @@ class MealCarbRatioLearner @Inject constructor(
         val horizon = nowEpochMs - MealCarbRatioMath.KEEP_DAYS * 86_400_000L
         val from = max(evaluatedUpToEpochMs, horizon) - MealCarbRatioMath.CLUSTER_MS
         val entries = persistenceLayer.getCarbsFromTimeToTimeExpanded(from, nowEpochMs, true)
-            .map { MealCarbRatioMath.CarbEntry(it.timestamp, it.amount) }
-        val meals = MealCarbRatioMath.meals(entries)
+            .map { MealCarbRatioMath.CarbEntry(it.timestamp, it.amount, fast = isFastCarbs(it.notes)) }
+        // Manual boluses tell a rescue (fast carbohydrates with no bolus) from fast food bolused for.
+        val manualBoluses = persistenceLayer.getBolusesFromTimeToTime(from - MealCarbRatioMath.RESCUE_BOLUS_MS, nowEpochMs, true)
+            .filter { it.type == BS.Type.NORMAL }
+            .map { it.timestamp }
+        val meals = MealCarbRatioMath.meals(entries, manualBoluses)
         var looked = 0
         var stoppedAtTheLimit = false
         for ((index, meal) in meals.withIndex()) {
@@ -181,7 +185,7 @@ class MealCarbRatioLearner @Inject constructor(
             if (looked >= MAX_MEALS_PER_UPDATE) { stoppedAtTheLimit = true; break }
             evaluatedUpToEpochMs = meal.startEpochMs
             looked++
-            if (meal.grams < MealCarbRatioMath.MIN_MEAL_GRAMS) continue
+            if (meal.grams < MealCarbRatioMath.MIN_MEAL_GRAMS || meal.rescueOnly) continue
             // Another meal inside the window would be charged to this one.
             val next = meals.getOrNull(index + 1)
             if (next != null && next.startEpochMs < meal.endEpochMs) continue
@@ -252,7 +256,7 @@ class MealCarbRatioLearner @Inject constructor(
         val horizon = nowEpochMs - MealCarbRatioMath.KEEP_DAYS * 86_400_000L
         stored.removeAll { it.startEpochMs < horizon }
         lessons = MealCarbRatioMath.learn(
-            stored.mapNotNull { s -> s.effectiveIc?.let { MealCarbRatioMath.bucket(hourOfDay(s.startEpochMs)) to it } }
+            stored.mapNotNull { s -> s.effectiveIc?.let { MealCarbRatioMath.Learned(MealCarbRatioMath.bucket(hourOfDay(s.startEpochMs)), it, s.startEpochMs) } }
         )
         // A bucket that lost its lesson loses its applied ratio: the profile's own stands again.
         applied.keys.retainAll(lessons.keys)
@@ -282,6 +286,10 @@ class MealCarbRatioLearner @Inject constructor(
     }
 
     private fun hourOfDay(timestamp: Long): Int = MidnightUtils.secondsFromMidnight(timestamp) / 3600
+
+    /** The watch and the photo wizard mark fast carbohydrates as «type=fast» or «: fast» in the note. */
+    private fun isFastCarbs(notes: String?): Boolean =
+        notes?.split(' ', ':', ',', ';')?.any { it.equals("fast", ignoreCase = true) || it.equals("type=fast", ignoreCase = true) } == true
 
     // ---- persistence -----------------------------------------------------------------------------
 
@@ -314,7 +322,7 @@ class MealCarbRatioLearner @Inject constructor(
                 lastRampEpochMs = 0L
                 aapsLogger.info(LTag.APS, "MealCarbRatioLearner: state version $version → $STATE_VERSION, applied ratios start again from the profile")
             }
-            lessons = MealCarbRatioMath.learn(stored.mapNotNull { s -> s.effectiveIc?.let { MealCarbRatioMath.bucket(hourOfDay(s.startEpochMs)) to it } })
+            lessons = MealCarbRatioMath.learn(stored.mapNotNull { s -> s.effectiveIc?.let { MealCarbRatioMath.Learned(MealCarbRatioMath.bucket(hourOfDay(s.startEpochMs)), it, s.startEpochMs) } })
         }.onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner: saved state unreadable: ${it.javaClass.simpleName}") }
     }
 

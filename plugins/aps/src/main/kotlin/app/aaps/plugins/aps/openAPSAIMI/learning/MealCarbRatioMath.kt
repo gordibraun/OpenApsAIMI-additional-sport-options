@@ -5,39 +5,55 @@ package app.aaps.plugins.aps.openAPSAIMI.learning
  *
  * Nothing here reads the database or the clock; the learner feeds it what it found. A meal is the
  * carbohydrates entered within an hour of each other, and its window the four hours from the first
- * entry. The insulin the meal turned out to need is what was on board at the start, plus what was
+ * entry. Fast carbohydrates eaten inside that window with no bolus of their own are a rescue against
+ * the meal's insulin and count towards the meal's grams (01.11.2026: every meal bolus was followed by
+ * 8–18 g of them within the hour, and the meals taught nothing because the rescue looked like the
+ * next meal). The insulin the meal turned out to need is what was on board at the start, plus what was
  * given in and around the window (boluses from 45 minutes before to 150 minutes after the entry,
  * and the temp basal above or below profile), less what was still on board at the end, plus what
  * glucose moved over the window converted at the sensitivity the loop was dosing corrections by.
- * The effective ratio is the grams over that insulin. Per time of day the median of recent meals is
- * the lesson; it is applied to the profile's ratio within bounds and never in one jump.
+ * The effective ratio is the grams over that insulin. Per time of day the median of the most recent
+ * meals is the lesson; it is applied to the profile's ratio within bounds and never in one jump.
  *
  * 28 Oct 2026: 59 meals over 45 days gave a median of 4.9 g/U against a profile of 10.3, which is why
  * every forecast promised a fall that never came.
  */
 object MealCarbRatioMath {
 
-    class CarbEntry(val atEpochMs: Long, val grams: Double)
+    /** One carbohydrate entry; [fast] when the owner marked it as fast carbohydrates. */
+    class CarbEntry(val atEpochMs: Long, val grams: Double, val fast: Boolean = false)
 
-    /** Carbohydrates entered close together are one meal, timed from the first entry. */
-    class Meal(val startEpochMs: Long, val grams: Double, val entries: Int) {
+    /**
+     * Carbohydrates entered close together are one meal, timed from the first entry. A meal made of
+     * rescue carbohydrates only ([rescueOnly]) is not a meal to learn from.
+     */
+    class Meal(val startEpochMs: Long, val grams: Double, val entries: Int, val rescueOnly: Boolean = false) {
         val endEpochMs: Long get() = startEpochMs + WINDOW_MS
     }
 
-    fun meals(entries: List<CarbEntry>): List<Meal> {
+    /** Fast carbohydrates of up to [RESCUE_MAX_GRAMS] with no manual bolus within [RESCUE_BOLUS_MS] are a rescue, not food. */
+    fun isRescue(entry: CarbEntry, manualBolusTimesMs: List<Long>): Boolean =
+        entry.fast && entry.grams <= RESCUE_MAX_GRAMS && manualBolusTimesMs.none { kotlin.math.abs(it - entry.atEpochMs) <= RESCUE_BOLUS_MS }
+
+    fun meals(entries: List<CarbEntry>, manualBolusTimesMs: List<Long> = emptyList()): List<Meal> {
         val sorted = entries.filter { it.grams > 0.0 }.sortedBy { it.atEpochMs }
         val result = mutableListOf<Meal>()
         var start = 0L
         var last = 0L
         var grams = 0.0
         var count = 0
-        fun close() { if (count > 0) result += Meal(start, grams, count) }
+        var rescueOnly = false
+        fun close() { if (count > 0) result += Meal(start, grams, count, rescueOnly) }
         for (entry in sorted) {
-            if (count > 0 && entry.atEpochMs - last <= CLUSTER_MS) {
-                grams += entry.grams; last = entry.atEpochMs; count++
-            } else {
-                close()
-                start = entry.atEpochMs; last = entry.atEpochMs; grams = entry.grams; count = 1
+            val rescue = isRescue(entry, manualBolusTimesMs)
+            when {
+                // A rescue inside an open meal's window: the body got it against the meal's insulin.
+                count > 0 && rescue && !rescueOnly && entry.atEpochMs < start + WINDOW_MS -> { grams += entry.grams; count++ }
+                count > 0 && rescueOnly == rescue && entry.atEpochMs - last <= CLUSTER_MS -> { grams += entry.grams; last = entry.atEpochMs; count++ }
+                else -> {
+                    close()
+                    start = entry.atEpochMs; last = entry.atEpochMs; grams = entry.grams; count = 1; rescueOnly = rescue
+                }
             }
         }
         close()
@@ -93,16 +109,21 @@ object MealCarbRatioMath {
 
     class Lesson(val bucket: Bucket, val icGPerU: Double, val meals: Int, val fromAllDay: Boolean)
 
+    /** One meal's lesson: its time of day, its effective ratio, when it was. */
+    class Learned(val bucket: Bucket, val icGPerU: Double, val atEpochMs: Long)
+
     /**
-     * Per bucket, the median effective ratio of the meals given; with fewer than [MIN_MEALS_PER_BUCKET]
-     * in a bucket the whole day's median stands in, and with fewer than [MIN_MEALS_ALL_DAY] in all
-     * there is no lesson.
+     * Per bucket, the median effective ratio of that bucket's most recent [RECENT_PER_BUCKET] meals;
+     * with fewer than [MIN_MEALS_PER_BUCKET] of them the median of the whole day's most recent
+     * [RECENT_ALL_DAY] stands in, and with fewer than [MIN_MEALS_ALL_DAY] in all there is no lesson.
+     * Recent meals only, so that a week of changed sensitivity is heard within days, not weeks.
      */
-    fun learn(outcomes: List<Pair<Bucket, Double>>): Map<Bucket, Lesson> {
-        val all = outcomes.map { it.second }
+    fun learn(outcomes: List<Learned>): Map<Bucket, Lesson> {
+        val newestFirst = outcomes.sortedByDescending { it.atEpochMs }
+        val all = newestFirst.take(RECENT_ALL_DAY).map { it.icGPerU }
         val allDay = if (all.size >= MIN_MEALS_ALL_DAY) median(all) else null
         return Bucket.entries.mapNotNull { bucket ->
-            val own = outcomes.filter { it.first == bucket }.map { it.second }
+            val own = newestFirst.filter { it.bucket == bucket }.take(RECENT_PER_BUCKET).map { it.icGPerU }
             when {
                 own.size >= MIN_MEALS_PER_BUCKET -> Lesson(bucket, median(own), own.size, fromAllDay = false)
                 allDay != null                   -> Lesson(bucket, allDay, all.size, fromAllDay = true)
@@ -147,10 +168,17 @@ object MealCarbRatioMath {
     const val MAX_IC_G_PER_U = 25.0
     const val KEEP_DAYS = 21
     const val MIN_MEALS_PER_BUCKET = 5
-    const val MIN_MEALS_ALL_DAY = 8
+    const val MIN_MEALS_ALL_DAY = 6
+    /** The lesson rests on this many of the newest meals of a bucket, or of the whole day. */
+    const val RECENT_PER_BUCKET = 8
+    const val RECENT_ALL_DAY = 10
+    /** Fast carbohydrates up to this, with no manual bolus within [RESCUE_BOLUS_MS], are a rescue. */
+    const val RESCUE_MAX_GRAMS = 25.0
+    const val RESCUE_BOLUS_MS = 20 * 60_000L
 
     /** The learner may make the ratio half or one and a half times the profile's, never more. */
-    const val MIN_FACTOR = 0.5
+    /** 0.5 until 01.11.2026, when every meal at the floor ended in rescue carbohydrates. */
+    const val MIN_FACTOR = 0.7
     const val MAX_FACTOR = 1.5
 
     /** The applied ratio moves by at most this share of itself per day. */

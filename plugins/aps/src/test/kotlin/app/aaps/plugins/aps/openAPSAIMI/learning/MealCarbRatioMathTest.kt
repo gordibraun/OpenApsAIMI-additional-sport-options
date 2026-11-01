@@ -53,6 +53,42 @@ class MealCarbRatioMathTest {
         assertNull(absurd.effectiveIcGPerU)
     }
 
+    @Test fun `fast carbohydrates without a bolus inside a meal's window are the meal's rescue, not a new meal`() {
+        // 01.11.2026 13:42: 12 g, 7 g seven minutes on, then 18 g fast at 14:27 with no bolus, after 3.0 U at 13:42.
+        val bolus = listOf(t)
+        val meals = MealCarbRatioMath.meals(
+            listOf(
+                MealCarbRatioMath.CarbEntry(t, 12.0), MealCarbRatioMath.CarbEntry(t + 7 * minute, 7.0),
+                MealCarbRatioMath.CarbEntry(t + 45 * minute, 18.0, fast = true)
+            ), bolus
+        )
+        assertEquals(1, meals.size)
+        assertEquals(37.0, meals[0].grams, 1e-9)
+        assertEquals(false, meals[0].rescueOnly)
+        // 11:21: 25 g bolused for, 13 g fast at 12:13 (52 minutes after the last entry, inside the window): one meal of 38 g.
+        val lunch = MealCarbRatioMath.meals(
+            listOf(MealCarbRatioMath.CarbEntry(t, 15.0), MealCarbRatioMath.CarbEntry(t + 8 * minute, 10.0), MealCarbRatioMath.CarbEntry(t + 52 * minute, 13.0, fast = true)),
+            listOf(t, t + 8 * minute)
+        )
+        assertEquals(1, lunch.size)
+        assertEquals(38.0, lunch[0].grams, 1e-9)
+        // Fast carbohydrates the owner bolused for (04:12: 10 g fast with 2 + 2 U) are food.
+        val night = MealCarbRatioMath.meals(listOf(MealCarbRatioMath.CarbEntry(t, 10.0, fast = true), MealCarbRatioMath.CarbEntry(t + 16 * minute, 7.0, fast = true)), listOf(t, t + 4 * minute))
+        assertEquals(1, night.size)
+        assertEquals(false, night[0].rescueOnly)
+        // A rescue with no meal around it is a cluster of its own that teaches nothing, and the real meal after it starts fresh.
+        val alone = MealCarbRatioMath.meals(
+            listOf(MealCarbRatioMath.CarbEntry(t, 9.0, fast = true), MealCarbRatioMath.CarbEntry(t + 30 * minute, 40.0)),
+            listOf(t + 30 * minute)
+        )
+        assertEquals(2, alone.size)
+        assertEquals(true, alone[0].rescueOnly)
+        assertEquals(t + 30 * minute, alone[1].startEpochMs)
+        assertEquals(false, alone[1].rescueOnly)
+        // More than 25 g is a meal even when fast.
+        assertEquals(false, MealCarbRatioMath.meals(listOf(MealCarbRatioMath.CarbEntry(t, 30.0, fast = true)))[0].rescueOnly)
+    }
+
     @Test fun `buckets follow the hour`() {
         assertEquals(Bucket.MORNING, MealCarbRatioMath.bucket(6))
         assertEquals(Bucket.MORNING, MealCarbRatioMath.bucket(10))
@@ -63,18 +99,30 @@ class MealCarbRatioMathTest {
     }
 
     @Test fun `a bucket with enough meals learns its own median, a thin one borrows the day's, too few in all learn nothing`() {
-        val outcomes = List(6) { Bucket.DAY to 5.0 + it } + List(3) { Bucket.MORNING to 4.0 }
+        val outcomes = List(6) { MealCarbRatioMath.Learned(Bucket.DAY, 5.0 + it, t + it * day) } + List(3) { MealCarbRatioMath.Learned(Bucket.MORNING, 4.0, t + it * day) }
         val lessons = MealCarbRatioMath.learn(outcomes)
         assertEquals(7.5, lessons.getValue(Bucket.DAY).icGPerU, 1e-9)
         assertEquals(6, lessons.getValue(Bucket.DAY).meals)
         assertTrue(lessons.getValue(Bucket.MORNING).fromAllDay)
-        assertEquals(MealCarbRatioMath.median(outcomes.map { it.second }), lessons.getValue(Bucket.MORNING).icGPerU, 1e-9)
+        assertEquals(MealCarbRatioMath.median(outcomes.map { it.icGPerU }), lessons.getValue(Bucket.MORNING).icGPerU, 1e-9)
         assertTrue(lessons.containsKey(Bucket.LATE))
-        assertTrue(MealCarbRatioMath.learn(List(7) { Bucket.DAY to 5.0 }.take(4)).isEmpty())
+        assertTrue(MealCarbRatioMath.learn(List(4) { MealCarbRatioMath.Learned(Bucket.DAY, 5.0, t + it * day) }).isEmpty())
     }
 
-    @Test fun `the applied ratio stays within half to one and a half of the profile and moves at most fifteen percent a day`() {
-        // Lesson 4.9 against a profile of 10.3: the floor is 5.15, and the first day's step from 10.3 is 15 %.
+    @Test fun `only the newest meals teach, so a changed week is heard`() {
+        // Twelve lunches: eight old ones at 5 g/U, then four at 10 g/U. The lesson rests on the newest eight.
+        val old = List(8) { MealCarbRatioMath.Learned(Bucket.DAY, 5.0, t + it * day) }
+        val recent = List(4) { MealCarbRatioMath.Learned(Bucket.DAY, 10.0, t + (8 + it) * day) }
+        val lesson = MealCarbRatioMath.learn(old + recent).getValue(Bucket.DAY)
+        assertEquals(8, lesson.meals)
+        assertEquals(7.5, lesson.icGPerU, 1e-9)
+        // The whole-day fallback takes the newest ten across buckets.
+        val mixed = List(10) { MealCarbRatioMath.Learned(Bucket.EVENING, 4.0, t + it * day) } + List(10) { MealCarbRatioMath.Learned(Bucket.MORNING, 12.0, t + (10 + it) * day) }
+        assertEquals(12.0, MealCarbRatioMath.learn(mixed).getValue(Bucket.LATE).icGPerU, 1e-9)
+    }
+
+    @Test fun `the applied ratio stays within 0,7 to 1,5 of the profile and moves at most fifteen percent a day`() {
+        // Lesson 4.9 against a profile of 10.3: the floor is 7.21, and the first day's step from 10.3 is 15 %.
         val first = MealCarbRatioMath.applied(4.9, 10.3, previousIcGPerU = null, previousAtEpochMs = null, nowEpochMs = t)
         assertEquals(10.3 * 0.85, first, 1e-9)
         // An hour later only an hour's share of the day's step.
@@ -84,7 +132,7 @@ class MealCarbRatioMathTest {
         var ic = first
         var at = t
         repeat(10) { ic = MealCarbRatioMath.applied(4.9, 10.3, ic, at, at + day); at += day }
-        assertEquals(10.3 * 0.5, ic, 1e-9)
+        assertEquals(10.3 * 0.7, ic, 1e-9)
         // A lesson above the profile is capped the same way.
         assertEquals(10.0 * 1.5, MealCarbRatioMath.applied(40.0, 10.0, 15.0, t, t + day), 1e-9)
     }

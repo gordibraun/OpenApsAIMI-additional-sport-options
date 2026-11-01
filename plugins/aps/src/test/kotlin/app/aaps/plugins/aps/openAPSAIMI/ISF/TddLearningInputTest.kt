@@ -13,9 +13,21 @@ class TddLearningInputTest {
     }
 
     @Test fun missingStartEndOrMiddleIsNotACompleteDay() {
-        for (p in listOf(points.drop(10), points.dropLast(10), points.filterNot { it in day / 3..day / 2 }, emptyList())) {
+        // Two and a half hours missing at either edge, a four-hour hole in the middle, or nothing at all.
+        for (p in listOf(points.drop(30), points.dropLast(30), points.filterNot { it in day / 3..day / 2 }, emptyList())) {
             assertFalse(TddLearningInput.continuous(p, 0, day))
         }
+    }
+
+    @Test fun shortHolesDoNotFreezeTheDay() {
+        val hour = 60 * 60_000L
+        // 01.11.2026: one hour without glucose at night; still a day to learn from.
+        assertTrue(TddLearningInput.continuous(points.filterNot { it in 3 * hour until 4 * hour }, 0, day))
+        // Fifty minutes missing at the start, three fifty-minute holes in all: fine.
+        assertTrue(TddLearningInput.continuous(points.drop(10).filterNot { it in 8 * hour until 8 * hour + 50 * 60_000L || it in 15 * hour until 15 * hour + 50 * 60_000L }, 0, day))
+        // Holes adding up to more than three hours, or one longer than two hours: not fine.
+        assertFalse(TddLearningInput.continuous(points.filterNot { (it / hour) % 6 == 1L }, 0, day))
+        assertFalse(TddLearningInput.continuous(points.filterNot { it in 10 * hour until 12 * hour + 10 * 60_000L }, 0, day))
     }
 
     @Test fun repeatedCalculationsCannotFillAHoleInHistory() {

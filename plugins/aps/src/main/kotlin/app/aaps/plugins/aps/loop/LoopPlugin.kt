@@ -916,6 +916,7 @@ class LoopPlugin @Inject constructor(
         }
         aapsLogger.debug(LTag.APS, "applyAPSRequest: $request")
         val now = System.currentTimeMillis()
+        holdTempBasalAfterManualBolus(request, profile, now)
         val activeTemp = processedTbrEbData.getTempBasalIncludingConvertedExtended(now)
         if (request.rate == 0.0 && request.duration == 0 || abs(request.rate - pump.baseBasalRate) < pump.pumpDescription.basalStep) {
             if (activeTemp != null) {
@@ -992,6 +993,35 @@ class LoopPlugin @Inject constructor(
                 )
                 commandQueue.tempBasalAbsolute(request.rate, request.duration, false, profile, PumpSync.TemporaryBasalType.NORMAL,
                     if (request.rate > profile.getBasal()) withInsulinInputValidation(request, callback, "delivery_basal") else callback)
+            }
+        }
+    }
+
+    /** Units given by hand (not micro-boluses) in the last [PostBolusBasalCap.WINDOW_MS]. */
+    private fun manualBolusUnitsRecently(now: Long): Double = runCatching {
+        persistenceLayer.getBolusesFromTimeToTime(now - PostBolusBasalCap.WINDOW_MS, now, true)
+            .filter { it.type == BS.Type.NORMAL }
+            .sumOf { it.amount }
+    }.getOrDefault(0.0)
+
+    /** See [PostBolusBasalCap]: a temp basal above 150 % of profile waits while a fresh manual bolus is absorbed. */
+    private fun holdTempBasalAfterManualBolus(request: APSResult, profile: Profile, now: Long) {
+        if (request.duration <= 0) return
+        val manual = manualBolusUnitsRecently(now)
+        if (manual < PostBolusBasalCap.MIN_BOLUS_U) return
+        if (request.usePercent) {
+            PostBolusBasalCap.cappedPercent(request.percent, manual)?.let { capped ->
+                val note = PostBolusBasalCap.note(manual, "${request.percent} %", "$capped %")
+                aapsLogger.info(LTag.APS, note)
+                request.reason = request.reason + "\n" + note
+                request.percent = capped
+            }
+        } else {
+            PostBolusBasalCap.cappedRate(request.rate, profile.getBasal(now), manual)?.let { capped ->
+                val note = PostBolusBasalCap.note(manual, "%.2f U/h".format(java.util.Locale.US, request.rate), "%.2f U/h".format(java.util.Locale.US, capped))
+                aapsLogger.info(LTag.APS, note)
+                request.reason = request.reason + "\n" + note
+                request.rate = capped
             }
         }
     }
