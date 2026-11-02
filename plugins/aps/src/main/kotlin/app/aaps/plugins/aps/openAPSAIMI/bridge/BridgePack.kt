@@ -14,6 +14,7 @@ import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.LoggerUtils
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.profile.ProfileFunction
+import app.aaps.core.objects.activity.ActivitySamplesCsv
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -54,6 +55,7 @@ class BridgePack @Inject constructor(
         section("pump") { pump() }
         section("profile") { profile() }
         section("logTail") { logTail() }
+        section("activitySamples") { activitySamples(now) }
         if (problems.length() > 0) pack.put("problems", problems)
         return pack
     }
@@ -122,6 +124,21 @@ class BridgePack @Inject constructor(
         val p = profileFunction.getProfile() ?: return JSONObject().put("name", profileFunction.getProfileName()).put("active", false)
         return JSONObject().put("name", profileFunction.getProfileName()).put("isfMgdl", p.getIsfMgdl("bridge")).put("ic", p.getIc()).put("basalUph", p.getBasal())
             .put("targetLow", p.getTargetLowMgdl()).put("targetHigh", p.getTargetHighMgdl())
+    }
+
+    /** The watch's pulse and steps of the last day, minute by minute, as the phone has them on file. */
+    private fun activitySamples(now: Long): JSONObject {
+        val file = ActivitySamplesCsv.file(context) ?: return JSONObject().put("rows", 0).put("note", "no external files directory")
+        val rows = ActivitySamplesCsv.readSince(file, now - 24 * 3600_000L)
+        val arr = JSONArray()
+        rows.forEach { arr.put(JSONArray().put(it.minuteEpochMs).put(it.heartRateBpm ?: JSONObject.NULL).put(it.steps ?: JSONObject.NULL)) }
+        val last = rows.lastOrNull()
+        val hr = rows.mapNotNull { it.heartRateBpm }
+        return JSONObject().put("rows", rows.size).put("columns", "minuteEpochMs,heartRateBpm,steps")
+            .put("lastAt", last?.minuteEpochMs ?: JSONObject.NULL).put("lastAgeMin", last?.let { (now - it.minuteEpochMs) / 60_000 } ?: JSONObject.NULL)
+            .put("heartRateMin", hr.minOrNull() ?: JSONObject.NULL).put("heartRateMax", hr.maxOrNull() ?: JSONObject.NULL)
+            .put("steps24h", rows.sumOf { it.steps ?: 0 })
+            .put("series", arr)
     }
 
     private fun logTail(): String {

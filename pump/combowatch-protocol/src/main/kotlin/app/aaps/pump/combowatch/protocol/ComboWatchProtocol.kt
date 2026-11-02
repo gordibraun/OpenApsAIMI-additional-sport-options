@@ -392,6 +392,12 @@ data class PumpEvent(
          * `hr_avg= hr_max= hr_effort= hr_hard= hr_rest=`, [timestampEpochMs] is the session's start.
          */
         ACTIVITY_PROFILE,
+        /**
+         * Minute-by-minute heart rate and steps the watch collected, for the record and for the
+         * study of how long exercise keeps working (02.11.2026); never a dosing input by itself.
+         * [note] is [ActivitySamples.encode]'s text, [timestampEpochMs] the first minute in it.
+         */
+        ACTIVITY_SAMPLES,
         /** The owner pressed «Сообщить Claude» on the watch; [PumpEvent.note] is the watch's diagnostic pack (JSON). */
         SOS,
 

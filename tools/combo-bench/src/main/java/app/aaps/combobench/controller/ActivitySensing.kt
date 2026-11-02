@@ -47,8 +47,16 @@ object ActivitySensing {
         if (!granted(context)) return "нет разрешений на датчики"
         val client = HealthServices.getClient(context).passiveMonitoringClient
         val capabilities = client.getCapabilitiesAsync().get(15, TimeUnit.SECONDS)
+        val passive = capabilities.supportedDataTypesPassiveMonitoring
         val types = mutableSetOf<DataType<*, *>>()
-        if (DataType.HEART_RATE_BPM in capabilities.supportedDataTypesPassiveMonitoring) types += DataType.HEART_RATE_BPM
+        if (DataType.HEART_RATE_BPM in passive) types += DataType.HEART_RATE_BPM
+        // Steps for the record (02.11.2026): the interval count where the watch offers it passively, else the day's running total.
+        val stepsType = when {
+            DataType.STEPS in passive       -> DataType.STEPS
+            DataType.STEPS_DAILY in passive -> DataType.STEPS_DAILY
+            else                            -> null
+        }
+        stepsType?.let { types += it }
         val activityInfo = UserActivityState.USER_ACTIVITY_EXERCISE in capabilities.supportedUserActivityStates
         if (types.isEmpty() && !activityInfo) return "Health Services не даёт ни пульса, ни состояния тренировки"
         val config = PassiveListenerConfig.builder()
@@ -56,7 +64,12 @@ object ActivitySensing {
             .setShouldUserActivityInfoBeRequested(activityInfo)
             .build()
         client.setPassiveListenerServiceAsync(ActivityDetectionService::class.java, config).get(15, TimeUnit.SECONDS)
-        val what = listOfNotNull("пульс".takeIf { types.isNotEmpty() }, "тренировки".takeIf { activityInfo }).joinToString(" и ")
+        val what = listOfNotNull(
+            "пульс".takeIf { DataType.HEART_RATE_BPM in types },
+            when (stepsType) { DataType.STEPS -> "шаги"; DataType.STEPS_DAILY -> "шаги за день"; else -> null },
+            "тренировки".takeIf { activityInfo }
+        ).joinToString(", ")
+        Log.i(TAG, "passive data types offered: ${passive.joinToString { it.name }}")
         Log.i(TAG, "passive monitoring registered: $what")
         return what
     }
@@ -74,6 +87,12 @@ class ActivityDetectionService : PassiveListenerService() {
         val host = ControllerHost.get(this)
         dataPoints.getData(DataType.HEART_RATE_BPM).forEach { sample ->
             host.onHeartRate(sample.getTimeInstant(bootInstant).toEpochMilli(), sample.value.roundToInt())
+        }
+        dataPoints.getData(DataType.STEPS).forEach { interval ->
+            host.onSteps(interval.getStartInstant(bootInstant).toEpochMilli(), interval.getEndInstant(bootInstant).toEpochMilli(), interval.value, daily = false)
+        }
+        dataPoints.getData(DataType.STEPS_DAILY).forEach { interval ->
+            host.onSteps(interval.getStartInstant(bootInstant).toEpochMilli(), interval.getEndInstant(bootInstant).toEpochMilli(), interval.value, daily = true)
         }
     }
 

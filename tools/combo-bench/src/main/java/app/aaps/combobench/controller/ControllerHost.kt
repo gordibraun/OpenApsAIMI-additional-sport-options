@@ -17,6 +17,8 @@ import app.aaps.pump.combowatch.executor.CommandGate
 import app.aaps.pump.combowatch.executor.CommandJournal
 import app.aaps.pump.combowatch.executor.EventOutbox
 import app.aaps.pump.combowatch.executor.SimpleCommandJournal
+import app.aaps.pump.combowatch.protocol.ActivitySample
+import app.aaps.pump.combowatch.protocol.ActivitySamples
 import app.aaps.pump.combowatch.protocol.ComboCommand
 import app.aaps.pump.combowatch.protocol.ComboResult
 import app.aaps.pump.combowatch.protocol.ComboWatchProtocol
@@ -82,6 +84,12 @@ internal class ControllerHost private constructor(context: Context) {
         if (files.exists(SENSING_FILE)) ActivityDetector.fromJson(files.read(SENSING_FILE)) else ActivityDetector()
     }.getOrDefault(ActivityDetector())
     private val sensingLock = Any()
+
+    /** Minute-by-minute pulse and steps for the record; see [ActivitySampleLog]. */
+    private val sampleLog: ActivitySampleLog = runCatching {
+        if (files.exists(SAMPLES_FILE)) ActivitySampleLog.fromJson(files.read(SAMPLES_FILE)) else ActivitySampleLog()
+    }.getOrDefault(ActivitySampleLog())
+    private var samplesSavedAtEpochMs = 0L
 
     init {
         // Health Services keeps delivering to the service across restarts once registered; asking again is harmless.
@@ -372,7 +380,17 @@ internal class ControllerHost private constructor(context: Context) {
         autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", "Распознавание нагрузки включено: $what").put("mode", autonomy.mode().name))
     }
 
-    fun onHeartRate(atEpochMs: Long, bpm: Int) = synchronized(sensingLock) { applySensing(detector.onHeartRate(atEpochMs, bpm)) }
+    fun onHeartRate(atEpochMs: Long, bpm: Int) = synchronized(sensingLock) {
+        sampleLog.heartRate(atEpochMs, bpm)
+        applySensing(detector.onHeartRate(atEpochMs, bpm))
+        keepSamples(System.currentTimeMillis())
+    }
+
+    /** Steps from Health Services: a count over an interval, or the day's running total ([daily]). Record only; the detector does not use them yet. */
+    fun onSteps(startEpochMs: Long, endEpochMs: Long, count: Long, daily: Boolean) = synchronized(sensingLock) {
+        if (daily) sampleLog.stepsDaily(endEpochMs, count) else sampleLog.steps(startEpochMs, endEpochMs, count)
+        keepSamples(System.currentTimeMillis())
+    }
 
     fun onWorkout(atEpochMs: Long, type: String?, running: Boolean) = synchronized(sensingLock) {
         // Health Services also reports plain «not exercising» states (passive, asleep); only a workout, or the end of one we follow, is worth a line.
@@ -386,6 +404,56 @@ internal class ControllerHost private constructor(context: Context) {
     fun onSensingTick(nowEpochMs: Long) = synchronized(sensingLock) {
         applySensing(detector.onTick(nowEpochMs))
         profileFinishedSessions(nowEpochMs)
+        flushSamples(nowEpochMs)
+    }
+
+    // ---- the pulse and the steps, minute by minute, for the record ------------------------------
+
+    /** Persist the buckets now and then, and ship the complete minutes when it is time. Caller holds [sensingLock]. */
+    private fun keepSamples(nowEpochMs: Long) {
+        if (nowEpochMs - samplesSavedAtEpochMs >= SAMPLES_SAVE_MS) saveSamples(nowEpochMs)
+        flushSamples(nowEpochMs)
+    }
+
+    /**
+     * Every quarter of an hour the minutes that are complete go to the phone as
+     * [PumpEvent.Type.ACTIVITY_SAMPLES] events - durable in the outbox, so a day without the
+     * phone loses nothing - and into this watch's own day files. Caller holds [sensingLock].
+     */
+    private fun flushSamples(nowEpochMs: Long) {
+        if (nowEpochMs - sampleLog.lastFlushEpochMs < SAMPLES_FLUSH_MS) return
+        val batch = runCatching { sampleLog.takeCompleted(nowEpochMs) }.getOrElse { emptyList() }
+        sampleLog.lastFlushEpochMs = nowEpochMs
+        if (batch.isNotEmpty()) {
+            runCatching { appendSampleFiles(batch) }.onFailure { Log.w(ActivitySensing.TAG, "sample files not written: ${it.javaClass.simpleName}") }
+            ActivitySamples.pieces(batch).forEach { piece ->
+                outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY_SAMPLES, piece.first().minuteEpochMs, pumpSerial = heldPump(), note = ActivitySamples.encode(piece)))
+            }
+        }
+        saveSamples(nowEpochMs)
+        if (batch.isNotEmpty()) runCatching { sendEvents() }
+    }
+
+    private fun saveSamples(nowEpochMs: Long) {
+        runCatching { files.write(SAMPLES_FILE, sampleLog.toJson()) }
+        samplesSavedAtEpochMs = nowEpochMs
+    }
+
+    /** `activity-samples/<day>.csv`: minute, local time, pulse, steps; kept for [SAMPLES_KEEP_DAYS] days. */
+    private fun appendSampleFiles(batch: List<ActivitySample>) {
+        val dir = java.io.File(context.filesDir, SAMPLES_DIR).also { it.mkdirs() }
+        val day = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+        val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
+        batch.groupBy { day.format(java.util.Date(it.minuteEpochMs)) }.forEach { (name, rows) ->
+            val file = java.io.File(dir, "$name.csv")
+            val fresh = !file.exists()
+            file.appendText(buildString {
+                if (fresh) append("minuteEpochMs,localTime,heartRateBpm,steps\n")
+                rows.forEach { append(it.minuteEpochMs).append(',').append(time.format(java.util.Date(it.minuteEpochMs))).append(',').append(it.heartRateBpm ?: "").append(',').append(it.steps ?: "").append('\n') }
+            })
+        }
+        val keepFrom = day.format(java.util.Date(System.currentTimeMillis() - SAMPLES_KEEP_DAYS * 24 * 60 * 60_000L))
+        dir.listFiles()?.filter { it.name.endsWith(".csv") && it.name.removeSuffix(".csv") < keepFrom }?.forEach { it.delete() }
     }
 
     /** Every session that has ended - sensed or entered by hand - gets its heart-rate profile sent to the phone once. */
@@ -1239,6 +1307,11 @@ internal class ControllerHost private constructor(context: Context) {
         private const val ACTIVITY_NOTIFICATION_ID = 44
         private const val SENSING_PERMISSION_NOTIFICATION_ID = 45
         private const val SENSING_FILE = "autonomy-activity-sensing.json"
+        private const val SAMPLES_FILE = "activity-samples.json"
+        private const val SAMPLES_DIR = "activity-samples"
+        private const val SAMPLES_FLUSH_MS = 15 * 60_000L
+        private const val SAMPLES_SAVE_MS = 5 * 60_000L
+        private const val SAMPLES_KEEP_DAYS = 14
         private const val INSULIN_CHANNEL = "combo-insulin-check"
         private const val INSULIN_NOTIFICATION_ID = 43
 

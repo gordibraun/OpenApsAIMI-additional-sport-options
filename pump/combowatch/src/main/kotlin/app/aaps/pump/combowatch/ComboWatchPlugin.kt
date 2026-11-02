@@ -36,11 +36,13 @@ import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.activity.ActivityPlanCalculator
+import app.aaps.core.objects.activity.ActivitySamplesCsv
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.ComboResult
 import app.aaps.pump.combowatch.protocol.CommandKind
 import app.aaps.pump.combowatch.protocol.Outcome
+import app.aaps.pump.combowatch.protocol.ActivitySamples
 import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.PumpSnapshot
 import app.aaps.pump.combowatch.protocol.TbrKind
@@ -586,6 +588,23 @@ class ComboWatchPlugin @Inject constructor(
                     val note = existing.note.orEmpty().split(' ').filterNot { it.startsWith("hr_") }.joinToString(" ") + " " + tokens
                     persistenceLayer.insertOrUpdateTherapyEvent(existing.copy(note = note)).blockingGet()
                     aapsLogger.info(LTag.PUMP, "combowatch: heart-rate profile joined to the activity at $start: $tokens")
+                }
+            }
+
+            // The watch's minute-by-minute pulse and steps, for the record beside the log. Never a
+            // dosing input: the loop's own pulse and step tables stay empty on purpose (02.11.2026).
+            PumpEvent.Type.ACTIVITY_SAMPLES     -> {
+                val samples = ActivitySamples.decode(event.note)
+                val file = ActivitySamplesCsv.file(context)
+                if (file == null) {
+                    aapsLogger.warn(LTag.PUMP, "combowatch: no external files directory for the pulse and step record; ${samples.size} minutes dropped")
+                } else {
+                    val written = ActivitySamplesCsv.append(file, samples.map { ActivitySamplesCsv.Row(it.minuteEpochMs, it.heartRateBpm, it.steps) })
+                    val last = samples.lastOrNull()
+                    aapsLogger.info(
+                        LTag.PUMP, "combowatch: pulse and steps from the watch: ${samples.size} minutes, $written new" +
+                            (last?.let { ", last ${java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(it.minuteEpochMs))} pulse ${it.heartRateBpm ?: "-"} steps ${it.steps ?: "-"}" } ?: "")
+                    )
                 }
             }
 
