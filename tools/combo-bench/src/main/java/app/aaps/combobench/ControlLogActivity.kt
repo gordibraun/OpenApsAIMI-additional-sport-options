@@ -74,8 +74,16 @@ class ControlLogActivity : Activity() {
                 addView(android.widget.Button(this@ControlLogActivity).apply {
                     text = label; textSize = 11f; isAllCaps = false
                     setOnClickListener {
-                        val ok = runCatching { host.sendSos(chip) }.getOrDefault(false)
-                        android.widget.Toast.makeText(this@ControlLogActivity, if (ok) "Отправлено телефону, допишите словами во вкладке «Связь»" else "Не удалось отправить", android.widget.Toast.LENGTH_SHORT).show()
+                        // Off the main thread: the pack reads session files, and with thousands of them the
+                        // activity stopped answering (ANR 02.11 10:10 and 03.11 11:18).
+                        isEnabled = false
+                        Thread {
+                            val ok = runCatching { host.sendSos(chip) }.getOrDefault(false)
+                            runOnUiThread {
+                                isEnabled = true
+                                android.widget.Toast.makeText(this@ControlLogActivity, if (ok) "Отправлено телефону, допишите словами во вкладке «Связь»" else "Не удалось отправить", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }.start()
                     }
                 }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             }

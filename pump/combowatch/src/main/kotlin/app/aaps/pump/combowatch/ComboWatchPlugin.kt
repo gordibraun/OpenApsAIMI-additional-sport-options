@@ -150,9 +150,34 @@ class ComboWatchPlugin @Inject constructor(
             while (isActive) {
                 runCatching { link.renewLease(pumpSerial, LEASE_VALID_MS, snapshots.current(pumpSerial), watchBolusLimitTenths()) }
                     .onFailure { aapsLogger.debug(LTag.PUMP, "combowatch: lease renewal failed: ${it.message}") }
+                runCatching { guardGlucoseRelay() }
+                    .onFailure { aapsLogger.warn(LTag.PUMP, "combowatch: glucose relay guard failed: ${it.javaClass.simpleName}: ${it.message}") }
                 delay(LEASE_RENEW_INTERVAL_MS)
             }
         }
+    }
+
+    @Volatile private var lastRelayKickEpochMs = 0L
+
+    /**
+     * The watch is in touch but no reading has come for a while: the relay app on this phone is
+     * most likely stopped by the system (03.11.2026). Starting its exported service clears that.
+     */
+    private fun guardGlucoseRelay() {
+        val now = System.currentTimeMillis()
+        val lastGlucose = persistenceLayer.getLastGlucoseValue()?.timestamp
+        if (!GlucoseRelayGuard.shouldKick(now, lastGlucose, link.lastContactEpochMs, lastRelayKickEpochMs)) return
+        lastRelayKickEpochMs = now
+        val age = lastGlucose?.let { (now - it) / 60_000 }
+        val started = runCatching {
+            context.startService(Intent().setClassName(GlucoseRelayGuard.RELAY_PACKAGE, GlucoseRelayGuard.RELAY_SERVICE)) != null
+        }.onFailure { aapsLogger.warn(LTag.PUMP, "combowatch: could not start the glucose relay: ${it.javaClass.simpleName}: ${it.message}") }.getOrDefault(false)
+        aapsLogger.info(LTag.PUMP, "combowatch: no glucose for ${age ?: "?"} min while the watch is in touch; relay ${if (started) "started" else "not started"}")
+        uiInteraction.addNotificationValidFor(
+            Notification.USER_MESSAGE,
+            if (started) "Показаний с часов нет ${age ?: "?"} мин: приёмник глюкозы перезапущен" else "Показаний с часов нет ${age ?: "?"} мин, приёмник не запустился: откройте WearTester",
+            Notification.NORMAL, 30
+        )
     }
 
     override fun onStop() {

@@ -17,7 +17,6 @@ import androidx.health.services.client.data.DataType
 import androidx.health.services.client.data.PassiveListenerConfig
 import androidx.health.services.client.data.UserActivityInfo
 import androidx.health.services.client.data.UserActivityState
-import java.time.Instant
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
@@ -83,16 +82,24 @@ object ActivitySensing {
 class ActivityDetectionService : PassiveListenerService() {
 
     override fun onNewDataPointsReceived(dataPoints: DataPointContainer) {
-        val bootInstant = Instant.ofEpochMilli(System.currentTimeMillis() - SystemClock.elapsedRealtime())
+        // Durations since boot are read against both boot clocks; see SampleClock (03.11.2026: nine hours behind).
+        val now = System.currentTimeMillis()
+        val elapsed = SystemClock.elapsedRealtime()
+        val uptime = SystemClock.uptimeMillis()
+        fun at(duration: java.time.Duration): Long = SampleClock.resolve(now, elapsed, uptime, duration.toMillis())
         val host = ControllerHost.get(this)
         dataPoints.getData(DataType.HEART_RATE_BPM).forEach { sample ->
-            host.onHeartRate(sample.getTimeInstant(bootInstant).toEpochMilli(), sample.value.roundToInt())
+            host.onHeartRate(at(sample.timeDurationFromBoot), sample.value.roundToInt())
         }
         dataPoints.getData(DataType.STEPS).forEach { interval ->
-            host.onSteps(interval.getStartInstant(bootInstant).toEpochMilli(), interval.getEndInstant(bootInstant).toEpochMilli(), interval.value, daily = false)
+            host.onSteps(at(interval.startDurationFromBoot), at(interval.endDurationFromBoot), interval.value, daily = false)
         }
         dataPoints.getData(DataType.STEPS_DAILY).forEach { interval ->
-            host.onSteps(interval.getStartInstant(bootInstant).toEpochMilli(), interval.getEndInstant(bootInstant).toEpochMilli(), interval.value, daily = true)
+            host.onSteps(at(interval.startDurationFromBoot), at(interval.endDurationFromBoot), interval.value, daily = true)
+        }
+        dataPoints.getData(DataType.HEART_RATE_BPM).firstOrNull()?.let { sample ->
+            val d = sample.timeDurationFromBoot.toMillis()
+            Log.i(ActivitySensing.TAG, "sample clock: by realtime ${(now - (now - elapsed + d)) / 60_000} min ago, by uptime ${(now - (now - uptime + d)) / 60_000} min ago, used ${(now - at(sample.timeDurationFromBoot)) / 60_000} min ago")
         }
     }
 

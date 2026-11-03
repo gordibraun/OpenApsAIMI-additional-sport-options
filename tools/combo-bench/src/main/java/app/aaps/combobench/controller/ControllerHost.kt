@@ -85,6 +85,13 @@ internal class ControllerHost private constructor(context: Context) {
     }.getOrDefault(ActivityDetector())
     private val sensingLock = Any()
 
+    /** Signs of having gone deaf to the phone; see [DeafnessWatchdog]. */
+    private val watchdog = DeafnessWatchdog()
+    private val startedEpochMs = System.currentTimeMillis()
+    @Volatile private var sendsSinceAck = 0
+    @Volatile private var lastSendEpochMs = 0L
+    @Volatile private var watchdogBusy = false
+
     /** Minute-by-minute pulse and steps for the record; see [ActivitySampleLog]. */
     private val sampleLog: ActivitySampleLog = runCatching {
         if (files.exists(SAMPLES_FILE)) ActivitySampleLog.fromJson(files.read(SAMPLES_FILE)) else ActivitySampleLog()
@@ -94,6 +101,29 @@ internal class ControllerHost private constructor(context: Context) {
     init {
         // Health Services keeps delivering to the service across restarts once registered; asking again is harmless.
         Thread { runCatching { startSensing() }.onFailure { Log.w(ActivitySensing.TAG, "sensing not started: ${it.javaClass.simpleName}") } }.start()
+        pruneSessionRecords()
+    }
+
+    @Volatile private var sessionRecordsPrunedAtEpochMs = 0L
+
+    /**
+     * Session records pile up - 9 632 files, 180 MB on 03.11.2026 - and every listing of the
+     * directory then takes seconds (the SOS pack froze the journal screen twice). Two weeks of
+     * them are enough for diagnostics; the rest go, in the background, once a day.
+     */
+    private fun pruneSessionRecords() {
+        val now = System.currentTimeMillis()
+        if (now - sessionRecordsPrunedAtEpochMs < 24 * 60 * 60_000L) return
+        sessionRecordsPrunedAtEpochMs = now
+        Thread {
+            runCatching {
+                val keepFrom = now - SESSION_RECORDS_KEEP_MS
+                var deleted = 0
+                context.filesDir.listFiles { f -> f.name.startsWith("controller-session-") && f.name.endsWith(".json") }
+                    ?.filter { it.lastModified() < keepFrom }?.forEach { if (it.delete()) deleted++ }
+                if (deleted > 0) Log.i("ComboController", "pruned $deleted session records older than two weeks")
+            }.onFailure { Log.w("ComboController", "session records not pruned: ${it.javaClass.simpleName}") }
+        }.start()
     }
 
     private val session = DriverPumpSession(
@@ -361,6 +391,8 @@ internal class ControllerHost private constructor(context: Context) {
         runCatching { checkInsulinEffect(System.currentTimeMillis()) }
             .onFailure { android.util.Log.e("ComboController", "insulin check failed: ${it.javaClass.simpleName}") }
         runCatching { onSensingTick(System.currentTimeMillis()) }
+        runCatching { checkDeafness(System.currentTimeMillis()) }
+        runCatching { pruneSessionRecords() }
         return runner.wantsToRun() || runner.needsSettling()
     }
 
@@ -970,8 +1002,48 @@ internal class ControllerHost private constructor(context: Context) {
 
     fun onEventsAck(payload: String) {
         phoneHeard()
+        sendsSinceAck = 0
         outbox.acknowledge(JSONObject(payload).getLong("upTo"))
     }
+
+    // ---- deaf to the phone? -------------------------------------------------------------------------
+
+    /**
+     * Called with every reading: when the phone is nearby and nothing has come back for a long
+     * while although events keep going out, the process restarts itself once (03.11.2026: ten
+     * deaf hours, cured by a restart). All state lives in files; the next reading or sample starts
+     * the process again.
+     */
+    private fun checkDeafness(nowEpochMs: Long) {
+        val state = DeafnessWatchdog.State(phoneLastHeardEpochMs, startedEpochMs, sendsSinceAck, lastSendEpochMs, lastWatchdogRestartEpochMs())
+        // The cheap part first; the node query only when the signs are there.
+        if (watchdog.check(nowEpochMs, state, phoneNearby = true, pumpBusy = executor.isBusy) == DeafnessWatchdog.Verdict.Fine) return
+        if (watchdogBusy) return
+        watchdogBusy = true
+        Thread {
+            try {
+                val nearby = runCatching {
+                    com.google.android.gms.tasks.Tasks.await(com.google.android.gms.wearable.Wearable.getNodeClient(context).connectedNodes, 10, java.util.concurrent.TimeUnit.SECONDS)
+                        .any { it.isNearby }
+                }.getOrDefault(false)
+                when (val verdict = watchdog.check(System.currentTimeMillis(), state, nearby, executor.isBusy)) {
+                    is DeafnessWatchdog.Verdict.Fine        -> Unit
+                    is DeafnessWatchdog.Verdict.DeafButWait -> autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "WATCHDOG").put("text", "Контроллер оглох: ${verdict.why}; жду").put("mode", autonomy.mode().name))
+                    is DeafnessWatchdog.Verdict.Restart     -> {
+                        autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "WATCHDOG").put("text", "Контроллер оглох: ${verdict.why}; перезапускаюсь").put("mode", autonomy.mode().name))
+                        runCatching { files.write(WATCHDOG_FILE, JSONObject().put("lastRestartAt", System.currentTimeMillis())) }
+                        runCatching { saveSensing(); saveSamples(System.currentTimeMillis()) }
+                        Log.w("ComboController", "deaf to the phone: ${verdict.why}; restarting the process")
+                        android.os.Process.killProcess(android.os.Process.myPid())
+                    }
+                }
+            } finally {
+                watchdogBusy = false
+            }
+        }.start()
+    }
+
+    private fun lastWatchdogRestartEpochMs(): Long = runCatching { if (files.exists(WATCHDOG_FILE)) files.read(WATCHDOG_FILE).optLong("lastRestartAt") else 0L }.getOrDefault(0L)
 
     /** Settle an unclear ending by reading the pump; see [ComboExecutor.reconcileNow]. */
     fun healIfNeeded(): Boolean = synchronized(pumpTurn) {
@@ -999,7 +1071,11 @@ internal class ControllerHost private constructor(context: Context) {
 
     fun sendEvents() {
         val pending = outbox.pending()
-        if (pending.isNotEmpty()) toPhone(ComboWatchProtocol.PATH_EVENTS, PumpEvent.listToJson(pending))
+        if (pending.isNotEmpty()) {
+            sendsSinceAck++
+            lastSendEpochMs = System.currentTimeMillis()
+            toPhone(ComboWatchProtocol.PATH_EVENTS, PumpEvent.listToJson(pending))
+        }
     }
 
     fun sendHeartbeat() {
@@ -1308,6 +1384,8 @@ internal class ControllerHost private constructor(context: Context) {
         private const val SENSING_PERMISSION_NOTIFICATION_ID = 45
         private const val SENSING_FILE = "autonomy-activity-sensing.json"
         private const val SAMPLES_FILE = "activity-samples.json"
+        private const val WATCHDOG_FILE = "controller-watchdog.json"
+        private const val SESSION_RECORDS_KEEP_MS = 14 * 24 * 60 * 60_000L
         private const val SAMPLES_DIR = "activity-samples"
         private const val SAMPLES_FLUSH_MS = 15 * 60_000L
         private const val SAMPLES_SAVE_MS = 5 * 60_000L

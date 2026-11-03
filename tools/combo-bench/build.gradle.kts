@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 59
-            versionName = "0.59-pulse-steps-log"
+            versionCode = 60
+            versionName = "0.60-watchdog-sample-clock"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }
