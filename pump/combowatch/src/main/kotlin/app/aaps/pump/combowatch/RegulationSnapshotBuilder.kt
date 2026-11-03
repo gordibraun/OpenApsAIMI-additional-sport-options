@@ -37,6 +37,19 @@ class RegulationSnapshotBuilder @Inject constructor(
     @Volatile private var built: RegulationSnapshot? = null
 
     /**
+     * Activities this phone has put into snapshots, start → end of their effect window, and the
+     * starts it has taken back. The records themselves vanish from the valid rows once cancelled,
+     * so what was sent and is now gone is what the watch must drop; see [cancelledActivities].
+     */
+    private val sentActivityWindows = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+    private val cancelledActivityStarts = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+
+    /** The phone took an activity back (the watch's «не нагрузка» relayed, or adb): the next snapshots say so. */
+    fun noteCancelled(startEpochMs: Long, nowEpochMs: Long = System.currentTimeMillis()) {
+        cancelledActivityStarts[startEpochMs] = nowEpochMs
+    }
+
+    /**
      * The snapshot of the latest loop run, or null while the loop has not produced one that can
      * be used. Built once per run, the first time it is asked for - which is before the command
      * that run led to is sent, while the records still show the temporary basal the run saw.
@@ -47,12 +60,32 @@ class RegulationSnapshotBuilder @Inject constructor(
             .getOrNull()
         if (fresh != null) built = fresh
         val snapshot = built?.takeIf { it.pumpSerial == pumpSerial } ?: return null
+        val activities = activitiesOnRecord(nowEpochMs)
         return snapshot.copy(
             // The permission to act on it runs from the last time the phone was in touch.
             validUntilEpochMs = nowEpochMs + VALID_FOR_MS,
             cobG = maxOf(snapshot.cobG, carbohydratesOnBoardNow()),
-            activities = activitiesOnRecord(nowEpochMs)
+            activities = activities,
+            cancelledActivityStarts = cancelledActivities(activities, nowEpochMs)
         )
+    }
+
+    /**
+     * Starts the watch should drop: sent in an earlier snapshot while their window still runs but
+     * no longer among the valid records (deleted on the phone), and those cancelled explicitly -
+     * for the last day, so that a watch that was away still hears of it.
+     */
+    private fun cancelledActivities(valid: List<RegulationSnapshot.ActivityWindow>, nowEpochMs: Long): List<Long> {
+        val dayAgo = nowEpochMs - 24 * 60 * 60_000L
+        valid.forEach { sentActivityWindows[it.startEpochMs] = it.startEpochMs + (it.durationMinutes + it.tailMinutes) * 60_000L }
+        sentActivityWindows.entries.removeIf { it.value < dayAgo }
+        cancelledActivityStarts.entries.removeIf { it.value < dayAgo }
+        val validStarts = valid.map { it.startEpochMs }
+        sentActivityWindows.forEach { (start, windowEnd) ->
+            val stillListed = validStarts.any { kotlin.math.abs(it - start) < 60_000L }
+            if (!stillListed && windowEnd >= nowEpochMs - 5 * 60_000L) cancelledActivityStarts.putIfAbsent(start, nowEpochMs)
+        }
+        return cancelledActivityStarts.keys.sorted()
     }
 
     /**

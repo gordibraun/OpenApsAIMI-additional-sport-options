@@ -12,9 +12,12 @@ import kotlin.math.max
  *
  * Two sources. The workout the watch's fitness app is tracking, as Health Services reports it, is
  * taken at its word: it starts and ends the session and names its kind. Heart rate alone is the
- * fallback: a pulse held well above the owner's resting rate for a while starts a session that the
- * owner is asked about, and a pulse back near rest for a while ends it. Pure logic; the Android
- * side feeds it and acts on what comes back.
+ * fallback: a pulse held well above the owner's resting rate - and above where it sat just before -
+ * for a while starts a session that the owner is asked about, and a pulse back down for a while
+ * ends it. Steps tell a walk from effort without steps (03.11.2026: a brisk fifteen-minute walk at
+ * 105-117 was filed as sport and kept «going» for two hours, because the resting rate is the
+ * night's and the owner sits at 85-100 by day). Pure logic; the Android side feeds it and acts on
+ * what comes back.
  */
 class ActivityDetector(
     val restingDefaultBpm: Int = DEFAULT_RESTING_BPM
@@ -40,13 +43,23 @@ class ActivityDetector(
         var confirmed: Boolean = false,
         var lastEffortEpochMs: Long = startEpochMs,
         var calmSinceEpochMs: Long? = null,
-        var ended: Boolean = false
+        var ended: Boolean = false,
+        /** Where the pulse sat in the half hour before it rose; null when that was not known. */
+        val baselineBpm: Int? = null
     )
 
     /** Minute-by-minute heart rate of the last day, for the resting estimate; (at, bpm). */
     private val heartRate = ArrayDeque<Pair<Long, Int>>()
+
+    /** Step counts as Health Services gives them, (start, end, steps), for the last few hours. */
+    private val steps = ArrayDeque<Triple<Long, Long, Int>>()
     private var elevatedSinceEpochMs: Long? = null
-    private var hardSeen = false
+
+    /** The pulse before it rose: the median of the half hour before [elevatedSinceEpochMs]; null when too few samples. */
+    private var elevatedBaselineBpm: Int? = null
+
+    /** Samples at or above the hard threshold since the pulse rose. */
+    private var hardMinutes = 0
     private var declinedUntilEpochMs = 0L
     var session: Session? = null
         private set
@@ -70,34 +83,84 @@ class ActivityDetector(
         val current = session
         if (current != null && !current.ended) {
             if (current.fromWorkout) return out // the fitness app ends its own workout
-            if (bpm >= resting + EFFORT_KEEP_BPM) {
+            if (bpm >= keepBpm(resting, current.baselineBpm)) {
                 current.lastEffortEpochMs = atEpochMs
                 current.calmSinceEpochMs = null
                 extendIfOutgrown(current, atEpochMs)?.let { out += it }
-            } else if (bpm < resting + CALM_BPM) {
+            } else {
                 if (current.calmSinceEpochMs == null) current.calmSinceEpochMs = atEpochMs
                 if (atEpochMs - checkNotNull(current.calmSinceEpochMs) >= CALM_MINUTES * 60_000L) out += end(current, checkNotNull(current.calmSinceEpochMs))
             }
             return out
         }
-        // Nothing on: is the pulse up for long enough to mean exercise?
-        if (bpm >= resting + ELEVATED_BPM) {
-            if (elevatedSinceEpochMs == null) { elevatedSinceEpochMs = atEpochMs; hardSeen = false }
-            if (bpm >= resting + HARD_BPM) hardSeen = true
+        // Nothing on: is the pulse up for long enough, and far enough above where it sat, to mean exercise?
+        val baseline = if (elevatedSinceEpochMs == null) baselineBefore(atEpochMs) else elevatedBaselineBpm
+        val start = startBpm(resting, baseline)
+        if (bpm >= start) {
+            if (elevatedSinceEpochMs == null) { elevatedSinceEpochMs = atEpochMs; elevatedBaselineBpm = baseline; hardMinutes = 0 }
+            if (bpm >= hardBpm(resting, baseline)) hardMinutes++
             val since = checkNotNull(elevatedSinceEpochMs)
             if (atEpochMs - since >= ELEVATED_MINUTES * 60_000L && atEpochMs >= declinedUntilEpochMs) {
-                val mode = if (hardSeen) "SPORT" else "WALK"
+                val stepsPerMin = stepsPerMinute(since, atEpochMs)
+                val walking = stepsPerMin != null && stepsPerMin >= WALK_STEPS_PER_MINUTE
+                val mode = when {
+                    hardMinutes >= HARD_MINUTES_FOR_SPORT                     -> "SPORT"
+                    !walking && hardMinutes >= HARD_MINUTES_WITHOUT_STEPS     -> "SPORT"
+                    else                                                      -> "WALK"
+                }
                 val duration = if (mode == "SPORT") PROVISIONAL_SPORT_MINUTES else PROVISIONAL_WALK_MINUTES
-                session = Session(since, mode, duration, fromWorkout = false, lastEffortEpochMs = atEpochMs)
+                session = Session(since, mode, duration, fromWorkout = false, lastEffortEpochMs = atEpochMs, baselineBpm = elevatedBaselineBpm)
+                val why = "пульс $bpm при покое $resting" + (elevatedBaselineBpm?.let { ", до этого $it" } ?: "") +
+                    " уже ${ELEVATED_MINUTES} мин, " + (stepsPerMin?.let { "шагов ${it.toInt()}/мин" } ?: "шагов нет") +
+                    (if (hardMinutes > 0) ", тяжело $hardMinutes мин" else "")
                 elevatedSinceEpochMs = null
-                out += Signal.Started(mode, since, duration, sure = false, why = "пульс $bpm при покое $resting уже ${ELEVATED_MINUTES} мин")
+                elevatedBaselineBpm = null
+                hardMinutes = 0
+                out += Signal.Started(mode, since, duration, sure = false, why = why)
             }
-        } else if (bpm < resting + ELEVATED_BPM - ELEVATED_HYSTERESIS_BPM) {
+        } else if (bpm < start - ELEVATED_HYSTERESIS_BPM) {
             elevatedSinceEpochMs = null
-            hardSeen = false
+            elevatedBaselineBpm = null
+            hardMinutes = 0
         }
         return out
     }
+
+    /** Steps counted over an interval, as Health Services reports them. */
+    fun onSteps(startEpochMs: Long, endEpochMs: Long, count: Int) {
+        if (endEpochMs <= startEpochMs || count < 0) return
+        steps.addLast(Triple(startEpochMs, endEpochMs, count))
+        while (steps.isNotEmpty() && endEpochMs - steps.first().second > STEPS_HISTORY_MS) steps.removeFirst()
+    }
+
+    /** Steps per minute over a window, from the intervals that overlap it; null when none does. */
+    fun stepsPerMinute(fromEpochMs: Long, toEpochMs: Long): Double? {
+        if (toEpochMs <= fromEpochMs) return null
+        var total = 0.0
+        var touched = false
+        for ((s, e, n) in steps) {
+            val overlap = minOf(e, toEpochMs) - maxOf(s, fromEpochMs)
+            if (overlap <= 0L) continue
+            touched = true
+            total += n * overlap.toDouble() / (e - s)
+        }
+        return if (touched) total / ((toEpochMs - fromEpochMs) / 60_000.0) else null
+    }
+
+    /** The median of the samples in the half hour before [atEpochMs]; null with too few of them. */
+    private fun baselineBefore(atEpochMs: Long): Int? {
+        val before = heartRate.filter { it.first >= atEpochMs - BASELINE_WINDOW_MS && it.first < atEpochMs }.map { it.second }.sorted()
+        return if (before.size < MIN_BASELINE_SAMPLES) null else before[before.size / 2]
+    }
+
+    /** Effort that starts a session: well above rest, and above where the pulse sat just before. */
+    private fun startBpm(resting: Int, baseline: Int?): Int = maxOf(resting + ELEVATED_BPM, (baseline ?: 0) + ABOVE_BASELINE_START_BPM)
+
+    /** Effort that keeps one going: a little under that, and still above where the pulse sat before it. */
+    private fun keepBpm(resting: Int, baseline: Int?): Int = maxOf(resting + KEEP_BPM, (baseline ?: 0) + ABOVE_BASELINE_KEEP_BPM)
+
+    /** Hard effort, the kind that means sport: far above rest, and far above where the pulse sat (a brisk walk from 93 reaches 117). */
+    private fun hardBpm(resting: Int, baseline: Int?): Int = maxOf(resting + HARD_BPM, (baseline ?: 0) + ABOVE_BASELINE_HARD_BPM)
 
     /** The fitness app's word: a workout of [type] is running, or has stopped. */
     fun onWorkout(atEpochMs: Long, type: String?, running: Boolean): List<Signal> {
@@ -150,6 +213,8 @@ class ActivityDetector(
     fun decline(nowEpochMs: Long) {
         session = null
         elevatedSinceEpochMs = null
+        elevatedBaselineBpm = null
+        hardMinutes = 0
         declinedUntilEpochMs = nowEpochMs + DECLINE_QUIET_MS
     }
 
@@ -178,12 +243,15 @@ class ActivityDetector(
 
     fun toJson(): JSONObject = JSONObject()
         .put("heartRate", JSONArray().apply { heartRate.forEach { put(JSONArray().put(it.first).put(it.second)) } })
+        .put("steps", JSONArray().apply { steps.forEach { put(JSONArray().put(it.first).put(it.second).put(it.third)) } })
         .put("elevatedSince", elevatedSinceEpochMs ?: JSONObject.NULL)
-        .put("hardSeen", hardSeen)
+        .put("elevatedBaseline", elevatedBaselineBpm ?: JSONObject.NULL)
+        .put("hardMinutes", hardMinutes)
         .put("declinedUntil", declinedUntilEpochMs)
         .put("session", session?.let {
             JSONObject().put("start", it.startEpochMs).put("mode", it.mode).put("minutes", it.durationMinutes).put("fromWorkout", it.fromWorkout)
                 .put("confirmed", it.confirmed).put("lastEffort", it.lastEffortEpochMs).put("calmSince", it.calmSinceEpochMs ?: JSONObject.NULL).put("ended", it.ended)
+                .put("baseline", it.baselineBpm ?: JSONObject.NULL)
         } ?: JSONObject.NULL)
 
     companion object {
@@ -197,9 +265,21 @@ class ActivityDetector(
         /** Pulse above rest that counts as effort, that keeps a session going, and that means sport rather than a walk. */
         const val ELEVATED_BPM = 30
         const val ELEVATED_HYSTERESIS_BPM = 5
-        const val EFFORT_KEEP_BPM = 20
+        const val KEEP_BPM = 25
         const val HARD_BPM = 45
-        const val CALM_BPM = 15
+
+        /** Above where the pulse sat in the half hour before: by day the owner sits well above the night's rest. */
+        const val ABOVE_BASELINE_START_BPM = 15
+        const val ABOVE_BASELINE_KEEP_BPM = 10
+        const val ABOVE_BASELINE_HARD_BPM = 30
+        const val BASELINE_WINDOW_MS = 30 * 60_000L
+        const val MIN_BASELINE_SAMPLES = 5
+
+        /** Sport: this many hard minutes; or effort without the steps of a walk and a couple of hard minutes. */
+        const val HARD_MINUTES_FOR_SPORT = 5
+        const val HARD_MINUTES_WITHOUT_STEPS = 2
+        const val WALK_STEPS_PER_MINUTE = 40.0
+        const val STEPS_HISTORY_MS = 3 * 60 * 60_000L
         const val ELEVATED_MINUTES = 8
         const val CALM_MINUTES = 10
         const val QUIET_MINUTES = 20
@@ -224,13 +304,22 @@ class ActivityDetector(
                     detector.heartRate.addLast(pair.getLong(0) to pair.getInt(1))
                 }
             }
+            json.optJSONArray("steps")?.let { array ->
+                for (i in 0 until array.length()) {
+                    val t = array.getJSONArray(i)
+                    detector.steps.addLast(Triple(t.getLong(0), t.getLong(1), t.getInt(2)))
+                }
+            }
             detector.elevatedSinceEpochMs = if (json.isNull("elevatedSince")) null else json.optLong("elevatedSince")
-            detector.hardSeen = json.optBoolean("hardSeen")
+            detector.elevatedBaselineBpm = if (json.isNull("elevatedBaseline")) null else json.optInt("elevatedBaseline")
+            // Older state kept a boolean; it read as hard enough for sport.
+            detector.hardMinutes = if (json.has("hardMinutes")) json.optInt("hardMinutes") else if (json.optBoolean("hardSeen")) HARD_MINUTES_FOR_SPORT else 0
             detector.declinedUntilEpochMs = json.optLong("declinedUntil")
             json.optJSONObject("session")?.let { s ->
                 detector.session = Session(
                     s.getLong("start"), s.getString("mode"), s.getInt("minutes"), s.optBoolean("fromWorkout"), s.optBoolean("confirmed"),
-                    s.optLong("lastEffort", s.getLong("start")), if (s.isNull("calmSince")) null else s.optLong("calmSince"), s.optBoolean("ended")
+                    s.optLong("lastEffort", s.getLong("start")), if (s.isNull("calmSince")) null else s.optLong("calmSince"), s.optBoolean("ended"),
+                    baselineBpm = if (s.isNull("baseline")) null else s.optInt("baseline")
                 )
             }
             return detector

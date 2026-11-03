@@ -472,7 +472,14 @@ data class WatchHeartbeat(
      * none. Known without a pump session, so the phone learns of an unpairing or of a different
      * pump at once and stops trusting a [snapshot] it was given for the previous one.
      */
-    val heldPump: String? = null
+    val heldPump: String? = null,
+    /**
+     * When the watch last got anything from the phone (a lease, a command, an ack). The phone
+     * compares it with its own sends: a watch that keeps talking but has not heard the phone
+     * for a while sits behind a half-open Bluetooth link (03.11.2026), which only a Bluetooth
+     * restart on the phone clears. Null from builds before this field.
+     */
+    val phoneHeardAtEpochMs: Long? = null
 ) {
 
     fun toJson(): JSONObject = JSONObject()
@@ -487,6 +494,7 @@ data class WatchHeartbeat(
             watchBatteryPercent?.let { put("watchBattery", it) }
             snapshot?.let { put("snapshot", it.toJson()) }
             heldPump?.let { put("heldPump", it) }
+            phoneHeardAtEpochMs?.let { put("phoneHeardAt", it) }
         }
 
     companion object {
@@ -500,7 +508,8 @@ data class WatchHeartbeat(
             pumpReachable = json.getBoolean("pumpReachable"),
             watchBatteryPercent = json.optIntOrNull("watchBattery"),
             snapshot = if (json.has("snapshot")) PumpSnapshot.fromJson(json.getJSONObject("snapshot")) else null,
-            heldPump = if (json.has("heldPump")) json.getString("heldPump") else null
+            heldPump = if (json.has("heldPump")) json.getString("heldPump") else null,
+            phoneHeardAtEpochMs = if (json.has("phoneHeardAt")) json.getLong("phoneHeardAt") else null
         )
     }
 }
@@ -574,7 +583,13 @@ data class RegulationSnapshot(
      * rise during a session, and the tail after it. 29.10.2026 the watch alone gave three micro-doses
      * into a session the phone had been told of.
      */
-    val activities: List<ActivityWindow> = emptyList()
+    val activities: List<ActivityWindow> = emptyList(),
+    /**
+     * Start times of walks and sport sessions the phone has taken back in the last day - the
+     * owner's «не нагрузка» on the phone, or a record found false. The watch drops its own copy
+     * (which it may have sensed itself and still be counting a tail for) and stops asking.
+     */
+    val cancelledActivityStarts: List<Long> = emptyList()
 ) {
 
     /** A temporary basal as an absolute rate, and when it was due to end. */
@@ -619,6 +634,7 @@ data class RegulationSnapshot(
             carbsRequiredG?.let { put("carbsRequired", it) }
             carbsRequiredWithinMin?.let { put("carbsRequiredWithin", it) }
             if (activities.isNotEmpty()) put("activities", JSONArray().apply { activities.forEach { put(it.toJson()) } })
+            if (cancelledActivityStarts.isNotEmpty()) put("cancelledActivities", JSONArray().apply { cancelledActivityStarts.forEach { put(it) } })
         }
 
     companion object {
@@ -643,7 +659,8 @@ data class RegulationSnapshot(
             carbsRequiredG = if (json.has("carbsRequired")) json.optInt("carbsRequired").coerceAtLeast(0) else null,
             carbsRequiredWithinMin = if (json.has("carbsRequiredWithin")) json.optInt("carbsRequiredWithin").takeIf { it > 0 } else null,
             phoneForecast = json.optJSONArray("phoneForecast")?.let { array -> List(array.length()) { array.getInt(it) } },
-            activities = json.optJSONArray("activities")?.let { array -> List(array.length()) { ActivityWindow.fromJson(array.getJSONObject(it)) } } ?: emptyList()
+            activities = json.optJSONArray("activities")?.let { array -> List(array.length()) { ActivityWindow.fromJson(array.getJSONObject(it)) } } ?: emptyList(),
+            cancelledActivityStarts = json.optJSONArray("cancelledActivities")?.let { array -> List(array.length()) { array.getLong(it) } } ?: emptyList()
         )
     }
 }

@@ -152,12 +152,60 @@ class ComboWatchPlugin @Inject constructor(
                     .onFailure { aapsLogger.debug(LTag.PUMP, "combowatch: lease renewal failed: ${it.message}") }
                 runCatching { guardGlucoseRelay() }
                     .onFailure { aapsLogger.warn(LTag.PUMP, "combowatch: glucose relay guard failed: ${it.javaClass.simpleName}: ${it.message}") }
+                runCatching { guardWearLink() }
+                    .onFailure { aapsLogger.warn(LTag.PUMP, "combowatch: wear link guard failed: ${it.javaClass.simpleName}: ${it.message}") }
                 delay(LEASE_RENEW_INTERVAL_MS)
             }
         }
     }
 
     @Volatile private var lastRelayKickEpochMs = 0L
+
+    @Volatile private var lastLinkResetEpochMs = 0L
+
+    /**
+     * The watch keeps talking but has not acknowledged our leases for a while: the Bluetooth link
+     * is half-open (03.11.2026). The relay app on this phone restarts Bluetooth on request; the
+     * owner is told. See [WearLinkGuard].
+     */
+    private fun guardWearLink() {
+        val now = System.currentTimeMillis()
+        val lastGlucose = persistenceLayer.getLastGlucoseValue()?.timestamp
+        val verdict = WearLinkGuard.check(now, link.leasesUnanswered, link.lastContactEpochMs, lastGlucose, link.watchNodeSeen, lastLinkResetEpochMs)
+        if (verdict !is WearLinkGuard.Verdict.Restart) return
+        requestLinkReset(verdict.why)
+    }
+
+    /** From adb (debug builds): the same restart, whatever the guard thinks. */
+    fun forceLinkReset(reason: String) = requestLinkReset(reason)
+
+    private fun requestLinkReset(reason: String) {
+        val now = System.currentTimeMillis()
+        lastLinkResetEpochMs = now
+        link.linkResetDone()
+        link.note("связь с часами полуживая ($reason): перезапуск Bluetooth телефона")
+        aapsLogger.warn(LTag.PUMP, "combowatch: wear link half-open ($reason); asking the relay app to restart Bluetooth")
+        val intent = Intent(WearLinkGuard.RESET_ACTION).setPackage(WearLinkGuard.RELAY_PACKAGE).putExtra(WearLinkGuard.EXTRA_REASON, reason)
+        runCatching {
+            context.sendOrderedBroadcast(intent, null, object : android.content.BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) {
+                    val answer = when (resultCode) {
+                        1    -> "restart started"
+                        2    -> "refused: restarted too recently"
+                        3    -> "refused: no Bluetooth adapter"
+                        else -> "no answer (relay app missing, or the LINK_RESET permission not granted - reinstall AAPS after WearTester)"
+                    }
+                    aapsLogger.info(LTag.PUMP, "combowatch: bluetooth restart request: $answer")
+                    if (resultCode != 1) uiInteraction.addNotificationValidFor(
+                        Notification.USER_MESSAGE, "Связь с часами полуживая, перезапуск Bluetooth не удался: выключите и включите Bluetooth вручную", Notification.NORMAL, 30
+                    )
+                }
+            }, null, 0, null, null)
+        }.onFailure { aapsLogger.warn(LTag.PUMP, "combowatch: could not ask for a Bluetooth restart: ${it.javaClass.simpleName}: ${it.message}") }
+        uiInteraction.addNotificationValidFor(
+            Notification.USER_MESSAGE, "Связь с часами полуживая ($reason): перезапускаю Bluetooth телефона", Notification.NORMAL, 30
+        )
+    }
 
     /**
      * The watch is in touch but no reading has come for a while: the relay app on this phone is
@@ -654,6 +702,7 @@ class ComboWatchPlugin @Inject constructor(
                         listOf(ValueWithUnit.Timestamp(start), ValueWithUnit.TEType(TE.Type.EXERCISE))
                     ).blockingGet()
                     uiInteraction.addNotificationValidFor(Notification.USER_MESSAGE, "Нагрузка отменена: на часах отвечено «не нагрузка»", Notification.INFO, 30)
+                    snapshots.noteCancelled(start)
                     aapsLogger.info(LTag.PUMP, "combowatch: activity at $start cancelled from the watch")
                 }
             }

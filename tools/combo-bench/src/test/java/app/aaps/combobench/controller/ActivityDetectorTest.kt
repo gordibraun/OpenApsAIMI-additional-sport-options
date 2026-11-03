@@ -49,7 +49,8 @@ class ActivityDetectorTest {
         detector.decline(t0 + minutes(9))
         assertNull(detector.session)
         assertTrue(pulse(detector, 10, 30, 100).isEmpty())
-        val again = pulse(detector, 31, 50, 100).filterIsInstance<ActivityDetector.Signal.Started>()
+        // Once the quiet is over, the pulse must rise again above where it has been sitting (100) to count: 118 does.
+        val again = pulse(detector, 31, 50, 118).filterIsInstance<ActivityDetector.Signal.Started>()
         assertEquals(1, again.size)
     }
 
@@ -95,5 +96,56 @@ class ActivityDetectorTest {
         assertEquals("SPORT", restored.session!!.mode)
         assertEquals(t0, restored.session!!.startEpochMs)
         assertEquals(detector.restingBpm, restored.restingBpm)
+    }
+
+    @Test fun `a brisk walk with steps is a walk, not sport, and ends when the pulse is back where it sat before`() {
+        val detector = ActivityDetector(restingDefaultBpm = 68)
+        // Sitting at 93 for half an hour: the baseline the rise is judged against.
+        assertTrue(pulse(detector, 0, 29, 93).isEmpty())
+        // Walking: 115 with 130 steps a minute, one hard minute at 117 - not enough for sport.
+        detector.onSteps(t0 + minutes(30), t0 + minutes(45), 130 * 15)
+        pulse(detector, 30, 30, 117)
+        val started = pulse(detector, 31, 38, 115).filterIsInstance<ActivityDetector.Signal.Started>().single()
+        assertEquals("WALK", started.mode)
+        assertEquals(t0 + minutes(30), started.startEpochMs)
+        assertTrue(started.why, started.why.contains("шагов 130/мин"))
+        // Sitting again at 95 (above the night's rest by 27, but not above where it sat before): calm, over ten minutes later.
+        assertTrue(pulse(detector, 39, 45, 115).isEmpty())
+        val ended = pulse(detector, 46, 56, 95).filterIsInstance<ActivityDetector.Signal.Ended>().single()
+        assertEquals(20, ended.durationMinutes)
+    }
+
+    @Test fun `a pulse drifting up while sitting does not start anything when it stays near where it sat`() {
+        val detector = ActivityDetector(restingDefaultBpm = 68)
+        assertTrue(pulse(detector, 0, 29, 92).isEmpty())
+        // 100 is 32 above rest, but only 8 above the last half hour: not a session.
+        assertTrue(pulse(detector, 30, 50, 100).isEmpty())
+        assertNull(detector.session)
+    }
+
+    @Test fun `effort without steps and a couple of hard minutes is sport`() {
+        val detector = ActivityDetector(restingDefaultBpm = 60)
+        pulse(detector, 0, 1, 106) // two hard minutes (45 above rest)
+        val started = pulse(detector, 2, 8, 95).filterIsInstance<ActivityDetector.Signal.Started>().single()
+        assertEquals("SPORT", started.mode)
+        assertTrue(started.why, started.why.contains("шагов нет"))
+    }
+
+    @Test fun `the same effort with the steps of a walk stays a walk`() {
+        val detector = ActivityDetector(restingDefaultBpm = 60)
+        detector.onSteps(t0, t0 + minutes(9), 110 * 9)
+        pulse(detector, 0, 1, 106)
+        val started = pulse(detector, 2, 8, 95).filterIsInstance<ActivityDetector.Signal.Started>().single()
+        assertEquals("WALK", started.mode)
+    }
+
+    @Test fun `steps per minute are read off the intervals that overlap the window`() {
+        val detector = ActivityDetector()
+        assertNull(detector.stepsPerMinute(t0, t0 + minutes(10)))
+        detector.onSteps(t0, t0 + minutes(10), 1000)
+        detector.onSteps(t0 + minutes(10), t0 + minutes(20), 0)
+        assertEquals(100.0, detector.stepsPerMinute(t0, t0 + minutes(10))!!, 0.01)
+        assertEquals(50.0, detector.stepsPerMinute(t0, t0 + minutes(20))!!, 0.01)
+        assertEquals(50.0, detector.stepsPerMinute(t0 + minutes(5), t0 + minutes(15))!!, 0.01)
     }
 }

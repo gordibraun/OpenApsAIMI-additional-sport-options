@@ -418,10 +418,37 @@ internal class ControllerHost private constructor(context: Context) {
         keepSamples(System.currentTimeMillis())
     }
 
-    /** Steps from Health Services: a count over an interval, or the day's running total ([daily]). Record only; the detector does not use them yet. */
+    /** Steps from Health Services: a count over an interval, or the day's running total ([daily]). Recorded, and an interval also tells the detector a walk from effort without steps. */
     fun onSteps(startEpochMs: Long, endEpochMs: Long, count: Long, daily: Boolean) = synchronized(sensingLock) {
-        if (daily) sampleLog.stepsDaily(endEpochMs, count) else sampleLog.steps(startEpochMs, endEpochMs, count)
+        if (daily) sampleLog.stepsDaily(endEpochMs, count) else {
+            sampleLog.steps(startEpochMs, endEpochMs, count)
+            detector.onSteps(startEpochMs, endEpochMs, count.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt())
+        }
         keepSamples(System.currentTimeMillis())
+    }
+
+    /**
+     * An activity taken back - by the phone (its snapshot lists what it cancelled), or from adb:
+     * off the watch's list, the detector quieted if it is the session it is still watching, the
+     * phone told unless it was the phone's word. True when there was something to take back.
+     */
+    fun cancelActivity(startEpochMs: Long, why: String, tellPhone: Boolean): Boolean = synchronized(sensingLock) {
+        val known = autonomy.activities().firstOrNull { kotlin.math.abs(it.startEpochMs - startEpochMs) < 60_000L }
+        val current = detector.session?.takeIf { kotlin.math.abs(it.startEpochMs - startEpochMs) < 60_000L }
+        if (known == null && current == null) return@synchronized false
+        val start = known?.startEpochMs ?: checkNotNull(current).startEpochMs
+        known?.let { autonomy.removeActivity(it.startEpochMs) }
+        if (current != null) detector.decline(System.currentTimeMillis())
+        if (tellPhone) outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY_CANCELLED, start, pumpSerial = heldPump(), note = why))
+        autonomy.addToJournal(
+            JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING")
+                .put("text", "Нагрузка с ${clock(start)} снята: $why").put("mode", autonomy.mode().name)
+        )
+        runCatching { context.getSystemService(android.app.NotificationManager::class.java).cancel(ACTIVITY_NOTIFICATION_ID) }
+        if (tellPhone) sendEvents()
+        refreshFace()
+        saveSensing()
+        true
     }
 
     fun onWorkout(atEpochMs: Long, type: String?, running: Boolean) = synchronized(sensingLock) {
@@ -733,6 +760,8 @@ internal class ControllerHost private constructor(context: Context) {
      * the phone knew of a session the watch did not, and the watch alone gave three micro-doses into it.
      */
     private fun keepPhoneActivities(snapshot: RegulationSnapshot) {
+        // What the phone took back goes first: a session the watch sensed may still be on its list with a tail.
+        snapshot.cancelledActivityStarts.forEach { start -> cancelActivity(start, "снята на телефоне", tellPhone = false) }
         if (snapshot.activities.isEmpty()) return
         val known = autonomy.activities()
         snapshot.activities.forEach { window ->
@@ -1089,6 +1118,7 @@ internal class ControllerHost private constructor(context: Context) {
             executorBusy = executor.isBusy,
             awaitingReconciliation = executor.awaitingReconciliation,
             pumpReachable = pumpReachable,
+            phoneHeardAtEpochMs = phoneLastHeardEpochMs.takeIf { it > 0L },
             watchBatteryPercent = context.getSystemService(BatteryManager::class.java)
                 ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)?.takeIf { it in 0..100 },
             // Only ever a reading of the pump held now, never one left over from another.

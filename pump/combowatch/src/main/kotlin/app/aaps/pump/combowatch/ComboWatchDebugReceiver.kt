@@ -59,6 +59,13 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
         val cmd = intent.getStringExtra("cmd") ?: return
         val tag = intent.getStringExtra("tag") ?: System.currentTimeMillis().toString()
         val out = File(context.filesDir, OUTPUT_FILE)
+        if (cmd == "LINK_RESET") {
+            plugin.forceLinkReset(intent.getStringExtra("reason") ?: "проверка с adb")
+            val answer = JSONObject().put("tag", tag).put("cmd", cmd).put("asked", true)
+            runCatching { out.writeText(answer.toString()) }
+            aapsLogger.info(LTag.PUMP, "combowatch debug: $answer")
+            return
+        }
         if (cmd == "EVENT") {
             val json = intent.getStringExtra("json") ?: return
             scope.launch {

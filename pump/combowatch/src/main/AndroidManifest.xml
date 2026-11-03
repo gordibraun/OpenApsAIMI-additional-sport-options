@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- To ask the relay app (WearTester's phone side) for a Bluetooth restart when the Wear link is half-open; signature-level, granted at install when WearTester is already there. -->
+    <uses-permission android:name="com.example.weartester.permission.LINK_RESET" />
+
     <application>
         <!-- Its own paths, so the companion's existing listener keeps handling the traffic it
              always handled and needs no change. -->

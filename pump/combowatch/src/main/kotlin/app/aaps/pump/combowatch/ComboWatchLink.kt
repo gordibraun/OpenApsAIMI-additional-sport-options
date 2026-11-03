@@ -80,6 +80,29 @@ class ComboWatchLink @Inject constructor(
     @Volatile
     private var lastLeaseSentEpochMs = 0L
 
+    /** When the last lease went out (as far as the phone's side can tell); 0 before the first. */
+    val lastLeaseSent: Long get() = lastLeaseSentEpochMs
+
+    /**
+     * Lease renewals sent since the watch last showed it received one - a heartbeat saying the
+     * phone was heard after the send (or, from older watch builds, a live lease of this
+     * generation), or a result to a command. Grows while the phone→watch direction is dead
+     * although the watch keeps talking; see [WearLinkGuard].
+     */
+    @Volatile
+    var leasesUnanswered: Int = 0
+        private set
+
+    /** Whether the last send found a watch node at all. */
+    @Volatile
+    var watchNodeSeen: Boolean = false
+        private set
+
+    /** After a Bluetooth restart the count starts afresh: the next unanswered renewals are the new link's. */
+    fun linkResetDone() {
+        leasesUnanswered = 0
+    }
+
     /** Whether the last lease got through; a line is written only when this changes. */
     @Volatile
     private var leaseReaching: Boolean? = null
@@ -134,7 +157,10 @@ class ComboWatchLink @Inject constructor(
             snapshot?.let { runCatching { it.toJson() }.getOrNull() }?.let { put(RegulationSnapshot.KEY_IN_LEASE, it) }
         }
         return send(ComboWatchProtocol.PATH_LEASE, message).also { sent ->
-            if (sent) lastLeaseSentEpochMs = now
+            if (sent) {
+                lastLeaseSentEpochMs = now
+                leasesUnanswered++
+            }
             if (sent != leaseReaching) {
                 leaseReaching = sent
                 note(if (sent) "аренда доходит до часов, предел болюса ${maxBolusTenthsIU?.let { "%.1f ЕД".format(Locale.getDefault(), it / 10.0) } ?: "часов"}" else "аренда не доходит: часы не на связи")
@@ -259,6 +285,8 @@ class ComboWatchLink @Inject constructor(
 
     fun onResultMessage(json: JSONObject) {
         lastContactEpochMs = System.currentTimeMillis()
+        // A result proves the command got there: the phone→watch direction is alive.
+        leasesUnanswered = 0
         val result = ComboResult.fromJson(json)
         // First which pump this is about: the events below are filed by the pump they name.
         result.snapshot?.let { snapshot ->
@@ -274,6 +302,11 @@ class ComboWatchLink @Inject constructor(
     fun onHeartbeat(heartbeat: WatchHeartbeat) {
         lastContactEpochMs = System.currentTimeMillis()
         lastHeartbeat = heartbeat
+        val heard = heartbeat.phoneHeardAtEpochMs
+        val answered =
+            if (heard != null) heard >= lastLeaseSentEpochMs - LEASE_ANSWER_SLACK_MS
+            else heartbeat.leaseLive && heartbeat.leaseGeneration == lease?.generation
+        if (answered) leasesUnanswered = 0
         val state = heartbeat.pumpReachable to heartbeat.heldPump
         if (state != notedHeartbeat) {
             notedHeartbeat = state
@@ -315,6 +348,7 @@ class ComboWatchLink @Inject constructor(
             aapsLogger.debug(LTag.PUMP, "combowatch: cannot list watch nodes: ${it.message}")
             emptyList()
         }
+        watchNodeSeen = nodes.isNotEmpty()
         if (nodes.isEmpty()) {
             aapsLogger.debug(LTag.PUMP, "combowatch: no watch connected")
             return false
@@ -336,5 +370,8 @@ class ComboWatchLink @Inject constructor(
 
         /** About two hours of a loop's traffic. */
         private const val MAX_NOTES = 150
+
+        /** A heartbeat made this little before our lease went out may still have seen it (clocks, queues). */
+        private const val LEASE_ANSWER_SLACK_MS = 15_000L
     }
 }
