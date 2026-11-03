@@ -408,9 +408,13 @@ internal class ControllerHost private constructor(context: Context) {
             }
             return
         }
-        val what = ActivitySensing.register(context)
+        // Steps from the watch's own sensor; Health Services' step intervals only when there is none (03.11.2026).
+        val stepsFromSensor = stepCounter.start()
+        val what = ActivitySensing.register(context, withSteps = !stepsFromSensor) + (if (stepsFromSensor) ", шаги с датчика" else "")
         autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", "Распознавание нагрузки включено: $what").put("mode", autonomy.mode().name))
     }
+
+    private val stepCounter = StepCounter(context) { start, end, count -> onSteps(start, end, count, daily = false) }
 
     fun onHeartRate(atEpochMs: Long, bpm: Int) = synchronized(sensingLock) {
         sampleLog.heartRate(atEpochMs, bpm)

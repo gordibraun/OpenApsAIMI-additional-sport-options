@@ -42,7 +42,7 @@ object ActivitySensing {
      * Ask Health Services to call [ActivityDetectionService] with heart rate and the workout state.
      * Blocks for a few seconds at most; call off the main thread. Returns what was asked for.
      */
-    fun register(context: Context): String {
+    fun register(context: Context, withSteps: Boolean = true): String {
         if (!granted(context)) return "нет разрешений на датчики"
         val client = HealthServices.getClient(context).passiveMonitoringClient
         val capabilities = client.getCapabilitiesAsync().get(15, TimeUnit.SECONDS)
@@ -51,6 +51,7 @@ object ActivitySensing {
         if (DataType.HEART_RATE_BPM in passive) types += DataType.HEART_RATE_BPM
         // Steps for the record (02.11.2026): the interval count where the watch offers it passively, else the day's running total.
         val stepsType = when {
+            !withSteps                      -> null
             DataType.STEPS in passive       -> DataType.STEPS
             DataType.STEPS_DAILY in passive -> DataType.STEPS_DAILY
             else                            -> null
