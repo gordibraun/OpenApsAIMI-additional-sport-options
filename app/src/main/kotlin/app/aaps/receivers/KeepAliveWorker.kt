@@ -66,6 +66,12 @@ class KeepAliveWorker(
 
     companion object {
 
+        /** Loop results are read back for the last day by the algorithms and for three weeks by the meal-ratio learner. */
+        const val BULK_APS_RESULTS_KEEP_DAYS = 30L
+
+        /** Device statuses only queue for a Nightscout upload. */
+        const val BULK_DEVICE_STATUS_KEEP_DAYS = 7L
+
         private val STATUS_UPDATE_FREQUENCY = T.mins(15).msecs()
         private const val IOB_UPDATE_FREQUENCY_IN_MINUTES = 5L
 
@@ -165,6 +171,14 @@ class KeepAliveWorker(
             val result = persistenceLayer.cleanupDatabase(6 * 31, deleteTrackedChanges = false)
             aapsLogger.debug(LTag.CORE, "Cleanup result: $result")
             preferences.put(LongNonKey.LastCleanupRun, dateUtil.now())
+        }
+        // Loop results and device statuses: a month and a week are plenty, six months of them stalled the phone (03-04.11.2026).
+        val lastTrim = preferences.get(LongNonKey.LastBulkTrimRun)
+        if (lastTrim < dateUtil.now() - T.days(1).msecs()) {
+            val started = dateUtil.now()
+            val result = persistenceLayer.trimBulkTables(keepApsResultsDays = BULK_APS_RESULTS_KEEP_DAYS, keepDeviceStatusDays = BULK_DEVICE_STATUS_KEEP_DAYS)
+            aapsLogger.info(LTag.CORE, "Bulk trim result: $result in ${dateUtil.now() - started} ms")
+            preferences.put(LongNonKey.LastBulkTrimRun, dateUtil.now())
         }
     }
 

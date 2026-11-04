@@ -47,6 +47,12 @@ interface PersistenceLayer {
      */
     fun cleanupDatabase(keepDays: Long, deleteTrackedChanges: Boolean): String
 
+    /**
+     * Trim the two bulk tables - loop results and device statuses - to the given ages, in small
+     * batches; what was removed, as text for the log.
+     */
+    fun trimBulkTables(keepApsResultsDays: Long, keepDeviceStatusDays: Long): String
+
     // BS
     /**
      * Get last bolus

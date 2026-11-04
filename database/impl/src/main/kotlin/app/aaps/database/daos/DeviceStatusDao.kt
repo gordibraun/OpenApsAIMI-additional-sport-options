@@ -26,6 +26,10 @@ internal interface DeviceStatusDao {
     @Query("DELETE FROM $TABLE_DEVICE_STATUS WHERE timestamp < :than")
     fun deleteOlderThan(than: Long): Int
 
+    /** The oldest rows before [than], at most [limit] of them: trimming in small batches keeps the lock short. */
+    @Query("DELETE FROM $TABLE_DEVICE_STATUS WHERE id IN (SELECT id FROM $TABLE_DEVICE_STATUS WHERE timestamp < :than ORDER BY timestamp LIMIT :limit)")
+    fun deleteOldestBatch(than: Long, limit: Int): Int
+
     @Query("SELECT id FROM $TABLE_DEVICE_STATUS ORDER BY id DESC limit 1")
     fun getLastId(): Long?
 

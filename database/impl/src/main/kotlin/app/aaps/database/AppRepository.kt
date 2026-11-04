@@ -79,6 +79,27 @@ class AppRepository @Inject internal constructor(
 
     fun clearApsResults() = database.apsResultDao.deleteAllEntries()
 
+    /**
+     * Loop results and device statuses are the bulk of the database (03.11.2026: 2.8 GB and 2.9 GB
+     * of 6 GB, six months of them) while they are read back for a day or so; the loop's scan of the
+     * results table (no index on timestamp) grew to minutes and stalled the phone for hours. They are
+     * trimmed in small batches, each its own transaction, so that nothing waits long for the lock.
+     */
+    fun trimBulkTables(keepApsResultsDays: Long, keepDeviceStatusDays: Long, batch: Int = 2000): String {
+        val now = System.currentTimeMillis()
+        var apsRemoved = 0
+        var statusRemoved = 0
+        do {
+            val n = database.apsResultDao.deleteOldestBatch(now - TimeUnit.DAYS.toMillis(keepApsResultsDays), batch)
+            apsRemoved += n
+        } while (n == batch)
+        do {
+            val n = database.deviceStatusDao.deleteOldestBatch(now - TimeUnit.DAYS.toMillis(keepDeviceStatusDays), batch)
+            statusRemoved += n
+        } while (n == batch)
+        return "APSResult $apsRemoved, DeviceStatus $statusRemoved"
+    }
+
     fun cleanupDatabase(keepDays: Long, deleteTrackedChanges: Boolean): String {
         val than = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(keepDays)
         val removed = mutableListOf<Pair<String, Int>>()

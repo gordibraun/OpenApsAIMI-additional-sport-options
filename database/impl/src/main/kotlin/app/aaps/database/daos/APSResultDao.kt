@@ -22,6 +22,10 @@ internal interface APSResultDao : TraceableDao<APSResult> {
     @Query("DELETE FROM $TABLE_APS_RESULTS WHERE referenceId IS NOT NULL")
     override fun deleteTrackedChanges(): Int
 
+    /** The oldest rows before [than], at most [limit] of them: trimming in small batches keeps the lock short. */
+    @Query("DELETE FROM $TABLE_APS_RESULTS WHERE id IN (SELECT id FROM $TABLE_APS_RESULTS WHERE timestamp < :than ORDER BY timestamp LIMIT :limit)")
+    fun deleteOldestBatch(than: Long, limit: Int): Int
+
     @Query("SELECT * FROM $TABLE_APS_RESULTS WHERE dateCreated > :since AND dateCreated <= :until LIMIT :limit OFFSET :offset")
     fun getNewEntriesSince(since: Long, until: Long, limit: Int, offset: Int): List<APSResult>
 

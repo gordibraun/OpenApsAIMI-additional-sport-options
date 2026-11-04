@@ -123,6 +123,8 @@ class AdbTunnelServer @Inject constructor(
         } catch (t: Throwable) {
             lastError = "${t.javaClass.simpleName}: ${t.message}"
             aapsLogger.warn(LTag.PUMP, "combowatch adb tunnel: connection failed: $lastError")
+            // adb reconnects the moment the socket closes; without a pause a watch that is away means a connection a second (04.11.2026: 150 in two minutes).
+            if (t.message?.startsWith("no watch") == true) runCatching { Thread.sleep(3_000) }
             runCatching { client.close() }
             channel?.let { runCatching { Tasks.await(channelClient.close(it), 5, TimeUnit.SECONDS) } }
             writeStatus()
