@@ -563,13 +563,17 @@ internal class ControllerHost private constructor(context: Context) {
                 refreshFace()
             }
             "SPORT", "WALK" -> {
-                val changed = detector.confirm(answer)
+                // The owner's word is what makes a sensed session count (04.11.2026: walking is part of the day, not a load).
+                detector.confirm(answer)
                 val record = ActivityRecord(current.startEpochMs, current.durationMinutes, current.mode)
-                if (changed) {
-                    autonomy.addActivity(record)
-                    outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY, record.startEpochMs, pumpSerial = heldPump(), activityMode = record.mode, activityDurationMinutes = record.durationMinutes, activityStartOffsetMinutes = 0))
-                    sendEvents()
-                }
+                autonomy.addActivity(record)
+                outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY, record.startEpochMs, pumpSerial = heldPump(), activityMode = record.mode, activityDurationMinutes = record.durationMinutes, activityStartOffsetMinutes = 0))
+                autonomy.addToJournal(
+                    JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("mode", autonomy.mode().name)
+                        .put("text", "Хозяин подтвердил: ${ActivityEffect.name(record.mode)} с ${clock(record.startEpochMs)}, ${record.durationMinutes} мин" +
+                            (if (current.ended) " (уже закончилась; хвост ${record.tailMinutes} мин)" else "; записана, базал не выше ${(ActivityEffect.newInsulinFactor(record, System.currentTimeMillis()) * 100).toInt()} %, микродоз нет"))
+                )
+                sendEvents()
                 notifyActivity(record, "Нагрузка записана", "Телефон запишет её при связи.")
                 refreshFace()
             }
@@ -581,19 +585,22 @@ internal class ControllerHost private constructor(context: Context) {
         if (signals.isEmpty()) { saveSensing(); return }
         signals.forEach { signal ->
             when (signal) {
+                // What the watch senses is a proposal: nothing changes the doses until the owner answers
+                // (04.11.2026, the owner: walking is part of the day, not a load; it may go into the
+                // analytics, but not into the doses without my word). The session is still followed and
+                // written down for the analytics; answered «спорт» or «прогулка», it is applied with its real length.
                 is ActivityDetector.Signal.Started  -> {
                     val record = ActivityRecord(signal.startEpochMs, signal.durationMinutes, signal.mode)
-                    autonomy.addActivity(record)
-                    outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY, record.startEpochMs, pumpSerial = heldPump(), activityMode = record.mode, activityDurationMinutes = record.durationMinutes, activityStartOffsetMinutes = 0))
-                    val text = "Нагрузка замечена часами: ${ActivityEffect.name(record.mode)} с ${clock(record.startEpochMs)} (${signal.why}). " +
-                        "Записана; базал не выше ${(ActivityEffect.newInsulinFactor(record, System.currentTimeMillis()) * 100).toInt()} %, микродоз нет"
+                    val text = "Похоже на нагрузку: ${ActivityEffect.name(record.mode)} с ${clock(record.startEpochMs)} (${signal.why}). " +
+                        "Дозы не меняются, пока хозяин не ответит на часах"
                     autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", text).put("mode", autonomy.mode().name))
+                    outbox.append(PumpEvent(0, PumpEvent.Type.WATCH_NOTE, System.currentTimeMillis(), pumpSerial = heldPump(), note = "часы: $text"))
                     notifySensedActivity(record, signal.sure, signal.why)
                     sendEvents()
-                    refreshFace()
                 }
                 is ActivityDetector.Signal.Extended -> {
                     val current = detector.session ?: return@forEach
+                    if (!current.confirmed) return@forEach
                     val record = ActivityRecord(signal.startEpochMs, signal.durationMinutes, current.mode)
                     autonomy.addActivity(record)
                     outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY, record.startEpochMs, pumpSerial = heldPump(), activityMode = record.mode, activityDurationMinutes = record.durationMinutes, activityStartOffsetMinutes = 0))
@@ -602,6 +609,18 @@ internal class ControllerHost private constructor(context: Context) {
                 is ActivityDetector.Signal.Ended    -> {
                     val current = detector.session ?: return@forEach
                     val record = ActivityRecord(signal.startEpochMs, signal.durationMinutes, current.mode)
+                    val profile = detector.profile(record.startEpochMs, record.activeEndEpochMs)
+                    val stepsPerMin = detector.stepsPerMinute(record.startEpochMs, record.activeEndEpochMs)
+                    rememberSensedSession(record, current.confirmed, profile, stepsPerMin)
+                    if (!current.confirmed) {
+                        val text = "Похожая на нагрузку активность закончилась: ${ActivityEffect.name(record.mode)} ${record.durationMinutes} мин с ${clock(record.startEpochMs)}" +
+                            (profile?.let { ", пульс средний ${it.avgBpm}, максимум ${it.maxBpm}" } ?: "") + (stepsPerMin?.let { ", шагов ${it.toInt()}/мин" } ?: "") +
+                            "; не применялась (ответа не было)"
+                        autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", text).put("mode", autonomy.mode().name))
+                        outbox.append(PumpEvent(0, PumpEvent.Type.WATCH_NOTE, System.currentTimeMillis(), pumpSerial = heldPump(), note = "часы: $text"))
+                        sendEvents()
+                        return@forEach
+                    }
                     autonomy.addActivity(record)
                     outbox.append(PumpEvent(0, PumpEvent.Type.ACTIVITY, record.startEpochMs, pumpSerial = heldPump(), activityMode = record.mode, activityDurationMinutes = record.durationMinutes, activityStartOffsetMinutes = 0))
                     autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", "Нагрузка закончилась: ${ActivityEffect.name(record.mode)} ${record.durationMinutes} мин с ${clock(record.startEpochMs)}; хвост ${record.tailMinutes} мин").put("mode", autonomy.mode().name))
@@ -612,6 +631,18 @@ internal class ControllerHost private constructor(context: Context) {
             }
         }
         saveSensing()
+    }
+
+    /** One line per sensed session, applied or not, for the tail research: `files/sensed-sessions.jsonl`. */
+    private fun rememberSensedSession(record: ActivityRecord, confirmed: Boolean, profile: ActivityDetector.HrProfile?, stepsPerMin: Double?) {
+        runCatching {
+            val line = JSONObject().put("start", record.startEpochMs).put("end", record.activeEndEpochMs).put("minutes", record.durationMinutes)
+                .put("mode", record.mode).put("confirmed", confirmed)
+                .put("hrAvg", profile?.avgBpm ?: JSONObject.NULL).put("hrMax", profile?.maxBpm ?: JSONObject.NULL)
+                .put("hrEffortMin", profile?.effortMinutes ?: JSONObject.NULL).put("hrHardMin", profile?.hardMinutes ?: JSONObject.NULL)
+                .put("hrRest", profile?.restingBpm ?: JSONObject.NULL).put("stepsPerMin", stepsPerMin?.let { Math.round(it) } ?: JSONObject.NULL)
+            java.io.File(context.filesDir, SENSED_SESSIONS_FILE).appendText(line.toString() + "\n")
+        }.onFailure { Log.w("ComboController", "sensed session not written: ${it.javaClass.simpleName}") }
     }
 
     private fun saveSensing(extra: JSONObject.() -> Unit = {}) {
@@ -643,18 +674,16 @@ internal class ControllerHost private constructor(context: Context) {
                     .putExtra(ActivityAnswerReceiver.EXTRA_ANSWER, answer).putExtra(ActivityAnswerReceiver.EXTRA_START, record.startEpochMs),
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
             )
-            val title = if (sure) "Нагрузка: ${ActivityEffect.name(record.mode)}" else "Нагрузка? ${ActivityEffect.name(record.mode)}"
-            val text = "С ${clock(record.startEpochMs)}: $why. Записана, базал снижен, микродоз нет." + if (sure) " Если это не нагрузка — отмените." else " Что это было?"
+            val title = if (sure) "Нагрузка? тренировка в приложении" else "Нагрузка? ${ActivityEffect.name(record.mode)}"
+            val text = "С ${clock(record.startEpochMs)}: $why. Дозы не меняются, пока вы не ответите: спорт, прогулка или не нагрузка."
             val builder = android.app.Notification.Builder(context, ACTIVITY_CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_menu_directions)
                 .setContentTitle(title)
                 .setContentText(text)
                 .setStyle(android.app.Notification.BigTextStyle().bigText(text))
                 .setAutoCancel(true)
-            if (!sure) {
-                builder.addAction(android.app.Notification.Action.Builder(null, "Спорт", answer(1, "SPORT")).build())
-                builder.addAction(android.app.Notification.Action.Builder(null, "Прогулка", answer(2, "WALK")).build())
-            }
+            builder.addAction(android.app.Notification.Action.Builder(null, "Спорт", answer(1, "SPORT")).build())
+            builder.addAction(android.app.Notification.Action.Builder(null, "Прогулка", answer(2, "WALK")).build())
             builder.addAction(android.app.Notification.Action.Builder(null, "Не нагрузка", answer(3, "NONE")).build())
             manager.notify(ACTIVITY_NOTIFICATION_ID, builder.build())
         }.onFailure { Log.w("ComboController", "sensed activity notice not shown: ${it.javaClass.simpleName}") }
@@ -1415,6 +1444,7 @@ internal class ControllerHost private constructor(context: Context) {
         private const val CARBS_NOTIFICATION_ID = 42
         private const val ACTIVITY_CHANNEL = "combo-activity"
         private const val ACTIVITY_NOTIFICATION_ID = 44
+        const val SENSED_SESSIONS_FILE = "sensed-sessions.jsonl"
         private const val SENSING_PERMISSION_NOTIFICATION_ID = 45
         private const val SENSING_FILE = "autonomy-activity-sensing.json"
         private const val SAMPLES_FILE = "activity-samples.json"
