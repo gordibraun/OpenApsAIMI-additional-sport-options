@@ -64,6 +64,9 @@ class ActivityDetector(
     var session: Session? = null
         private set
 
+    /** When the newest pulse sample came; 0 before the first. */
+    val newestSampleEpochMs: Long get() = heartRate.lastOrNull()?.first ?: 0L
+
     /** The owner's resting pulse as the lowest tenth of the last day's samples, within sense; the default until enough is known. */
     val restingBpm: Int
         get() {

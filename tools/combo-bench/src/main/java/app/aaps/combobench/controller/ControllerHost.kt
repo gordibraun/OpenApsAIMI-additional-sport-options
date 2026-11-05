@@ -100,7 +100,12 @@ internal class ControllerHost private constructor(context: Context) {
 
     init {
         // Health Services keeps delivering to the service across restarts once registered; asking again is harmless.
-        Thread { runCatching { startSensing() }.onFailure { Log.w(ActivitySensing.TAG, "sensing not started: ${it.javaClass.simpleName}") } }.start()
+        Thread {
+            runCatching { startSensing() }.onFailure {
+                Log.e(ActivitySensing.TAG, "sensing not started: ${it.javaClass.simpleName}: ${it.message}", it)
+                noteSensingFailure(it)
+            }
+        }.start()
         pruneSessionRecords()
     }
 
@@ -409,12 +414,20 @@ internal class ControllerHost private constructor(context: Context) {
             return
         }
         // Steps from the watch's own sensor; Health Services' step intervals only when there is none (03.11.2026).
-        val stepsFromSensor = stepCounter.start()
+        val stepsFromSensor = runCatching { stepCounter.start() }
+            .onFailure { Log.w(ActivitySensing.TAG, "step counter not started: ${it.javaClass.simpleName}: ${it.message}") }
+            .getOrDefault(false)
         val what = ActivitySensing.register(context, withSteps = !stepsFromSensor) + (if (stepsFromSensor) ", шаги с датчика" else "")
+        lastSensingStartEpochMs = System.currentTimeMillis()
         autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", "Распознавание нагрузки включено: $what").put("mode", autonomy.mode().name))
     }
 
-    private val stepCounter = StepCounter(context) { start, end, count -> onSteps(start, end, count, daily = false) }
+    /**
+     * Lazy, and never a plain property: `init` starts the sensing thread before the properties
+     * declared below it exist, and 0.62/0.63 threw NullPointerException there - no pulse, steps
+     * or workouts reached the watch from 04.11.2026 17:16 until this was found on the 05.11.
+     */
+    private val stepCounter by lazy { StepCounter(context) { start, end, count -> onSteps(start, end, count, daily = false) } }
 
     fun onHeartRate(atEpochMs: Long, bpm: Int) = synchronized(sensingLock) {
         sampleLog.heartRate(atEpochMs, bpm)
@@ -464,7 +477,18 @@ internal class ControllerHost private constructor(context: Context) {
         applySensing(detector.onWorkout(atEpochMs, type, running))
     }
 
+    @Volatile private var lastSensingStartEpochMs = 0L
+
     fun onSensingTick(nowEpochMs: Long) = synchronized(sensingLock) {
+        // Health Services has gone quiet on us before (04.11.2026 12:34, a bad Steps interval took the whole batch down): no pulse for an hour → ask again.
+        val newest = detector.newestSampleEpochMs
+        if (newest > 0L && nowEpochMs - newest > SENSING_SILENCE_MS && nowEpochMs - lastSensingStartEpochMs > SENSING_SILENCE_MS && ActivitySensing.granted(context)) {
+            autonomy.addToJournal(
+                JSONObject().put("at", nowEpochMs).put("action", "SENSING").put("mode", autonomy.mode().name)
+                    .put("text", "Пульса нет ${(nowEpochMs - newest) / 60_000} мин: регистрация датчиков заново")
+            )
+            Thread { runCatching { startSensing() }.onFailure { noteSensingFailure(it) } }.start()
+        }
         applySensing(detector.onTick(nowEpochMs))
         profileFinishedSessions(nowEpochMs)
         flushSamples(nowEpochMs)
@@ -643,6 +667,16 @@ internal class ControllerHost private constructor(context: Context) {
                 .put("hrRest", profile?.restingBpm ?: JSONObject.NULL).put("stepsPerMin", stepsPerMin?.let { Math.round(it) } ?: JSONObject.NULL)
             java.io.File(context.filesDir, SENSED_SESSIONS_FILE).appendText(line.toString() + "\n")
         }.onFailure { Log.w("ComboController", "sensed session not written: ${it.javaClass.simpleName}") }
+    }
+
+    /** Sensing that could not start is written where it will be seen; 04.11–05.11.2026 it failed silently for a day. */
+    private fun noteSensingFailure(t: Throwable) {
+        runCatching {
+            autonomy.addToJournal(
+                JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("mode", autonomy.mode().name)
+                    .put("text", "Распознавание нагрузки НЕ запущено: ${t.javaClass.simpleName}: ${t.message}")
+            )
+        }
     }
 
     private fun saveSensing(extra: JSONObject.() -> Unit = {}) {
@@ -1445,6 +1479,7 @@ internal class ControllerHost private constructor(context: Context) {
         private const val ACTIVITY_CHANNEL = "combo-activity"
         private const val ACTIVITY_NOTIFICATION_ID = 44
         const val SENSED_SESSIONS_FILE = "sensed-sessions.jsonl"
+        const val SENSING_SILENCE_MS = 60 * 60_000L
         private const val SENSING_PERMISSION_NOTIFICATION_ID = 45
         private const val SENSING_FILE = "autonomy-activity-sensing.json"
         private const val SAMPLES_FILE = "activity-samples.json"
