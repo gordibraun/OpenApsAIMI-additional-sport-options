@@ -98,6 +98,14 @@ internal class ControllerHost private constructor(context: Context) {
     }.getOrDefault(ActivitySampleLog())
     private var samplesSavedAtEpochMs = 0L
 
+    /**
+     * Declared above `init` on purpose: init starts the sensing thread at once, and a property
+     * declared below it does not exist yet when that thread runs - 0.62/0.63 threw
+     * NullPointerException there (a `by lazy` delegate too), and no pulse, steps or workouts
+     * reached the watch from 04.11.2026 17:16 until 05.11 14:35.
+     */
+    private val stepCounter = StepCounter(context) { start, end, count -> onSteps(start, end, count, daily = false) }
+
     init {
         // Health Services keeps delivering to the service across restarts once registered; asking again is harmless.
         Thread {
@@ -421,13 +429,6 @@ internal class ControllerHost private constructor(context: Context) {
         lastSensingStartEpochMs = System.currentTimeMillis()
         autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", "Распознавание нагрузки включено: $what").put("mode", autonomy.mode().name))
     }
-
-    /**
-     * Lazy, and never a plain property: `init` starts the sensing thread before the properties
-     * declared below it exist, and 0.62/0.63 threw NullPointerException there - no pulse, steps
-     * or workouts reached the watch from 04.11.2026 17:16 until this was found on the 05.11.
-     */
-    private val stepCounter by lazy { StepCounter(context) { start, end, count -> onSteps(start, end, count, daily = false) } }
 
     fun onHeartRate(atEpochMs: Long, bpm: Int) = synchronized(sensingLock) {
         sampleLog.heartRate(atEpochMs, bpm)
