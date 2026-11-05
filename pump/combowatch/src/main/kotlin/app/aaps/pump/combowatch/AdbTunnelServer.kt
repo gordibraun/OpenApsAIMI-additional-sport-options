@@ -94,6 +94,30 @@ class AdbTunnelServer @Inject constructor(
         }
     }
 
+    /** Connections that ended with nothing from the watch, and when the first of the current run was; see [deadEnd]. */
+    private var deadEnds = 0
+    private var deadEndsSinceMs = 0L
+
+    /**
+     * adb reconnects the moment a connection ends. When the watch end is dead - away, half-open, or
+     * its adbd not on tcp 5555 - every attempt opens a Wear channel that closes at once, four or
+     * five times a second, for as long as the phone is left alone: 6 900 such openings in the
+     * 25 minutes before the phone's AAPS went silent on 05.11.2026 01:05. A few in a row stop the
+     * server; the Mac side raises it again by hand once the watch is there.
+     */
+    private fun deadEnd(why: String): Boolean {
+        val now = System.currentTimeMillis()
+        synchronized(this) {
+            if (now - deadEndsSinceMs > DEAD_END_WINDOW_MS) { deadEnds = 0; deadEndsSinceMs = now }
+            deadEnds++
+            if (deadEnds < MAX_DEAD_ENDS) return false
+        }
+        aapsLogger.warn(LTag.PUMP, "combowatch adb tunnel: stopped after $deadEnds dead connections in a row ($why); bootstrap the watch's adbd or bring the watch near, then `watch-tunnel.sh up` again")
+        lastError = "stopped: $why"
+        stop()
+        return true
+    }
+
     private fun serve(client: Socket) {
         val channelClient = Wearable.getChannelClient(context)
         var channel: ChannelClient.Channel? = null
@@ -113,6 +137,7 @@ class AdbTunnelServer @Inject constructor(
                     runCatching { Tasks.await(channelClient.close(opened), 5, TimeUnit.SECONDS) }
                     relays.remove(ended)
                     aapsLogger.debug(LTag.PUMP, "combowatch adb tunnel: connection closed, ${ended.bytesAtoB} B to the watch, ${ended.bytesBtoA} B back")
+                    if (ended.bytesBtoA == 0L) deadEnd("the watch end answers nothing") else synchronized(this) { deadEnds = 0 }
                     writeStatus()
                 }
             )
@@ -123,9 +148,8 @@ class AdbTunnelServer @Inject constructor(
         } catch (t: Throwable) {
             lastError = "${t.javaClass.simpleName}: ${t.message}"
             aapsLogger.warn(LTag.PUMP, "combowatch adb tunnel: connection failed: $lastError")
-            // adb reconnects the moment the socket closes; without a pause a watch that is away means a connection a second (04.11.2026: 150 in two minutes).
-            if (t.message?.startsWith("no watch") == true) runCatching { Thread.sleep(3_000) }
             runCatching { client.close() }
+            if (t.message?.startsWith("no watch") == true) deadEnd("no watch connected")
             channel?.let { runCatching { Tasks.await(channelClient.close(it), 5, TimeUnit.SECONDS) } }
             writeStatus()
         }
@@ -169,6 +193,10 @@ class AdbTunnelServer @Inject constructor(
     }
 
     companion object {
+
+        /** Dead connections in a row that stop the server, and the window they must fall in. */
+        const val MAX_DEAD_ENDS = 5
+        const val DEAD_END_WINDOW_MS = 60_000L
 
         /** The channel path; the watch reads the port to connect to off its end. */
         const val PATH_PREFIX = "/combowatch/adb/"

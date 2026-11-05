@@ -54,7 +54,12 @@ case "$cmd" in
       echo "watch: $(adb -s "$TUNNEL" shell getprop ro.product.model 2>/dev/null | tr -d '\r') via $TUNNEL"
     else
       echo "watch: ${st:-no answer}. Is the watch near the phone, its adbd on tcp $WATCH_PORT (bootstrap after a reboot), the new wear app installed?"
-      echo "phone: $(status_file "$P")"
+      # Never leave adb retrying against a dead end: 05.11.2026 it reconnected 4-5 times a second for hours,
+      # each attempt opening a Wear channel on the phone, until AAPS there went silent.
+      adb disconnect "$TUNNEL" >/dev/null 2>&1 || true
+      adb -s "$P" forward --remove "tcp:$LISTEN" >/dev/null 2>&1 || true
+      adb -s "$P" shell am broadcast -n "$RECEIVER" --es cmd stop >/dev/null 2>&1 || true
+      echo "phone: tunnel stopped again (watch unreachable)"
       exit 4
     fi ;;
   down)
