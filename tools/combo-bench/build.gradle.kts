@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 65
-            versionName = "0.65-step-sensor"
+            versionCode = 66
+            versionName = "0.66-raw-decisions"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }
