@@ -590,8 +590,8 @@ class WizardDialog : DaggerDialogFragment() {
         // Entered values
         val usePercentage = binding.correctionPercent.isChecked
         var bg = SafeParse.stringToDouble(binding.bgInput.text)
-        val carbSplit = currentCarbSplit()
-        val carbs = carbSplit.total
+        var carbSplit = currentCarbSplit()
+        var carbs = carbSplit.total
         val correction = if (!usePercentage) {
             if (Round.roundTo(calculatedCorrection, bolusStep) == SafeParse.stringToDouble(binding.correctionInput.text))
                 calculatedCorrection
@@ -608,11 +608,16 @@ class WizardDialog : DaggerDialogFragment() {
             preferences.get(IntKey.OverviewBolusPercentage).toDouble()
         val carbsAfterConstraint = constraintChecker.applyCarbsConstraints(ConstraintObject(carbs, aapsLogger)).value()
         if (abs(carbs - carbsAfterConstraint) > 0.01) {
-            binding.carbsInput.value = 0.0
-            binding.carbsFastInput.value = 0.0
-            binding.carbsSlowInput.value = 0.0
-            ToastUtils.warnToast(ctx, R.string.carbs_constraint_applied)
-            return
+            // Over the owner's limit for one entry. The three fields used to be wiped, which lost a whole
+            // photo estimate (11.11.2026: 85 g against a limit of 70 g). The meal is kept at the limit, in
+            // its own proportions, and the calculation goes on with what the fields now show.
+            val entered = carbs
+            carbSplit = carbSplit.scaledTo(carbsAfterConstraint)
+            carbs = carbSplit.total
+            binding.carbsInput.value = carbSplit.balanced.toDouble()
+            binding.carbsFastInput.value = carbSplit.fast.toDouble()
+            binding.carbsSlowInput.value = carbSplit.slow.toDouble()
+            ToastUtils.warnToast(ctx, "Углеводов $entered г — больше предела на один ввод ($carbsAfterConstraint г). Оставлено $carbs г в тех же долях.")
         }
 
         bg = if (binding.bgCheckbox.isChecked) bg else 0.0
@@ -675,7 +680,15 @@ class WizardDialog : DaggerDialogFragment() {
             binding.carbs.text = rh.gs(R.string.format_carbs_ic, carbs.toDouble(), wizard.ic)
             binding.carbsInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, wizard.insulinFromCarbs)
 
-            binding.iobInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, -wizard.insulinFromBolusIOB - wizard.insulinFromBasalIOB)
+            // Insulin on board, less what stays with the carbs of an earlier meal: the row adds up with the others.
+            binding.iobInsulin.text = rh.gs(
+                app.aaps.core.ui.R.string.format_insulin_units,
+                -wizard.insulinFromBolusIOB - wizard.insulinFromBasalIOB + wizard.insulinLeftWithEarlierMeal
+            )
+            binding.iobNote.text = if (wizard.insulinLeftWithEarlierMeal > 0.0) {
+                "на борту " + decimalFormatter.to2Decimal(wizard.insulinFromBolusIOB + wizard.insulinFromBasalIOB) +
+                    ", из них " + decimalFormatter.to2Decimal(wizard.insulinLeftWithEarlierMeal) + " заняты прошлой едой"
+            } else ""
 
             binding.correctionInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, wizard.insulinFromCorrection)
 

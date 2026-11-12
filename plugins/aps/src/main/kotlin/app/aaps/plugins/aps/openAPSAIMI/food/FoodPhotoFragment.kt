@@ -55,6 +55,7 @@ class FoodPhotoFragment : DaggerFragment() {
     @Inject lateinit var aapsSchedulers: AapsSchedulers
     @Inject lateinit var fabricPrivacy: FabricPrivacy
     @Inject lateinit var uiInteraction: UiInteraction
+    @Inject lateinit var constraintChecker: app.aaps.core.interfaces.constraints.ConstraintsChecker
     @Inject lateinit var dateUtil: DateUtil
     @Inject lateinit var aapsLogger: AAPSLogger
 
@@ -300,8 +301,21 @@ class FoodPhotoFragment : DaggerFragment() {
     private fun eat(entry: FoodPhotoEntry) {
         val split = entry.splitToEnter?.takeIf { !it.isEmpty } ?: return askGrams(entry)
         store.decide(entry.id, FoodPhotoEntry.Status.EATEN, split.total.toDouble())
+        // An estimate above the owner's limit for one entry goes in at the limit, in its own proportions, and
+        // says so; the wizard used to wipe all three fields (11.11.2026: 85 g against a limit of 70 g).
+        val limit = runCatching { constraintChecker.getMaxCarbsAllowed().value() }.getOrNull()?.takeIf { it > 0 }
+        val entered = if (limit != null && split.total > limit) split.scaledTo(limit) else split
+        val name = if (entered.total < split.total) {
+            android.widget.Toast.makeText(
+                requireContext(),
+                "Оценка ${split.total} г больше вашего предела на один ввод (${entered.total} г). " +
+                    "В калькулятор перенесено ${entered.total} г в тех же долях, остальные ${split.total - entered.total} г введите вторым вводом.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            "фото ${entry.shortId} (оценка ${split.total} г, предел ${entered.total})"
+        } else "фото ${entry.shortId}"
         // The wizard takes the three parts as its three fields: one bolus, one carb entry per type.
-        uiInteraction.runWizardDialog(childFragmentManager, split.balanced, "фото ${entry.shortId}", carbsFast = split.fast, carbsSlow = split.slow)
+        uiInteraction.runWizardDialog(childFragmentManager, entered.balanced, name, carbsFast = entered.fast, carbsSlow = entered.slow)
     }
 
     /** The owner's own numbers, one per type; the estimate's split is the starting point. */

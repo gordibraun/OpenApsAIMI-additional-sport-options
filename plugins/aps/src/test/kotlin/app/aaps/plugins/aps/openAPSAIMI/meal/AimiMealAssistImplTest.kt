@@ -221,7 +221,9 @@ class AimiMealAssistImplTest {
     }
 
     @Test
-    fun `fresh meal top up is not zeroed by bolus from the same active meal`() {
+    fun `a meal episode in memory adds no credit of its own`() {
+        // The insulin an earlier meal keeps is decided once, in the wizard's arithmetic
+        // (EarlierMealInsulin); the meal policy must not add a second credit from its own episodes.
         val now = System.currentTimeMillis()
         val firstMealInput = baseInput(
             timestamp = now,
@@ -245,69 +247,49 @@ class AimiMealAssistImplTest {
             delta = 0.0
         )
 
-        val decision = sut.evaluate(topUpInput)
+        assertEquals(0.0, sut.evaluate(topUpInput).recommendedBolus, 0.0)
+    }
+
+    @Test
+    fun `insulin the wizard left with an earlier meal reaches the proposal and is named`() {
+        // The wizard already counted 3 U of the insulin on board as busy with the earlier meal:
+        // its total is the new carbs' own 1.5 U.
+        val input = baseInput(
+            carbs = 15,
+            requiredCarbs = 0,
+            wizardCalculatedBolus = 1.5,
+            wizardInsulinFromCarbs = 1.5,
+            bolusIob = 3.0,
+            bg = 140.0
+        ).copy(wizardInsulinLeftWithEarlierMeal = 3.0)
+
+        val decision = sut.evaluate(input)
 
         assertEquals(1.5, decision.recommendedBolus, 0.0)
+        assertTrue(decision.explanation.contains("инсулин прошлой еды занят её углеводами"), decision.explanation)
     }
 
     @Test
-    fun `old meal top up still respects existing bolus iob`() {
-        val now = System.currentTimeMillis()
-        val firstMealInput = baseInput(
-            timestamp = now - 25 * 60_000L,
-            carbs = 30,
-            requiredCarbs = 0,
-            wizardCalculatedBolus = 3.0,
-            wizardInsulinFromCarbs = 3.0,
-            selectedFoodType = "balanced"
-        )
-        sut.activate(firstMealInput, sut.evaluate(firstMealInput))
-
-        val topUpInput = baseInput(
-            timestamp = now,
+    fun `carbs the loop asks for stay undosed even with an earlier meal on board`() {
+        // The forecast wants 15 g to stop a low; the owner enters 15 g: no insulin, whatever the wizard credited.
+        val input = baseInput(
             carbs = 15,
-            requiredCarbs = 0,
-            wizardCalculatedBolus = -1.5,
+            requiredCarbs = 15,
+            wizardCalculatedBolus = 1.5,
             wizardInsulinFromCarbs = 1.5,
-            selectedFoodType = "balanced",
             bolusIob = 3.0,
-            bg = 140.0,
-            delta = 0.0
-        )
+            bg = 95.0
+        ).copy(wizardInsulinLeftWithEarlierMeal = 3.0)
 
-        val decision = sut.evaluate(topUpInput)
-
-        assertEquals(0.0, decision.recommendedBolus, 0.0)
+        assertEquals(0.0, sut.evaluate(input).recommendedBolus, 0.0)
     }
 
     @Test
-    fun `fresh meal top up credit is blocked when glucose is below target and falling`() {
-        val now = System.currentTimeMillis()
-        val firstMealInput = baseInput(
-            timestamp = now,
-            carbs = 30,
-            requiredCarbs = 0,
-            wizardCalculatedBolus = 3.0,
-            wizardInsulinFromCarbs = 3.0,
-            selectedFoodType = "balanced"
-        )
-        sut.activate(firstMealInput, sut.evaluate(firstMealInput))
-
-        val topUpInput = baseInput(
-            timestamp = now + 60_000L,
-            carbs = 20,
-            requiredCarbs = 0,
-            wizardCalculatedBolus = -1.7,
-            wizardInsulinFromCarbs = 3.33,
-            selectedFoodType = "balanced",
-            bolusIob = 2.4,
-            bg = 53.0,
-            delta = -2.0
-        )
-
-        val decision = sut.evaluate(topUpInput)
-
-        assertEquals(0.0, decision.recommendedBolus, 0.0)
+    fun `food factors are the ones the dose itself uses`() {
+        assertEquals(0.80, sut.carbDoseFactor("fast"), 0.0)
+        assertEquals(0.92, sut.carbDoseFactor("slow"), 0.0)
+        assertEquals(1.0, sut.carbDoseFactor("balanced"), 0.0)
+        assertEquals(1.0, sut.carbDoseFactor(null), 0.0)
     }
 
     @Test

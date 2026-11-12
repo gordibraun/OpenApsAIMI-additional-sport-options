@@ -123,6 +123,14 @@ class BolusWizard @Inject constructor(
         private set
     var cobAlreadyHandledByActivity = 0.0
         private set
+
+    /** Units the covered, still unabsorbed carbs of earlier meals need (see [EarlierMealInsulin]). */
+    var handledCarbInsulin = 0.0
+        private set
+
+    /** Insulin on board left with those carbs instead of being held against the carbs entered now. */
+    var insulinLeftWithEarlierMeal = 0.0
+        private set
     var insulinFromTrend = 0.0
         private set
     var trend = 0.0
@@ -282,16 +290,19 @@ class BolusWizard @Inject constructor(
         // Insulin from carbs
         ic = profile.getIc()
         insulinFromCarbs = carbs / ic
-        val activeMealCobAlreadyHandled = if (useCob) {
-            max(
-                aimiMealAssist.activeEpisode()
-                    ?.cobHandledCarbs
-                    ?.toDouble()
-                    ?.coerceIn(0.0, cob)
-                    ?: 0.0,
-                persistedAimiCobAlreadyHandled(cob)
-            )
-        } else 0.0
+        // Carbs of earlier meals the wizard already covered: by the entries' notes and, where it knows
+        // more, by the meal episode in memory. Counted even when COB is switched off, because the
+        // insulin given for them is on board either way.
+        val displayCobLimit = if (useCob) cob.coerceAtLeast(0.0) else null
+        val handledByNotes = persistedHandledCarbs(displayCobLimit)
+        val episode = aimiMealAssist.activeEpisode()
+        val handledByEpisode = (episode?.cobHandledCarbs?.toDouble() ?: 0.0)
+            .coerceAtLeast(0.0)
+            .let { grams -> displayCobLimit?.let { grams.coerceAtMost(it) } ?: grams }
+        val activeMealCobAlreadyHandled = if (useCob) max(handledByEpisode, handledByNotes.grams) else 0.0
+        val handledDoseGrams = handledByNotes.doseGrams +
+            (handledByEpisode - handledByNotes.grams).coerceAtLeast(0.0) * aimiMealAssist.carbDoseFactor(episode?.selectedFoodType)
+        handledCarbInsulin = if (ic > 0.0) handledDoseGrams / ic else 0.0
         cobAlreadyHandledByActivity = if (useCob) activityProtectiveCobAlreadyHandled(cob - activeMealCobAlreadyHandled) else 0.0
         cobAlreadyHandledByAimi = if (useCob) {
             (activeMealCobAlreadyHandled + cobAlreadyHandledByActivity).coerceIn(0.0, cob)
@@ -330,8 +341,30 @@ class BolusWizard @Inject constructor(
             insulinFromSuperBolus += profile.getBasal(timeAfter1h)
         }
 
+        // Insulin an earlier meal's own carbs still need is not held against the carbs entered now
+        insulinLeftWithEarlierMeal = EarlierMealInsulin.credit(
+            newCarbs = carbs,
+            handledCarbInsulin = handledCarbInsulin,
+            insulinOnBoard = -calculatedTotalIOB,
+            insulinFromCob = insulinFromCOB,
+            otherInsulin = insulinFromBG + insulinFromTrend + insulinFromSuperBolus,
+            glucoseMgdl = if (bg > 0) wizardBgToMgdl() else glucoseStatus?.glucose ?: 0.0,
+            shortAvgDeltaMgdl = glucoseStatus?.shortAvgDelta ?: 0.0,
+            activityFactor = this.activityNewInsulinFactor
+        )
+        if (handledCarbInsulin > 0.0 && carbs > 0) {
+            aapsLogger.debug(
+                LTag.APS,
+                "AIMI wizard earlier meal: handledNeed=${"%.2f".format(handledCarbInsulin)}U iob=${"%.2f".format(-calculatedTotalIOB)}U " +
+                    "cobInsulin=${"%.2f".format(insulinFromCOB)}U other=${"%.2f".format(insulinFromBG + insulinFromTrend + insulinFromSuperBolus)}U " +
+                    "bg=${"%.0f".format(if (bg > 0) wizardBgToMgdl() else glucoseStatus?.glucose ?: 0.0)} " +
+                    "delta=${"%.1f".format(glucoseStatus?.shortAvgDelta ?: 0.0)} -> leftWithEarlierMeal=${"%.2f".format(insulinLeftWithEarlierMeal)}U"
+            )
+        }
+
         // Total
-        calculatedTotalInsulin = insulinFromBG + insulinFromTrend + insulinFromCarbs + calculatedTotalIOB + insulinFromCorrection + insulinFromSuperBolus + insulinFromCOB
+        calculatedTotalInsulin = insulinFromBG + insulinFromTrend + insulinFromCarbs + calculatedTotalIOB + insulinFromCorrection + insulinFromSuperBolus + insulinFromCOB +
+            insulinLeftWithEarlierMeal
 
         val percentage = if (usePercentage) totalPercentage else percentageCorrection.toDouble()
 
@@ -397,39 +430,58 @@ class BolusWizard @Inject constructor(
         }
     }
 
-    private fun persistedAimiCobAlreadyHandled(displayCob: Double): Double {
-        if (!displayCob.isFinite() || displayCob <= 0.0) return 0.0
+    /** Covered carbs of earlier meals that are not absorbed yet: the grams, and the grams weighted by each entry's food-type factor. */
+    private data class HandledCarbs(val grams: Double, val doseGrams: Double)
+
+    /**
+     * Reads the "handled" grams from the notes of the carb entries of the last hours and lets each run
+     * down over its food type's absorption time. With [displayCob] given they never exceed the carbs the
+     * loop still counts on board.
+     */
+    private fun persistedHandledCarbs(displayCob: Double?): HandledCarbs {
+        if (displayCob != null && (!displayCob.isFinite() || displayCob <= 0.0)) return HandledCarbs(0.0, 0.0)
         val now = dateUtil.now()
         val handledRegex = Regex("""AIMI_COB_HANDLED\s+grams=([0-9]+(?:\.[0-9]+)?)""")
         return try {
+            var grams = 0.0
+            var doseGrams = 0.0
             persistenceLayer.getCarbsFromTimeToTimeExpanded(now - T.hours(6).msecs(), now + T.hours(6).msecs(), true)
                 .asSequence()
                 .filter { it.isValid && it.amount > 0.0 }
-                .mapNotNull { carb ->
+                .forEach { carb ->
                     val note = carb.notes.orEmpty()
                     val handledCarbs = handledRegex.find(note)
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.toDoubleOrNull()
                         ?.coerceIn(0.0, carb.amount)
-                        ?: return@mapNotNull null
-                    val absorptionMinutes = when {
-                        note.contains("type=fast") -> 75.0
-                        note.contains("type=slow") -> 300.0
-                        else                       -> 210.0
+                        ?: return@forEach
+                    val type = when {
+                        note.contains("type=fast") -> "fast"
+                        note.contains("type=slow") -> "slow"
+                        else                       -> "balanced"
+                    }
+                    val absorptionMinutes = when (type) {
+                        "fast" -> 75.0
+                        "slow" -> 300.0
+                        else   -> 210.0
                     }
                     val elapsedMinutes = (now - carb.timestamp).toDouble() / T.mins(1).msecs().toDouble()
-                    when {
+                    val left = when {
                         elapsedMinutes <= 0.0              -> handledCarbs
                         elapsedMinutes >= absorptionMinutes -> 0.0
                         else                               -> handledCarbs * (1.0 - elapsedMinutes / absorptionMinutes)
                     }
+                    grams += left
+                    doseGrams += left * aimiMealAssist.carbDoseFactor(type).coerceIn(0.0, 1.0)
                 }
-                .sum()
-                .coerceIn(0.0, displayCob)
+            if (displayCob != null && grams > displayCob) {
+                val scale = displayCob / grams
+                HandledCarbs(displayCob, doseGrams * scale)
+            } else HandledCarbs(grams.coerceAtLeast(0.0), doseGrams.coerceAtLeast(0.0))
         } catch (e: Exception) {
             aapsLogger.debug(LTag.APS, "AIMI wizard persisted COB lookup failed: ${e.message}")
-            0.0
+            HandledCarbs(0.0, 0.0)
         }
     }
 
@@ -452,7 +504,8 @@ class BolusWizard @Inject constructor(
             timestamp = dateUtil.now(),
             profileName = profileName,
             selectedFoodType = selectedFoodType,
-            bg = bg,
+            // mg/dL like the targets beside it (it used to go in the owner's units and never compared right)
+            bg = wizardBgToMgdl(),
             delta = glucoseStatus?.shortAvgDelta ?: 0.0,
             carbs = carbs,
             requiredCarbs = requiredCarbs,
@@ -477,7 +530,8 @@ class BolusWizard @Inject constructor(
             trendInsulin = insulinFromTrend,
             notes = notes,
             activityNewInsulinFactor = activityNewInsulinFactor,
-            activityDescription = activityDescription
+            activityDescription = activityDescription,
+            wizardInsulinLeftWithEarlierMeal = insulinLeftWithEarlierMeal
         )
     }
 
@@ -613,7 +667,7 @@ class BolusWizard @Inject constructor(
             actions.add(
                 rh.gs(app.aaps.core.ui.R.string.cobvsiob) + ": " + rh.gs(
                     app.aaps.core.ui.R.string.formatsignedinsulinunits,
-                    -insulinFromBolusIOB - insulinFromBasalIOB + insulinFromCOB + insulinFromBG
+                    -insulinFromBolusIOB - insulinFromBasalIOB + insulinLeftWithEarlierMeal + insulinFromCOB + insulinFromBG
                 ).formatColor(
                     context, rh, app.aaps.core.ui.R.attr
                         .cobAlertColor
@@ -839,6 +893,7 @@ class BolusWizard @Inject constructor(
         }
         if (useBg) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_bg, insulinFromBG)
         if (includeBolusIOB) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_iob, -insulinFromBolusIOB - insulinFromBasalIOB)
+        if (insulinLeftWithEarlierMeal > 0.0) message += "\n" + earlierMealNote()
         if (useTrend) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_trend, insulinFromTrend)
         if (useSuperBolus) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_superbolus, insulinFromSuperBolus)
         if (percentageCorrection != 100) {
@@ -849,6 +904,10 @@ class BolusWizard @Inject constructor(
         }
         return message
     }
+
+    /** One line for the owner: how much of the insulin on board stays with the earlier meal. */
+    fun earlierMealNote(): String =
+        "Из него занято прошлой едой: +${"%.2f".format(insulinLeftWithEarlierMeal)} Е"
 
     private fun activateMealEpisode(deliveredInsulin: Double) {
         val confirmedInsulin = deliveredInsulin.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0

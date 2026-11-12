@@ -57,11 +57,12 @@ class AimiMealAssistImpl @Inject constructor(
         val carbComponent = input.wizardInsulinFromCarbs * carbCoverageRatio
         val baseWithoutCarbs = input.wizardCalculatedBolus - input.wizardInsulinFromCarbs
         val baseWithoutCarbsAndManualCorrection = baseWithoutCarbs - manualCorrection
-        val recentMealTopUpCredit = recentMealTopUpBolusCredit(input)
-        val topUpAdjustedBaseWithoutCarbs = baseWithoutCarbsAndManualCorrection + recentMealTopUpCredit
+        // The wizard has already left with an earlier meal the insulin its own carbs still need
+        // (EarlierMealInsulin); it is inside the base, here only to be named in the explanation.
+        val leftWithEarlierMeal = input.wizardInsulinLeftWithEarlierMeal.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
         val effectiveBaseWithoutCarbs = when {
-            protectiveCarbs > 0 -> max(0.0, topUpAdjustedBaseWithoutCarbs)
-            else -> topUpAdjustedBaseWithoutCarbs
+            protectiveCarbs > 0 -> max(0.0, baseWithoutCarbsAndManualCorrection)
+            else -> baseWithoutCarbsAndManualCorrection
         }
         val adjustedCarbComponent = when {
             netCarbs <= 0 -> 0.0
@@ -81,7 +82,7 @@ class AimiMealAssistImpl @Inject constructor(
         // than that insulin is worth. Left alone, a pre-bolus given minutes before the meal is dosed
         // twice (30.10.2026: 2.5 U on board, 11 g credited, 5.1 U proposed where the arithmetic said 3.8).
         // So AIMI may lower the wizard's own arithmetic (protective carbs, food type) but never raise it.
-        val arithmeticBeforeActivity = max(0.0, topUpAdjustedBaseWithoutCarbs + input.wizardInsulinFromCarbs * foodFactor)
+        val arithmeticBeforeActivity = max(0.0, baseWithoutCarbsAndManualCorrection + input.wizardInsulinFromCarbs * foodFactor)
         val arithmeticBeforeManualCorrection =
             if (activityNewInsulinFactor < 0.999) arithmeticBeforeActivity * activityNewInsulinFactor
             else arithmeticBeforeActivity
@@ -122,8 +123,8 @@ class AimiMealAssistImpl @Inject constructor(
                     append(", нагрузка новый инсулин x${"%.2f".format(activityNewInsulinFactor)}")
                     input.activityDescription?.let { append(" ($it)") }
                 }
-                if (recentMealTopUpCredit > 0.0) {
-                    append(", добавка к свежей еде: предыдущий болюс не гасит новые угли +${"%.2f".format(recentMealTopUpCredit)}U")
+                if (leftWithEarlierMeal > 0.0) {
+                    append(", инсулин прошлой еды занят её углеводами и новые не гасит: +${"%.2f".format(leftWithEarlierMeal)}U уже в базе")
                 }
                 if (manualCorrection != 0.0) {
                     append(", ручная коррекция ${"%.2f".format(manualCorrection)}U")
@@ -254,23 +255,7 @@ class AimiMealAssistImpl @Inject constructor(
         return true
     }
 
-    private fun recentMealTopUpBolusCredit(input: AimiMealInput): Double {
-        if (input.carbs <= 0 || input.bolusIob <= 0.0) return 0.0
-        if (input.bg < input.targetBgLow || input.delta < -1.0) return 0.0
-        val now = input.timestamp
-        val activeEpisodes = pruneActiveEpisodes(activeEpisodesRef.get(), now)
-            .filter { episode ->
-                episode.deliveredBolus > 0.0 &&
-                    now >= episode.startedAt &&
-                    now - episode.startedAt <= TOP_UP_MEAL_WINDOW_MINUTES * 60_000L
-            }
-        if (activeEpisodes.isEmpty()) return 0.0
-
-        val remainingDeliveredBolus = activeEpisodes.sumOf { episode ->
-            episode.deliveredBolus * remainingFraction(episode, now)
-        }
-        return remainingDeliveredBolus.coerceIn(0.0, input.bolusIob)
-    }
+    override fun carbDoseFactor(foodType: String?): Double = foodTypeModifier(foodType).carbFactor
 
     private fun foodTypeModifier(selectedFoodType: String?): FoodTypeModifier =
         when (selectedFoodType?.lowercase()) {
@@ -368,7 +353,6 @@ class AimiMealAssistImpl @Inject constructor(
     companion object {
         private const val MAX_ACTIVE_EPISODES = 12
         private const val DOMINANT_TYPE_SHARE = 0.75
-        private const val TOP_UP_MEAL_WINDOW_MINUTES = 20L
         private const val PENDING_TREATMENT_MAX_AGE_MS = 15 * 60_000L
     }
 }

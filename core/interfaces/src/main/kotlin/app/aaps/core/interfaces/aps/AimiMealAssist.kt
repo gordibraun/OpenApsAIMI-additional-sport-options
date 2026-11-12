@@ -29,7 +29,12 @@ data class AimiMealInput(
     val trendInsulin: Double,
     val notes: String,
     val activityNewInsulinFactor: Double = 1.0,
-    val activityDescription: String? = null
+    val activityDescription: String? = null,
+    /**
+     * Insulin on board the wizard left with the carbs of earlier meals instead of holding it against the
+     * new carbs. Already inside [wizardCalculatedBolus]; here so that the explanation can name it.
+     */
+    val wizardInsulinLeftWithEarlierMeal: Double = 0.0
 )
 
 data class AimiMealDecision(
@@ -61,6 +66,9 @@ data class AimiMealEpisode(
 
 interface AimiMealAssist {
     fun evaluate(input: AimiMealInput): AimiMealDecision
+
+    /** The share of the plain carb dose a food type gets: fast food is dosed more carefully than ordinary food. */
+    fun carbDoseFactor(foodType: String?): Double = 1.0
     fun activate(input: AimiMealInput, decision: AimiMealDecision): AimiMealEpisode
     fun activeEpisode(): AimiMealEpisode?
     fun markTreatmentAccepted(timestamp: Long) {}

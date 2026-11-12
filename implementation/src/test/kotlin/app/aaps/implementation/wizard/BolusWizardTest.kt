@@ -120,6 +120,149 @@ class BolusWizardTest : TestBaseWithProfile() {
         }
     }
 
+    /**
+     * The wizard with the real meal policy, a sugar in mmol/L, insulin on board and the carb entries
+     * of the last hours as the database would return them.
+     */
+    private fun stackedWizard(
+        carbs: Int,
+        cob: Double,
+        bgMmol: Double,
+        bolusIob: Double,
+        earlier: List<app.aaps.core.data.model.CA>,
+        basalIob: Double = 0.0,
+        shortAvgDelta: Double? = null,
+        useCob: Boolean = true,
+        forecastRequiredCarbs: Int? = null
+    ): BolusWizard {
+        val mealPolicy = AimiMealAssistImpl(aapsLogger, mock())
+        whenever(aimiMealAssist.evaluate(any())).thenAnswer { mealPolicy.evaluate(it.getArgument<AimiMealInput>(0)) }
+        whenever(aimiMealAssist.carbDoseFactor(anyOrNull())).thenAnswer { mealPolicy.carbDoseFactor(it.getArgument<String?>(0)) }
+        val profile = setupProfile(6.5, 6.5, 54.0, 10.0)
+        val at = dateUtil.now()
+        whenever(iobCobCalculator.calculateIobFromBolus()).thenReturn(IobTotal(at).also { it.iob = bolusIob })
+        whenever(iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended())
+            .thenReturn(IobTotal(at).also { it.basaliob = basalIob })
+        whenever(persistenceLayer.getCarbsFromTimeToTimeExpanded(any(), any(), any())).thenReturn(earlier)
+        if (shortAvgDelta != null) {
+            val status = mock<app.aaps.core.interfaces.aps.GlucoseStatus>()
+            whenever(status.shortAvgDelta).thenReturn(shortAvgDelta)
+            whenever(status.glucose).thenReturn(bgMmol * 18.0)
+            whenever(glucoseStatusProvider.glucoseStatusData).thenReturn(status)
+        }
+        return BolusWizard(
+            aapsLogger, rh, rxBus, preferences, profileFunction, profileUtil, constraintChecker, activePlugin,
+            commandQueue, loop, iobCobCalculator, dateUtil, config, uel, automation, glucoseStatusProvider, uiInteraction,
+            persistenceLayer, decimalFormatter, processedDeviceStatusData, aimiMealAssist
+        ).doCalc(
+            profile, "test", null, carbs, cob, bgMmol, 0.0, 100,
+            useBg = true, useCob = useCob, includeBolusIOB = true, includeBasalIOB = true,
+            useSuperBolus = false, useTT = false, useTrend = false, useAlarm = false,
+            forecastRequiredCarbs = forecastRequiredCarbs
+        )
+    }
+
+    private fun coveredMeal(minutesAgo: Int, grams: Double, handled: Int, type: String = "balanced") =
+        app.aaps.core.data.model.CA(
+            timestamp = dateUtil.now() - minutesAgo * 60_000L, duration = 0, amount = grams,
+            notes = "AIMI_CARB_TYPE type=$type AIMI_COB_HANDLED grams=$handled"
+        )
+
+    @Test
+    fun secondHelpingRightAfterAMealBolusGetsItsOwnDose() {
+        // 30 g covered with 3 U five minutes ago, sugar 7.0 mmol/L, 15 g more: was 0 U, because the 3 U
+        // on board were held against the new carbs while their own 30 g were left out of COB.
+        val wizard = stackedWizard(carbs = 15, cob = 29.0, bgMmol = 7.0, bolusIob = 3.0, earlier = listOf(coveredMeal(5, 30.0, 30)))
+
+        assertThat(wizard.insulinFromCOB).isWithin(0.0001).of(0.0)
+        assertThat(wizard.handledCarbInsulin).isWithin(0.0001).of(2.9)
+        // The credit fills the hole insulin on board makes and stops there: 3.0 - 0.17 (sugar above target).
+        assertThat(wizard.insulinLeftWithEarlierMeal).isWithin(0.0001).of(3.0 - 0.5 / 3.0)
+        assertThat(wizard.insulinAfterConstraints).isWithin(0.0001).of(1.5)
+        assertThat(wizard.earlierMealNote()).startsWith("Из него занято прошлой едой: +2")
+    }
+
+    @Test
+    fun insulinGivenWithoutCarbsIsStillHeldAgainstTheMealInFull() {
+        // 30.10.2026: a bolus given by hand before the meal has no carbs of its own to stay with.
+        val wizard = stackedWizard(carbs = 15, cob = 0.0, bgMmol = 7.0, bolusIob = 3.0, earlier = emptyList())
+
+        assertThat(wizard.insulinLeftWithEarlierMeal).isEqualTo(0.0)
+        assertThat(wizard.insulinAfterConstraints).isEqualTo(0.0)
+    }
+
+    @Test
+    fun insulinBeyondWhatTheEarlierMealNeedsStillLowersTheNewDose() {
+        // 4.37 U on board, the earlier 30 g need 2.9 U: 1.47 U are surplus and lower the new dose.
+        val wizard = stackedWizard(carbs = 30, cob = 29.0, bgMmol = 7.0, bolusIob = 4.37, earlier = listOf(coveredMeal(5, 30.0, 30)))
+
+        assertThat(wizard.insulinLeftWithEarlierMeal).isWithin(0.0001).of(2.9)
+        // 3.0 (carbs) + 0.17 (sugar above target) - 4.37 + 2.9 = 1.70
+        assertThat(wizard.insulinAfterConstraints).isWithin(0.0001).of(1.7)
+    }
+
+    @Test
+    fun lowOrFastFallingSugarGetsNoCreditFromTheEarlierMeal() {
+        val meal = listOf(coveredMeal(5, 30.0, 30))
+        // 4.3 mmol/L = 77 mg/dL
+        assertThat(stackedWizard(carbs = 15, cob = 29.0, bgMmol = 4.3, bolusIob = 3.0, earlier = meal).insulinAfterConstraints).isEqualTo(0.0)
+        // 5.7 mmol/L = 103 mg/dL falling 11.5 mg/dL per reading (11.11.2026 21:41)
+        val falling = stackedWizard(carbs = 15, cob = 29.0, bgMmol = 5.7, bolusIob = 3.0, earlier = meal, shortAvgDelta = -11.5)
+        assertThat(falling.insulinLeftWithEarlierMeal).isEqualTo(0.0)
+        assertThat(falling.insulinAfterConstraints).isEqualTo(0.0)
+        // A sugar of 5.9 holding steady keeps the new carbs' dose, less the 0.2 U the sugar below target takes
+        // off and the 0.1 U of insulin on board beyond the earlier meal's 2.9 U.
+        val steady = stackedWizard(carbs = 15, cob = 29.0, bgMmol = 5.9, bolusIob = 3.0, earlier = meal, shortAvgDelta = -1.0)
+        assertThat(steady.insulinLeftWithEarlierMeal).isWithin(0.0001).of(2.9)
+        assertThat(steady.insulinAfterConstraints).isWithin(0.0001).of(1.2)
+    }
+
+    @Test
+    fun anEarlierMealMostlyAbsorbedKeepsOnlyWhatItsRemainingCarbsNeed() {
+        // 30 g covered three hours ago: 4.3 g left by the model, worth 0.43 U. 3 U on board are mostly surplus.
+        val old = listOf(coveredMeal(180, 30.0, 30))
+        val loaded = stackedWizard(carbs = 15, cob = 10.0, bgMmol = 7.0, bolusIob = 3.0, earlier = old)
+        assertThat(loaded.insulinLeftWithEarlierMeal).isWithin(0.001).of(30.0 * (1 - 180.0 / 210.0) / 10.0)
+        assertThat(loaded.insulinAfterConstraints).isEqualTo(0.0)
+    }
+
+    @Test
+    fun coveredFastCarbsKeepInsulinAtTheirOwnFactor() {
+        // 20 g of fast food were dosed at 0.8 of the plain dose, so they keep 0.8 of it.
+        val wizard = stackedWizard(carbs = 15, cob = 19.0, bgMmol = 6.5, bolusIob = 2.0, earlier = listOf(coveredMeal(1, 20.0, 20, "fast")))
+
+        assertThat(wizard.handledCarbInsulin).isWithin(0.0001).of(19.0 * 0.8 / 10.0)
+        assertThat(wizard.insulinLeftWithEarlierMeal).isWithin(0.0001).of(1.52)
+        // 1.5 - 2.0 + 1.52 = 1.02 -> 1.0
+        assertThat(wizard.insulinAfterConstraints).isWithin(0.0001).of(1.0)
+    }
+
+    @Test
+    fun theEarlierMealCountsEvenWithCobSwitchedOff() {
+        val wizard = stackedWizard(carbs = 15, cob = 0.0, bgMmol = 7.0, bolusIob = 3.0, earlier = listOf(coveredMeal(5, 30.0, 30)), useCob = false)
+
+        assertThat(wizard.insulinFromCOB).isEqualTo(0.0)
+        assertThat(wizard.insulinAfterConstraints).isWithin(0.0001).of(1.5)
+    }
+
+    @Test
+    fun carbsTheLoopAsksForStayUndosedWithAnEarlierMealOnBoard() {
+        val wizard = stackedWizard(
+            carbs = 15, cob = 29.0, bgMmol = 5.3, bolusIob = 3.0, earlier = listOf(coveredMeal(5, 30.0, 30)), forecastRequiredCarbs = 15
+        )
+
+        assertThat(wizard.insulinAfterConstraints).isEqualTo(0.0)
+    }
+
+    @Test
+    fun aCorrectionWithoutCarbsNeverUsesTheEarlierMeal() {
+        // Sugar 10 mmol/L half an hour after a covered meal: the rise is that meal, its insulin is on its way.
+        val wizard = stackedWizard(carbs = 0, cob = 25.0, bgMmol = 10.0, bolusIob = 3.0, earlier = listOf(coveredMeal(30, 30.0, 30)))
+
+        assertThat(wizard.insulinLeftWithEarlierMeal).isEqualTo(0.0)
+        assertThat(wizard.insulinAfterConstraints).isEqualTo(0.0)
+    }
+
     private fun wearWizard(correction: Double = 0.0): BolusWizard {
         val profile = setupProfile(4.0, 8.0, 20.0, 10.0)
         val clock = mock<app.aaps.core.interfaces.utils.DateUtil>()
