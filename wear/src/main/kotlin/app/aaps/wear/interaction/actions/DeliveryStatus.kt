@@ -91,9 +91,14 @@ object DeliveryStatus {
     }
 
     /** The dose confirmed a moment ago and not answered yet, if any: a new calculation waits for it. */
-    @Synchronized fun inFlight(context: Context, now: Long = System.currentTimeMillis()): Entry? =
-        live(load(context), now).filter { it.state == State.SENT && now - it.sentAtEpochMs in 0 until IN_FLIGHT_MAX_MS }
-            .minByOrNull { it.sentAtEpochMs }
+    @Synchronized fun inFlight(context: Context, now: Long = System.currentTimeMillis()): Entry? = doseInFlight(live(load(context), now), now)
+
+    /** Only insulin counts: carbohydrates or a walk recorded through the phone hold nothing back. */
+    internal fun doseInFlight(entries: List<Entry>, now: Long): Entry? =
+        entries.filter { entry ->
+            entry.state == State.SENT && now - entry.sentAtEpochMs in 0 until IN_FLIGHT_MAX_MS &&
+                (UNITS.find(entry.decision)?.groupValues?.get(1)?.replace(',', '.')?.toDoubleOrNull() ?: 0.0) > 0.0
+        }.minByOrNull { it.sentAtEpochMs }
 
     /** Settles the request the answer belongs to, see [pick]. False when nothing was waiting. */
     @Synchronized fun answered(context: Context, title: String, message: String): Boolean {

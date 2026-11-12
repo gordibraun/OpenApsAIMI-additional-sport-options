@@ -51,4 +51,15 @@ class DeliveryStatusTest {
         assertEquals("Подать инсулин: 2.3 Е", DeliveryStatus.shortDecision("Углеводы: 20 г.\nОбычная еда.\nПодать инсулин: 2.3 Е.\n\nрасчёт…"))
         assertEquals("Подтверждено инсулина: 2.3 Е", DeliveryStatus.shortAnswer("Углеводы записаны: 20 г.\nПодтверждено инсулина: 2.3 Е."))
     }
+
+    @Test
+    fun `only a dose of insulin still on its way holds a new calculation back`() {
+        val dose = sent(40, "Подать инсулин: 2.3 Е")
+        assertSame(dose, DeliveryStatus.doseInFlight(listOf(sent(5, "Прогулка: 30 мин"), dose), now))
+        assertNull(DeliveryStatus.doseInFlight(listOf(sent(5, "Записать углеводы: 12 г"), sent(5, "Подать инсулин: 0.0 Е")), now))
+        // Longer than a dose can take: the phone has dropped it or its answer was lost.
+        assertNull(DeliveryStatus.doseInFlight(listOf(sent(200, "Подать инсулин: 2.3 Е")), now))
+        // Answered already.
+        assertNull(DeliveryStatus.doseInFlight(listOf(DeliveryStatus.Entry(now - 20_000, "Подать инсулин: 2.3 Е", DeliveryStatus.State.DONE)), now))
+    }
 }
