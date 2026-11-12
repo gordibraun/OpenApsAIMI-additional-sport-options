@@ -72,6 +72,9 @@ class KeepAliveWorker(
         /** Device statuses only queue for a Nightscout upload. */
         const val BULK_DEVICE_STATUS_KEEP_DAYS = 7L
 
+        /** Log archives kept on the phone; thirty covered about four hours and lost the nights. */
+        const val LOG_ARCHIVES_KEPT = 400
+
         private val STATUS_UPDATE_FREQUENCY = T.mins(15).msecs()
         private const val IOB_UPDATE_FREQUENCY_IN_MINUTES = 5L
 
@@ -146,7 +149,8 @@ class KeepAliveWorker(
         localAlertUtils.checkStaleBGAlert()
         checkPump()
         checkAPS()
-        maintenancePlugin.deleteLogs(30)
+        // About two days of this build's logs (an archive every five to ten minutes, ~0.45 MB each).
+        maintenancePlugin.deleteLogs(LOG_ARCHIVES_KEPT)
         workerDbStatus()
         databaseCleanup()
 

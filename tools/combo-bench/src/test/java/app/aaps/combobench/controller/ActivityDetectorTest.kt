@@ -148,4 +148,30 @@ class ActivityDetectorTest {
         assertEquals(50.0, detector.stepsPerMinute(t0, t0 + minutes(20))!!, 0.01)
         assertEquals(50.0, detector.stepsPerMinute(t0 + minutes(5), t0 + minutes(15))!!, 0.01)
     }
+
+    @Test fun `several samples within one minute count as one hard minute`() {
+        val detector = ActivityDetector(restingDefaultBpm = 60)
+        // Samples every ten seconds for nine minutes at 100 (40 above rest, not hard), with one hard minute at 108.
+        var started: ActivityDetector.Signal.Started? = null
+        for (s in 0..(9 * 6)) {
+            val bpm = if (s in 6..11) 108 else 100
+            detector.onHeartRate(t0 + s * 10_000L, bpm).filterIsInstance<ActivityDetector.Signal.Started>().firstOrNull()?.let { started = it }
+        }
+        // One hard minute, no steps: a walk, not sport (two hard minutes would be needed).
+        assertEquals("WALK", started!!.mode)
+        assertTrue(started!!.why, started!!.why.contains("тяжело 1 мин"))
+    }
+
+    @Test fun `with a day of history but no samples in the last half hour the pulse alone starts nothing`() {
+        val detector = ActivityDetector(restingDefaultBpm = 60)
+        // A long history (two hours at 70), then the watch off the wrist for 40 minutes.
+        for (m in 0 until 130) detector.onHeartRate(t0 + minutes(m), 70)
+        val back = 170
+        assertTrue(pulse(detector, back, back + 20, 111).isEmpty())
+        assertNull(detector.session)
+        // Once half an hour of samples is there again, a real rise above it does start a session.
+        pulse(detector, back + 21, back + 40, 90)
+        val started = pulse(detector, back + 41, back + 50, 125).filterIsInstance<ActivityDetector.Signal.Started>()
+        assertEquals(1, started.size)
+    }
 }

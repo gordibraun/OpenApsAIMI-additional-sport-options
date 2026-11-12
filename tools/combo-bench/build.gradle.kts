@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 66
-            versionName = "0.66-raw-decisions"
+            versionCode = 67
+            versionName = "0.67-detector-minutes"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

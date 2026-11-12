@@ -58,8 +58,11 @@ class ActivityDetector(
     /** The pulse before it rose: the median of the half hour before [elevatedSinceEpochMs]; null when too few samples. */
     private var elevatedBaselineBpm: Int? = null
 
-    /** Samples at or above the hard threshold since the pulse rose. */
+    /** Minutes with a sample at or above the hard threshold since the pulse rose. */
     private var hardMinutes = 0
+
+    /** The minute last counted into [hardMinutes]: samples come every few seconds, and 0.61–0.66 counted each of them (12.11.2026: «тяжело 113 мин» after eight minutes). */
+    private var lastHardMinute = -1L
     private var declinedUntilEpochMs = 0L
     var session: Session? = null
         private set
@@ -98,10 +101,18 @@ class ActivityDetector(
         }
         // Nothing on: is the pulse up for long enough, and far enough above where it sat, to mean exercise?
         val baseline = if (elevatedSinceEpochMs == null) baselineBefore(atEpochMs) else elevatedBaselineBpm
+        // Without the half hour before (the watch was off the wrist, or just put on) there is nothing to
+        // judge a rise against but the night's rest, and sitting at 100–111 after the charger read as
+        // «sport» (12.11.2026 10:02). Until the history is back, the pulse alone starts nothing.
+        if (baseline == null && heartRate.size >= MIN_SAMPLES_FOR_RESTING) {
+            elevatedSinceEpochMs = null; elevatedBaselineBpm = null; hardMinutes = 0; lastHardMinute = -1L
+            return out
+        }
         val start = startBpm(resting, baseline)
         if (bpm >= start) {
-            if (elevatedSinceEpochMs == null) { elevatedSinceEpochMs = atEpochMs; elevatedBaselineBpm = baseline; hardMinutes = 0 }
-            if (bpm >= hardBpm(resting, baseline)) hardMinutes++
+            if (elevatedSinceEpochMs == null) { elevatedSinceEpochMs = atEpochMs; elevatedBaselineBpm = baseline; hardMinutes = 0; lastHardMinute = -1L }
+            val minute = atEpochMs / 60_000L
+            if (bpm >= hardBpm(resting, baseline) && minute != lastHardMinute) { hardMinutes++; lastHardMinute = minute }
             val since = checkNotNull(elevatedSinceEpochMs)
             if (atEpochMs - since >= ELEVATED_MINUTES * 60_000L && atEpochMs >= declinedUntilEpochMs) {
                 val stepsPerMin = stepsPerMinute(since, atEpochMs)

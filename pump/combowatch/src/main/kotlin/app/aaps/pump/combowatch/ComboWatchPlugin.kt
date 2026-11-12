@@ -220,10 +220,22 @@ class ComboWatchPlugin @Inject constructor(
         val started = runCatching {
             context.startService(Intent().setClassName(GlucoseRelayGuard.RELAY_PACKAGE, GlucoseRelayGuard.RELAY_SERVICE)) != null
         }.onFailure { aapsLogger.warn(LTag.PUMP, "combowatch: could not start the glucose relay: ${it.javaClass.simpleName}: ${it.message}") }.getOrDefault(false)
-        aapsLogger.info(LTag.PUMP, "combowatch: no glucose for ${age ?: "?"} min while the watch is in touch; relay ${if (started) "started" else "not started"}")
+        // The watch answers the phone but neither reads the sensor nor reaches the pump: it is off the
+        // body (on its charger, 12.11.2026 09:08–09:33), and nothing is regulated meanwhile. Saying
+        // «приёмник перезапущен» there named the wrong cause twice in ten minutes.
+        val watchAwayFromBody = link.lastHeartbeat?.let { now - it.atEpochMs < 5 * 60_000L && !it.pumpReachable } == true
+        aapsLogger.info(
+            LTag.PUMP,
+            "combowatch: no glucose for ${age ?: "?"} min while the watch is in touch; relay ${if (started) "started" else "not started"}" +
+                if (watchAwayFromBody) "; the watch does not reach the pump either - it is away from the body" else ""
+        )
         uiInteraction.addNotificationValidFor(
             Notification.USER_MESSAGE,
-            if (started) "Показаний с часов нет ${age ?: "?"} мин: приёмник глюкозы перезапущен" else "Показаний с часов нет ${age ?: "?"} мин, приёмник не запустился: откройте WearTester",
+            when {
+                watchAwayFromBody -> "Часы не на теле ${age ?: "?"} мин (зарядка?): нет показаний и помпа часам не отвечает — регулирование стоит"
+                started           -> "Показаний с часов нет ${age ?: "?"} мин: приёмник глюкозы перезапущен"
+                else              -> "Показаний с часов нет ${age ?: "?"} мин, приёмник не запустился: откройте WearTester"
+            },
             Notification.NORMAL, 30
         )
     }

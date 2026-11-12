@@ -81,6 +81,17 @@ class MaintenancePlugin @Inject constructor(
         context.startActivity(emailIntent)
     }
 
+    /**
+     * Newest first by the time the file was last written. The archives of one day are named
+     * `…_.0.zip`, `…_.1.zip`, … `…_.49.zip`; by name, `.10` sorts before `.9`, and keeping "the last
+     * thirty by name" kept `.49, .5, .50–.59, .6, …` and deleted `.10–.48` - on 12.11.2026 that was
+     * 01:15–06:40, the same night hours three times in ten days, which read as the phone going silent.
+     */
+    private val newestFirst = Comparator<File> { f1, f2 ->
+        val byTime = f2.lastModified().compareTo(f1.lastModified())
+        if (byTime != 0) byTime else f2.name.compareTo(f1.name)
+    }
+
     fun deleteLogs(keep: Int) {
         val logDir = File(loggerUtils.logDirectory)
         val files = logDir.listFiles { _: File?, name: String ->
@@ -91,7 +102,7 @@ class MaintenancePlugin @Inject constructor(
         }
         val keepIndex = keep - 1
         if (autotuneFiles != null && autotuneFiles.isNotEmpty()) {
-            Arrays.sort(autotuneFiles) { f1: File, f2: File -> f2.name.compareTo(f1.name) }
+            Arrays.sort(autotuneFiles, newestFirst)
             var delAutotuneFiles = listOf(*autotuneFiles)
             if (keepIndex < delAutotuneFiles.size) {
                 delAutotuneFiles = delAutotuneFiles.subList(keepIndex, delAutotuneFiles.size)
@@ -101,7 +112,7 @@ class MaintenancePlugin @Inject constructor(
             }
         }
         if (files == null || files.isEmpty()) return
-        Arrays.sort(files) { f1: File, f2: File -> f2.name.compareTo(f1.name) }
+        Arrays.sort(files, newestFirst)
         var delFiles = listOf(*files)
         if (keepIndex < delFiles.size) {
             delFiles = delFiles.subList(keepIndex, delFiles.size)
@@ -132,7 +143,7 @@ class MaintenancePlugin @Inject constructor(
                 && (name.endsWith(".log")
                 || name.endsWith(".zip") && !name.endsWith(loggerUtils.suffix)))
         } ?: emptyArray()
-        Arrays.sort(files) { f1: File, f2: File -> f2.name.compareTo(f1.name) }
+        Arrays.sort(files, newestFirst)
         val result = listOf(*files)
         var toIndex = amount
         if (toIndex > result.size) {
