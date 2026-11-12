@@ -279,11 +279,25 @@ class ComboWatchPlugin @Inject constructor(
     override val lastBolusTime: Long? get() = lastBolus?.first
     override val lastBolusAmount: Double? get() = lastBolus?.second
 
-    /** What the pump delivers as 100 % right now, from the profile the watch read off the pump. */
+    /** The profile AAPS last asked about in [isThisProfileSet]; it asks every five minutes, just before it compares basal rates. */
+    @Volatile private var profileLastCompared: Profile? = null
+
+    /**
+     * What the pump delivers as 100 % right now, from the profile the watch read off the pump.
+     *
+     * Where the pump holds the active profile as closely as a Combo can (1.23 U/h is kept as 1.25), the
+     * profile's own figure is given. AAPS compares this rate with the profile every five minutes and
+     * reads the pump again when they are more than 0.01 U/h apart; with the pump's rounded figure that
+     * was every five minutes of thirteen hours of this owner's day - some 150 status sessions of 21 s
+     * (12.11.2026), each holding the pump just when a bolus might be waiting, and wearing both batteries.
+     */
     override val baseBasalRate: Double
-        get() = snapshot?.basalProfileFactors
-            ?.getOrNull(Calendar.getInstance().get(Calendar.HOUR_OF_DAY))
-            ?.let { it / 1000.0 } ?: 0.0
+        get() {
+            val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+            val onPump = snapshot?.basalProfileFactors?.getOrNull(hour) ?: return 0.0
+            val asked = runCatching { profileLastCompared?.getBasalTimeFromMidnight(hour * 60 * 60) }.getOrNull()
+            return baseRate(onPump, asked)
+        }
 
     override fun getPumpStatus(reason: String) {
         dispatch(CommandKind.STATUS)
@@ -458,6 +472,7 @@ class ComboWatchPlugin @Inject constructor(
      * is nothing to compare with, and AAPS is not sent into a profile write it cannot perform.
      */
     override fun isThisProfileSet(profile: Profile): Boolean {
+        profileLastCompared = profile
         val onPump = snapshot?.basalProfileFactors ?: return true
         return (0 until 24).all { hour ->
             comboBasalFactor((profile.getBasalTimeFromMidnight(hour * 60 * 60) * 1000.0).toInt()) == onPump.getOrNull(hour)
@@ -881,6 +896,15 @@ class ComboWatchPlugin @Inject constructor(
          * module does not depend on the driver. Without it a profile asking for 1.23 U/h never
          * equals the 1.25 the pump holds for it, and AAPS keeps asking for a profile write.
          */
+        /**
+         * The rate to report as the pump's 100 %: the profile's own figure when the pump's factor is that
+         * figure rounded the Combo's way, else what the pump holds.
+         */
+        internal fun baseRate(onPumpFactor: Int, profileRate: Double?): Double =
+            if (profileRate != null && profileRate.isFinite() && profileRate > 0.0 &&
+                comboBasalFactor((profileRate * 1000.0).toInt()) == onPumpFactor
+            ) profileRate else onPumpFactor / 1000.0
+
         internal fun comboBasalFactor(factor: Int): Int {
             val granularity = when (factor) {
                 in 0..50       -> 50

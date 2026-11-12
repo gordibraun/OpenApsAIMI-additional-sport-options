@@ -326,6 +326,22 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
     }
 
     @Test
+    fun `the pump's 100 percent is the profile's own rate wherever the pump holds it rounded`() {
+        // 1.23 U/h asked, 1.25 held: AAPS must not see two different rates and read the pump every five minutes.
+        assertThat(ComboWatchPlugin.baseRate(1250, 1.23)).isEqualTo(1.23)
+        assertThat(ComboWatchPlugin.baseRate(1300, 1.28)).isEqualTo(1.28)
+        assertThat(ComboWatchPlugin.baseRate(1000, 1.02)).isEqualTo(1.02)
+        assertThat(ComboWatchPlugin.baseRate(940, 0.94)).isEqualTo(0.94)
+        // A pump that holds something else says so.
+        assertThat(ComboWatchPlugin.baseRate(1500, 1.23)).isEqualTo(1.5)
+        assertThat(ComboWatchPlugin.baseRate(1250, 1.31)).isEqualTo(1.25)
+        // No profile known yet, or a nonsense one: the pump's figure.
+        assertThat(ComboWatchPlugin.baseRate(1250, null)).isEqualTo(1.25)
+        assertThat(ComboWatchPlugin.baseRate(1250, 0.0)).isEqualTo(1.25)
+        assertThat(ComboWatchPlugin.baseRate(1250, Double.NaN)).isEqualTo(1.25)
+    }
+
+    @Test
     fun `a profile equals the pump's when it matches after the pump's rounding`() {
         registered(pumpA)
         val asked = listOf(0.93, 1.23, 1.26, 1.28, 1.29, 1.23, 1.37, 1.2, 1.1, 0.94, 1.0, 0.95, 1.0, 1.15, 1.2, 1.1, 0.94, 0.81, 1.05, 1.05, 1.05, 1.1, 1.05, 1.15)
