@@ -83,7 +83,7 @@ class DataHandlerWear @Inject constructor(
                 if (it.returnCommand == null) {
                     DeliveryStatus.answered(context, it.title, it.message)
                     if (WatchUiState.inputOnScreen) {
-                        showDeliveryNotification(it.title, it.message)
+                        showDeliveryNotification(it.title, it.message, quiet = true)
                         return@subscribe
                     }
                 }
@@ -326,22 +326,36 @@ class DataHandlerWear @Inject constructor(
     private val deliveryNotificationId = 7301
 
     /** The phone's answer to a dose confirmed from the watch, shown without taking over the screen. */
-    private fun showDeliveryNotification(title: String, message: String) {
+    /**
+     * [quiet]: something is being entered or confirmed on screen. The answer then must not slide over
+     * it - the status line of that screen shows it - so the notice goes to a channel that does not
+     * interrupt, with a short buzz of its own (12.11.2026: the notice of the previous dose took the
+     * screen from the calculation in progress).
+     */
+    private fun showDeliveryNotification(title: String, message: String, quiet: Boolean = false) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        val channelId = if (quiet) "$deliveryChannelId.quiet" else deliveryChannelId
         manager.createNotificationChannel(
-            NotificationChannel(deliveryChannelId, "Подача с часов", NotificationManager.IMPORTANCE_HIGH).apply {
+            if (quiet) NotificationChannel(channelId, "Подача с часов (во время ввода)", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Ответ телефона на прошлую дозу, пока на экране ввод или подтверждение"
+                enableVibration(false)
+            } else NotificationChannel(channelId, "Подача с часов", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Ответ телефона на дозу, подтверждённую с часов"
                 enableVibration(true)
             }
         )
+        if (quiet) runCatching {
+            @Suppress("DEPRECATION")
+            (context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator)?.vibrate(longArrayOf(0, 80, 70, 80), -1)
+        }
         manager.notify(
             deliveryNotificationId,
-            NotificationCompat.Builder(context, deliveryChannelId)
+            NotificationCompat.Builder(context, channelId)
                 .setSmallIcon(R.drawable.notif_icon)
                 .setContentTitle(title)
                 .setContentText(message)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(message))
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setPriority(if (quiet) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .setTimeoutAfter(90_000L)
                 .build()

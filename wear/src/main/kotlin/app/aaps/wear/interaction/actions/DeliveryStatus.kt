@@ -38,6 +38,13 @@ object DeliveryStatus {
     private const val MAX_ENTRIES = 4
     private const val SUCCESS_TITLE = "Готово"
 
+    /** A refusal is the phone's answer at once, before the pump is asked; a delivery takes longer than this. */
+    internal const val REFUSAL_IS_PROMPT_MS = 15_000L
+
+    /** How long a confirmed dose is taken to be on its way: the phone drops a bolus the watch has not started within two minutes. */
+    const val IN_FLIGHT_MAX_MS = 150_000L
+    private val UNITS = Regex("""([0-9]+(?:[.,][0-9]+)?)\s*Е""")
+
     private val listeners = CopyOnWriteArraySet<() -> Unit>()
 
     fun addListener(listener: () -> Unit) { listeners.add(listener) }
@@ -50,7 +57,7 @@ object DeliveryStatus {
         return (lines.firstOrNull { it.startsWith("Подать инсулин") } ?: lines.firstOrNull() ?: message.trim()).trimEnd('.')
     }
 
-    private fun shortAnswer(message: String): String {
+    internal fun shortAnswer(message: String): String {
         val lines = message.lines().map { it.trim() }.filter { it.isNotEmpty() }
         return (lines.firstOrNull { it.contains("инсулина") } ?: lines.firstOrNull() ?: message.trim()).trimEnd('.')
     }
@@ -61,11 +68,38 @@ object DeliveryStatus {
         notifyListeners()
     }
 
-    /** Settles the oldest request still awaiting an answer. False when nothing was waiting. */
+    /**
+     * The request an answer belongs to. The phone's answers carry no name, so: the one request in
+     * flight if there is one; else the one whose dose the answer repeats; else, for a refusal that
+     * comes right after a confirmation, that confirmation - a refusal is prompt, while the dose ahead
+     * of it is still being delivered (12.11.2026: the refusal of a second calculation was booked as
+     * the first dose having failed, and the first dose's «Готово» as the second having gone through);
+     * else the oldest, because the phone's queue delivers in order.
+     */
+    internal fun pick(sent: List<Entry>, title: String, message: String, now: Long): Entry? {
+        if (sent.size <= 1) return sent.firstOrNull()
+        val amount = UNITS.find(shortAnswer(message))?.groupValues?.get(1)?.replace(',', '.')?.toDoubleOrNull()
+        if (amount != null) {
+            val same = sent.filter { entry ->
+                UNITS.find(entry.decision)?.groupValues?.get(1)?.replace(',', '.')?.toDoubleOrNull()?.let { kotlin.math.abs(it - amount) < 0.0001 } == true
+            }
+            if (same.size == 1) return same.first()
+        }
+        val newest = sent.maxByOrNull { it.sentAtEpochMs }
+        if (title != SUCCESS_TITLE && newest != null && now - newest.sentAtEpochMs in 0..REFUSAL_IS_PROMPT_MS) return newest
+        return sent.minByOrNull { it.sentAtEpochMs }
+    }
+
+    /** The dose confirmed a moment ago and not answered yet, if any: a new calculation waits for it. */
+    @Synchronized fun inFlight(context: Context, now: Long = System.currentTimeMillis()): Entry? =
+        live(load(context), now).filter { it.state == State.SENT && now - it.sentAtEpochMs in 0 until IN_FLIGHT_MAX_MS }
+            .minByOrNull { it.sentAtEpochMs }
+
+    /** Settles the request the answer belongs to, see [pick]. False when nothing was waiting. */
     @Synchronized fun answered(context: Context, title: String, message: String): Boolean {
         val now = System.currentTimeMillis()
         val entries = live(load(context), now)
-        val waiting = entries.firstOrNull { it.state == State.SENT }
+        val waiting = pick(entries.filter { it.state == State.SENT }, title, message, now)
         if (waiting == null) {
             save(context, entries)
             return false

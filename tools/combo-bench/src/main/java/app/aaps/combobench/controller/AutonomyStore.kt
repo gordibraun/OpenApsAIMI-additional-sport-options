@@ -87,7 +87,7 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
                 }
             }
             val boluses = saved.getJSONArray("boluses").let { array ->
-                List(array.length()) { array.getJSONObject(it).let { item -> BolusRecord(item.getLong("at"), item.getDouble("units")) } }
+                List(array.length()) { array.getJSONObject(it).let { item -> BolusRecord(item.getLong("at"), item.getDouble("units"), item.optLong("learned", item.getLong("at"))) } }
             }
             DeliveryLog(tbrs, boluses, carbs(), activities())
         }
@@ -234,7 +234,7 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
                     }
                 })
                 .put("boluses", JSONArray().apply {
-                    boluses.filter { it.atEpochMs >= since }.forEach { put(JSONObject().put("at", it.atEpochMs).put("units", it.units)) }
+                    boluses.filter { it.atEpochMs >= since }.forEach { put(JSONObject().put("at", it.atEpochMs).put("units", it.units).put("learned", it.learnedAtEpochMs)) }
                 })
         )
     }
@@ -264,7 +264,7 @@ internal class AutonomyStore(private val files: JsonFiles, private val nowEpochM
             PumpEvent.Type.BOLUS_INFUSED -> {
                 val units = (event.bolusTenthsIU ?: return) / 10.0
                 if (log.boluses.any { it.atEpochMs == event.timestampEpochMs && it.units == units }) return
-                saveDelivery(log.tbrs, log.boluses + BolusRecord(event.timestampEpochMs, units))
+                saveDelivery(log.tbrs, log.boluses + BolusRecord(event.timestampEpochMs, units, learnedAtEpochMs = System.currentTimeMillis()))
             }
 
             else                         -> Unit

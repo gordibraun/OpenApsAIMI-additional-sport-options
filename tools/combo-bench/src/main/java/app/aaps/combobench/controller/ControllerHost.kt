@@ -1341,10 +1341,14 @@ internal class ControllerHost private constructor(context: Context) {
         // has counted a bolus its snapshot is newer than the bolus and it leaves this sum.
         val phoneForIob = phoneSnapshot?.takeIf { FaceFreshness.phoneIobUsable(now, it.madeAtEpochMs) }
         val iobBaseAt = if (useOwn) own?.optLong("at", 0L) ?: 0L else phoneForIob?.madeAtEpochMs ?: 0L
-        val bolusesSinceIobBase = autonomy.delivery().boluses.filter { it.atEpochMs > iobBaseAt }.sumOf { it.units }
+        val unreportedBoluses = outbox.pending().filter { it.type == PumpEvent.Type.BOLUS_INFUSED }.map { it.timestampEpochMs }.toSet()
+        val bolusesSinceIobBase = autonomy.delivery().boluses.filter {
+            FaceFreshness.bolusMissingFromFigure(it.learnedAtEpochMs, iobBaseAt, byPhone = !useOwn, reportPending = it.atEpochMs in unreportedBoluses)
+        }.sumOf { it.units }
         val iob = (if (useOwn) own?.optDouble("iobU")?.takeIf { it.isFinite() } else phoneForIob?.iobU)?.let { it + bolusesSinceIobBase }
         val ownCarbsSinceSnapshot = phoneSnapshot?.let { s -> autonomy.carbs().filter { it.atEpochMs > s.madeAtEpochMs }.sumOf { it.grams } } ?: 0
         val cob = if (useOwn) null else phoneFresh?.cobG?.let { it + ownCarbsSinceSnapshot }
+        noteFace(now, useOwn, iob, cob, carbsNeeded, bolusesSinceIobBase, iobBaseAt, phoneSnapshot?.madeAtEpochMs)
         return FaceFacts(
             heldPump = held,
             phoneHeardEpochMs = phoneLastHeardEpochMs,
@@ -1371,6 +1375,24 @@ internal class ControllerHost private constructor(context: Context) {
             activity = activity,
             carbsNeededG = carbsNeeded
         )
+    }
+
+    private var lastFaceLine: String? = null
+
+    /**
+     * What the face showed for insulin and carbohydrates on board, one line per change, so that a figure
+     * the owner saw jump can be traced afterwards: whose figure it was, how old, and what was added to it.
+     */
+    private fun noteFace(now: Long, own: Boolean, iob: Double?, cob: Double?, carbsNeeded: Int?, added: Double, baseAt: Long, phoneAt: Long?) {
+        val line = "${if (own) "watch" else "phone"} iob=${iob?.let { "%.2f".format(java.util.Locale.US, it) } ?: "-"} " +
+            "cob=${cob?.let { "%.0f".format(java.util.Locale.US, it) } ?: "-"} need=${carbsNeeded ?: 0} added=${"%.2f".format(java.util.Locale.US, added)}"
+        if (line == lastFaceLine) return
+        lastFaceLine = line
+        runCatching {
+            val file = java.io.File(context.filesDir, FACE_LOG_FILE)
+            if (file.length() > FACE_LOG_MAX_BYTES) file.writeText(file.readLines().takeLast(FACE_LOG_KEPT_LINES).joinToString("\n", postfix = "\n"))
+            file.appendText("$now $line base=${if (baseAt > 0) (now - baseAt) / 1000 else -1}s phone=${phoneAt?.let { (now - it) / 1000 } ?: -1}s\n")
+        }
     }
 
     /** Tell the face its complications have something new. Cheap: one broadcast per complication. */
@@ -1457,6 +1479,9 @@ internal class ControllerHost private constructor(context: Context) {
 
         private const val JOURNAL_FILE = "controller-journal.json"
         private const val OUTBOX_FILE = "controller-outbox.json"
+        private const val FACE_LOG_FILE = "face-log.txt"
+        private const val FACE_LOG_MAX_BYTES = 200_000L
+        private const val FACE_LOG_KEPT_LINES = 1_500
         private const val LEASE_FILE = "controller-lease.json"
         private const val LIMITS_FILE = "controller-limits.json"
         const val RESULT_FILE = "controller-result.json"

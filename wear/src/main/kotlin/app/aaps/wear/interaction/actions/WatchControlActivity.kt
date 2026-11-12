@@ -230,6 +230,8 @@ class WatchControlActivity : DaggerActivity() {
                 }, 20_000)
             }
             setOnClickListener {
+                // A calculation or a dose asked for while the previous dose is still being delivered waits for it.
+                if ((requestKind == "MEAL" || requestKind == "INSULIN") && amount > 0 && holdForDoseInFlight(buttons) { performClick() }) return@setOnClickListener
                 // With the pump driven through this watch, carbohydrates alone are the watch's
                 // business: its pump controller keeps them for its own forecast and hands them to
                 // the phone's records when the phone is in touch. Insulin still goes to the phone.
@@ -459,10 +461,20 @@ class WatchControlActivity : DaggerActivity() {
 
         const val PHONE_PROBE_MS = 1_500L
         const val PHONE_ANSWER_MS = 12_000L
+        const val DOSE_FILED_MS = 2_500L
     }
+    override fun onStart() {
+        super.onStart()
+        WatchUiState.enterInput()
+    }
+
+    override fun onStop() {
+        WatchUiState.leaveInput()
+        super.onStop()
+    }
+
     override fun onResume() {
         super.onResume()
-        WatchUiState.enterInput()
         DeliveryStatus.addListener(deliveryListener)
         handler.post(deliveryTick)
     }
@@ -470,8 +482,33 @@ class WatchControlActivity : DaggerActivity() {
     override fun onPause() {
         handler.removeCallbacks(deliveryTick)
         DeliveryStatus.removeListener(deliveryListener)
-        WatchUiState.leaveInput()
         super.onPause()
+    }
+
+    /**
+     * A dose confirmed a moment ago is still on its way to the pump: the phone turns a second
+     * calculation away until it has landed, and what it would calculate now leaves that dose out.
+     * So the request waits here and goes by itself once the phone has answered for that dose (or
+     * after the time a dose can take at most). True when the caller must stop and wait.
+     */
+    private fun holdForDoseInFlight(buttons: List<Button>, proceed: () -> Unit): Boolean {
+        val first = DeliveryStatus.inFlight(this) ?: return false
+        buttons.forEach { it.isEnabled = false }
+        showStatus("Предыдущая доза ещё подаётся. Расчёт начнётся сам, как только помпа закончит.")
+        val deadline = first.sentAtEpochMs + DeliveryStatus.IN_FLIGHT_MAX_MS
+        val wait = object : Runnable {
+            override fun run() {
+                if (DeliveryStatus.inFlight(this@WatchControlActivity) != null && System.currentTimeMillis() < deadline) {
+                    handler.postDelayed(this, 1_000L)
+                    return
+                }
+                // The phone files the bolus and its carbohydrates a moment after it answers.
+                showStatus("Предыдущая доза подана. Считаем…")
+                handler.postDelayed({ buttons.forEach { it.isEnabled = true }; proceed() }, DOSE_FILED_MS)
+            }
+        }
+        handler.postDelayed(wait, 1_000L)
+        return true
     }
 
     private fun refreshDeliveryStrip() {

@@ -115,22 +115,32 @@ class AcceptActivity : ViewSelectorActivity() {
         controlScroll?.requestFocus()
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (confirmationMode) WatchUiState.enterInput()
+    }
+
+    override fun onStop() {
+        if (confirmationMode) WatchUiState.leaveInput()
+        super.onStop()
+    }
+
     override fun onResume() {
         super.onResume()
         if (confirmationMode) {
-            WatchUiState.enterInput()
             DeliveryStatus.addListener(deliveryListener)
             refreshDeliveryStrip()
         }
     }
 
     override fun onPause() {
-        if (confirmationMode) {
-            DeliveryStatus.removeListener(deliveryListener)
-            WatchUiState.leaveInput()
-        }
+        if (confirmationMode) DeliveryStatus.removeListener(deliveryListener)
         super.onPause()
-        finish()
+        // A plain message closes when it loses the screen. A dose awaiting «Подтвердить» does not:
+        // a notification sliding over it, or the wrist turned away for a moment, used to throw the
+        // calculation away (12.11.2026). It still closes by itself a minute after it opened, and the
+        // phone checks the calculation again when it is confirmed.
+        if (!confirmationMode) finish()
     }
 
     private fun refreshDeliveryStrip() {

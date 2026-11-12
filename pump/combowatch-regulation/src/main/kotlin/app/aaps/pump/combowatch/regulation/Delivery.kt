@@ -18,8 +18,14 @@ data class TbrSegment(
     fun runsAt(epochMs: Long): Boolean = epochMs >= startEpochMs && epochMs < endEpochMs
 }
 
-/** A bolus the pump delivered, as its own history recorded it. */
-data class BolusRecord(val atEpochMs: Long, val units: Double)
+/**
+ * A bolus the pump delivered, as its own history recorded it.
+ *
+ * [learnedAtEpochMs] is when the watch read it from the pump, by the watch's clock: the earliest the
+ * phone can have heard of it. A dose given by hand on the pump is minutes old by then, and a dose the
+ * phone asked for is half a minute old; a figure of the phone's made in between does not hold it yet.
+ */
+data class BolusRecord(val atEpochMs: Long, val units: Double, val learnedAtEpochMs: Long = atEpochMs)
 
 /** Carbohydrates the owner entered on the watch. */
 data class CarbsRecord(val atEpochMs: Long, val grams: Int)
