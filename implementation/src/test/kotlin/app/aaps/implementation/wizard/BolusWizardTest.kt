@@ -263,6 +263,54 @@ class BolusWizardTest : TestBaseWithProfile() {
         assertThat(wizard.insulinAfterConstraints).isEqualTo(0.0)
     }
 
+    @Test
+    fun belowTargetOldCarbsAndHeldBackBasalAddNothing() {
+        // 13.11.2026 20:52: sugar 4.5 mmol/L and flat, 1 g entered; 19 g on board of which 12 g had been eaten an hour
+        // earlier to come up from a low, bolus insulin 0.93 U, basal the loop held back -1.07 U. 0.9 U was proposed.
+        val wizard = stackedWizard(
+            carbs = 1, cob = 19.0, bgMmol = 4.5, bolusIob = 0.93, basalIob = -1.07,
+            earlier = listOf(coveredMeal(61, 12.0, 12))
+        )
+        // (4.5 - 6.5) / 3.0 = -0.67 for the sugar; +1.05 for carbs on board nobody dosed; +0.14 for the basal held back.
+        assertThat(wizard.insulinFromBG).isWithin(0.001).of(-2.0 / 3.0)
+        assertThat(wizard.insulinFromCOB).isWithin(0.001).of((19.0 - 12.0 * (1 - 61.0 / 210.0)) / 10.0)
+        assertThat(wizard.insulinNotAddedBelowTarget).isLessThan(-0.4)
+        // What is left is the gram entered now: 0.1 U.
+        assertThat(wizard.insulinAfterConstraints).isAtMost(0.2)
+        assertThat(wizard.belowTargetNote()).startsWith("Сахар ниже цели")
+    }
+
+    @Test
+    fun belowTargetOldCarbsStillCancelTheReductionForTheLowSugar() {
+        // 30 g now at 4.5 mmol/L with 19 g on board: the carbs on board will bring the sugar up, so the new carbs
+        // keep their whole dose - but get nothing on top of it.
+        val wizard = stackedWizard(
+            carbs = 30, cob = 19.0, bgMmol = 4.5, bolusIob = 0.93, basalIob = -1.07,
+            earlier = listOf(coveredMeal(61, 12.0, 12))
+        )
+        assertThat(wizard.insulinAfterConstraints).isWithin(0.0001).of(3.0)
+    }
+
+    @Test
+    fun belowTargetWithInsulinOnBoardTheReductionStays() {
+        // Nothing on board but insulin: the sugar and the insulin both lower the dose, as before.
+        val wizard = stackedWizard(carbs = 30, cob = 0.0, bgMmol = 4.5, bolusIob = 1.0, earlier = emptyList())
+        assertThat(wizard.insulinNotAddedBelowTarget).isEqualTo(0.0)
+        // 3.0 - 0.67 - 1.0 = 1.33 -> 1.35 by the policy's step -> 1.3 or 1.4 by the pump's
+        assertThat(wizard.insulinAfterConstraints).isWithin(0.11).of(1.33)
+    }
+
+    @Test
+    fun atOrAboveTargetCarbsOnBoardAreDosedAsBefore() {
+        val wizard = stackedWizard(
+            carbs = 1, cob = 19.0, bgMmol = 6.6, bolusIob = 0.0,
+            earlier = emptyList()
+        )
+        assertThat(wizard.insulinNotAddedBelowTarget).isEqualTo(0.0)
+        // 0.1 (carbs) + 0.03 (sugar) + 1.9 (carbs on board) = 2.03 -> 2.0
+        assertThat(wizard.insulinAfterConstraints).isWithin(0.0001).of(2.0)
+    }
+
     private fun wearWizard(correction: Double = 0.0): BolusWizard {
         val profile = setupProfile(4.0, 8.0, 20.0, 10.0)
         val clock = mock<app.aaps.core.interfaces.utils.DateUtil>()

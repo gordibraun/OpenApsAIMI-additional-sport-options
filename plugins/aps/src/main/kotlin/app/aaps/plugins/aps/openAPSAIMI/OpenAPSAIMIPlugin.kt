@@ -2,6 +2,7 @@
 
 package app.aaps.plugins.aps.openAPSAIMI
 
+import app.aaps.plugins.aps.openAPSAIMI.safety.SensorNoiseGuard
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -171,6 +172,33 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 normalized.trimEnd() + "\n" + finalSummary
             }
         )
+    }
+
+    /**
+     * The last word on the loop's decision: a microbolus or basal above the profile's rate that rests on
+     * a jump of the sensor not yet confirmed, or on readings that jump back and forth, is taken back for
+     * this run. See [app.aaps.plugins.aps.openAPSAIMI.safety.SensorNoiseGuard].
+     */
+    private fun holdExtraInsulinOnSensorNoise(result: app.aaps.core.interfaces.aps.RT, profileBasal: Double, now: Long) {
+        val readings = try {
+            persistenceLayer.getBgReadingsDataFromTimeToTime(now - SensorNoiseGuard.WINDOW_MS - 60_000L, now + 60_000L, true)
+                .filter { it.isValid }
+                .map { SensorNoiseGuard.Reading(it.timestamp, it.value) }
+        } catch (e: Throwable) {
+            aapsLogger.debug(LTag.APS, "Sensor noise guard: readings not available: ${e.message}")
+            return
+        }
+        val decision = SensorNoiseGuard.evaluate(SensorNoiseGuard.Input(readings, now, result.units ?: 0.0, result.rate, profileBasal))
+        if (!decision.held) return
+        aapsLogger.debug(
+            LTag.APS,
+            "Sensor noise guard: SMB ${"%.2f".format(result.units ?: 0.0)} -> ${"%.2f".format(decision.smbU)} U, " +
+                "rate ${result.rate?.let { "%.2f".format(it) } ?: "-"} -> ${decision.rateUh?.let { "%.2f".format(it) } ?: "-"} U/h " +
+                "(zigzag ${"%.0f".format(decision.zigzagMgdl)}, level ${decision.levelMgdl?.let { "%.0f".format(it) } ?: "-"}): ${decision.reason}"
+        )
+        result.units = decision.smbU
+        result.rate = decision.rateUh
+        result.reason.append("\n🛡 ").append(decision.reason)
     }
 
     private fun shouldDelayAimiForMissingMealContext(mealData: MealData, now: Long): Boolean {
@@ -973,6 +1001,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 dynIsfMode = dynIsfMode,
                 uiInteraction = uiInteraction
             ).also {
+                holdExtraInsulinOnSensorNoise(it, oapsProfile.current_basal, now)
                 val determineBasalResult = apsResultProvider.get().with(it)
                 // Preserve input data
                 determineBasalResult.inputConstraints = inputConstraints

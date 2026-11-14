@@ -685,10 +685,14 @@ class WizardDialog : DaggerDialogFragment() {
                 app.aaps.core.ui.R.string.format_insulin_units,
                 -wizard.insulinFromBolusIOB - wizard.insulinFromBasalIOB + wizard.insulinLeftWithEarlierMeal
             )
-            binding.iobNote.text = if (wizard.insulinLeftWithEarlierMeal > 0.0) {
-                "на борту " + decimalFormatter.to2Decimal(wizard.insulinFromBolusIOB + wizard.insulinFromBasalIOB) +
-                    ", из них " + decimalFormatter.to2Decimal(wizard.insulinLeftWithEarlierMeal) + " заняты прошлой едой"
-            } else ""
+            binding.iobNote.text = when {
+                wizard.insulinLeftWithEarlierMeal > 0.0 ->
+                    "на борту " + decimalFormatter.to2Decimal(wizard.insulinFromBolusIOB + wizard.insulinFromBasalIOB) +
+                        ", из них " + decimalFormatter.to2Decimal(wizard.insulinLeftWithEarlierMeal) + " заняты прошлой едой"
+                wizard.insulinNotAddedBelowTarget < 0.0 ->
+                    "сахар ниже цели: " + decimalFormatter.to2Decimal(-wizard.insulinNotAddedBelowTarget) + " за старые углеводы и базал не добавлено"
+                else -> ""
+            }
 
             binding.correctionInsulin.text = rh.gs(app.aaps.core.ui.R.string.format_insulin_units, wizard.insulinFromCorrection)
 

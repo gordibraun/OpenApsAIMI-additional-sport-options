@@ -601,6 +601,7 @@ class ComboWatchPlugin @Inject constructor(
             // What the watch decided by itself while the phone was away, kept with the treatments
             // so that the stops it made can be read next to the glucose curve.
             PumpEvent.Type.WATCH_NOTE           -> event.note?.let { note ->
+                markMealCoveredOnTheWatch(note, event.timestampEpochMs)
                 val filed = pumpSync.insertTherapyEventIfNewWithTimestamp(
                     timestamp = event.timestampEpochMs,
                     type = TE.Type.NOTE,
@@ -773,6 +774,25 @@ class ComboWatchPlugin @Inject constructor(
      * use with this phone, and such a record is filed by the same path AAPS itself takes once its
      * gate is passed. A pump never seen before is left to AAPS's rule.
      */
+    /**
+     * «Болюс с часов: 0,7 ЕД на 10 г — подан»: the watch worked out and gave the dose for these
+     * carbohydrates itself. Their record, filed a moment earlier as plain carbs from the watch, is marked
+     * as covered - with the tokens the wizard writes for its own meals - so that the phone's wizard does
+     * not add insulin for them again as carbs on board nobody dosed (12.11.2026 17:28: +1.4 U).
+     */
+    private fun markMealCoveredOnTheWatch(note: String, timestamp: Long) {
+        val grams = gramsCoveredOnTheWatch(note) ?: return
+        runCatching {
+            val record = persistenceLayer.getCarbsFromTimeToTimeExpanded(timestamp - WATCH_MEAL_MATCH_MS, timestamp + WATCH_MEAL_MATCH_MS, true)
+                .firstOrNull { it.isValid && it.amount.roundToInt() == grams && it.notes?.contains("AIMI_COB_HANDLED") != true && it.ids.pumpSerial != null }
+                ?: return
+            val type = watchCarbType(record.notes)
+            val marked = "С часов AIMI_CARB_TYPE type=$type AIMI_COB_HANDLED grams=$grams"
+            persistenceLayer.insertOrUpdateCarbs(record.copy(notes = marked), Action.CARBS, Sources.Pump, marked).blockingGet()
+            aapsLogger.info(LTag.PUMP, "combowatch: $grams g entered on the watch marked as covered by the watch's own bolus")
+        }.onFailure { aapsLogger.warn(LTag.PUMP, "combowatch: could not mark the watch's meal as covered: ${it.message}") }
+    }
+
     private fun historyOfAKnownPump(serial: String, timestamp: Long): Boolean {
         val registeredAt = preferences.get(LongNonKey.ActivePumpChangeTimestamp)
         if (registeredAt <= 0L || timestamp >= registeredAt) return false
@@ -904,6 +924,21 @@ class ComboWatchPlugin @Inject constructor(
             if (profileRate != null && profileRate.isFinite() && profileRate > 0.0 &&
                 comboBasalFactor((profileRate * 1000.0).toInt()) == onPumpFactor
             ) profileRate else onPumpFactor / 1000.0
+
+        private val WATCH_MEAL_BOLUS = Regex("""^Болюс с часов: [0-9]+(?:[.,][0-9]+)? ЕД на ([0-9]+) г — подан""")
+        private const val WATCH_MEAL_MATCH_MS = 3_000L
+
+        /** Grams of a meal the watch dosed itself and the pump delivered for, from the watch's note; null for any other note. */
+        internal fun gramsCoveredOnTheWatch(note: String): Int? =
+            WATCH_MEAL_BOLUS.find(note.trim())?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it > 0 }
+
+        /** The food type in a carb record filed from the watch («С часов: fast»); ordinary food when it says nothing. */
+        internal fun watchCarbType(notes: String?): String = when {
+            notes == null                                   -> "balanced"
+            Regex("""\bfast\b""").containsMatchIn(notes)  -> "fast"
+            Regex("""\bslow\b""").containsMatchIn(notes)  -> "slow"
+            else                                            -> "balanced"
+        }
 
         internal fun comboBasalFactor(factor: Int): Int {
             val granularity = when (factor) {

@@ -131,6 +131,13 @@ class BolusWizard @Inject constructor(
     /** Insulin on board left with those carbs instead of being held against the carbs entered now. */
     var insulinLeftWithEarlierMeal = 0.0
         private set
+
+    /**
+     * Zero or negative: what carbohydrates already on board and basal the loop held back would have
+     * added to the dose while the sugar is below target. See [doCalc].
+     */
+    var insulinNotAddedBelowTarget = 0.0
+        private set
     var insulinFromTrend = 0.0
         private set
     var trend = 0.0
@@ -362,9 +369,24 @@ class BolusWizard @Inject constructor(
             )
         }
 
+        // Below target, carbohydrates already on board and basal the loop held back may cancel the reduction
+        // for the low sugar, but add nothing on top of it. 13.11.2026 20:52, sugar 4.5 mmol/L and flat, 1 g
+        // entered: 0.9 U proposed - 1.5 U for carbs eaten an hour earlier to come up from a low and 0.14 U
+        // for basal the loop had stopped because the sugar was low - and the sugar was at 3.7 an hour later.
+        val besidesNewCarbs = insulinFromBG + insulinFromTrend + insulinFromCOB + calculatedTotalIOB + insulinLeftWithEarlierMeal
+        insulinNotAddedBelowTarget = if (useBg && bg > 0 && bg < targetBGLow && besidesNewCarbs > 0.0) -besidesNewCarbs else 0.0
+        if (insulinNotAddedBelowTarget < 0.0) {
+            aapsLogger.debug(
+                LTag.APS,
+                "AIMI wizard below target: bg=${"%.0f".format(wizardBgToMgdl())} target=${"%.0f".format(profileUtil.convertToMgdl(targetBGLow, profileFunction.getUnits()))} " +
+                    "bgInsulin=${"%.2f".format(insulinFromBG)} trend=${"%.2f".format(insulinFromTrend)} cobInsulin=${"%.2f".format(insulinFromCOB)} " +
+                    "iob=${"%.2f".format(-calculatedTotalIOB)} -> notAdded=${"%.2f".format(insulinNotAddedBelowTarget)}U"
+            )
+        }
+
         // Total
         calculatedTotalInsulin = insulinFromBG + insulinFromTrend + insulinFromCarbs + calculatedTotalIOB + insulinFromCorrection + insulinFromSuperBolus + insulinFromCOB +
-            insulinLeftWithEarlierMeal
+            insulinLeftWithEarlierMeal + insulinNotAddedBelowTarget
 
         val percentage = if (usePercentage) totalPercentage else percentageCorrection.toDouble()
 
@@ -894,6 +916,7 @@ class BolusWizard @Inject constructor(
         if (useBg) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_bg, insulinFromBG)
         if (includeBolusIOB) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_iob, -insulinFromBolusIOB - insulinFromBasalIOB)
         if (insulinLeftWithEarlierMeal > 0.0) message += "\n" + earlierMealNote()
+        if (insulinNotAddedBelowTarget < 0.0) message += "\n" + belowTargetNote()
         if (useTrend) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_trend, insulinFromTrend)
         if (useSuperBolus) message += "\n" + rh.gs(app.aaps.core.ui.R.string.wizard_explain_superbolus, insulinFromSuperBolus)
         if (percentageCorrection != 100) {
@@ -908,6 +931,10 @@ class BolusWizard @Inject constructor(
     /** One line for the owner: how much of the insulin on board stays with the earlier meal. */
     fun earlierMealNote(): String =
         "Из него занято прошлой едой: +${"%.2f".format(insulinLeftWithEarlierMeal)} Е"
+
+    /** One line for the owner: what was left out because the sugar is below target. */
+    fun belowTargetNote(): String =
+        "Сахар ниже цели: за старые углеводы и недоданный базал не добавлено ${"%.2f".format(-insulinNotAddedBelowTarget)} Е"
 
     private fun activateMealEpisode(deliveredInsulin: Double) {
         val confirmedInsulin = deliveredInsulin.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0

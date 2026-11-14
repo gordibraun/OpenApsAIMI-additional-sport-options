@@ -326,6 +326,26 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
     }
 
     @Test
+    fun `a meal the watch dosed itself is read from its note, and only when the pump delivered`() {
+        assertThat(ComboWatchPlugin.gramsCoveredOnTheWatch("Болюс с часов: 0,7 ЕД на 10 г — подан")).isEqualTo(10)
+        assertThat(ComboWatchPlugin.gramsCoveredOnTheWatch("Болюс с часов: 2.3 ЕД на 35 г — подан")).isEqualTo(35)
+        // A dose the owner typed in has no carbohydrates of its own.
+        assertThat(ComboWatchPlugin.gramsCoveredOnTheWatch("Болюс с часов: 1,5 ЕД, доза владельца — подан")).isNull()
+        // Not delivered, or not known: the carbohydrates stay as they are.
+        assertThat(ComboWatchPlugin.gramsCoveredOnTheWatch("Болюс с часов: 0,7 ЕД на 10 г — FAILED: pump not reached")).isNull()
+        assertThat(ComboWatchPlugin.gramsCoveredOnTheWatch("Болюс с часов: 0,7 ЕД на 10 г — исход не выяснен, часы сверяются с помпой")).isNull()
+        assertThat(ComboWatchPlugin.gramsCoveredOnTheWatch("Часы без телефона: сахар 148")).isNull()
+    }
+
+    @Test
+    fun `the food type of carbs filed from the watch is read from their note`() {
+        assertThat(ComboWatchPlugin.watchCarbType("С часов: fast")).isEqualTo("fast")
+        assertThat(ComboWatchPlugin.watchCarbType("С часов: slow")).isEqualTo("slow")
+        assertThat(ComboWatchPlugin.watchCarbType("С часов: balanced")).isEqualTo("balanced")
+        assertThat(ComboWatchPlugin.watchCarbType(null)).isEqualTo("balanced")
+    }
+
+    @Test
     fun `the pump's 100 percent is the profile's own rate wherever the pump holds it rounded`() {
         // 1.23 U/h asked, 1.25 held: AAPS must not see two different rates and read the pump every five minutes.
         assertThat(ComboWatchPlugin.baseRate(1250, 1.23)).isEqualTo(1.23)
