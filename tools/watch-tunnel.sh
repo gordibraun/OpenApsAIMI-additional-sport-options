@@ -26,11 +26,18 @@ devices() { adb devices | awk 'NR>1 && $2=="device" {print $1}' | grep -v '^127\
 is_watch() { adb -s "$1" shell getprop ro.build.characteristics 2>/dev/null | tr -d '\r' | grep -q watch; }
 phone() {
   if [ -n "${PHONE_SERIAL:-}" ]; then echo "$PHONE_SERIAL"; return; fi
-  local d found=""
+  local d found="" usb="" sn sn0=""
   for d in $(devices); do is_watch "$d" || found="$found $d"; done
   set -- $found
-  [ $# -eq 1 ] || { echo "cannot tell the phone apart, set PHONE_SERIAL (candidates:$found)" >&2; exit 2; }
-  echo "$1"
+  [ $# -ge 1 ] || { echo "no phone attached to adb (cable, or Wi-Fi on the Mac's network)" >&2; exit 2; }
+  # One phone seen twice - on the cable and over Wi-Fi - is one phone; the cable is preferred.
+  for d in "$@"; do
+    sn=$(adb -s "$d" shell getprop ro.serialno 2>/dev/null | tr -d '\r')
+    [ -n "$sn0" ] || sn0="$sn"
+    [ "$sn" = "$sn0" ] || { echo "cannot tell the phone apart, set PHONE_SERIAL (candidates:$found)" >&2; exit 2; }
+    case "$d" in *:*) ;; *) [ -n "$usb" ] || usb="$d" ;; esac
+  done
+  echo "${usb:-$1}"
 }
 watch_usb() {
   if [ -n "${WATCH_SERIAL:-}" ]; then echo "$WATCH_SERIAL"; return; fi
