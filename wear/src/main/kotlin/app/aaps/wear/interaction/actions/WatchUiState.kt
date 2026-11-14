@@ -18,4 +18,22 @@ object WatchUiState {
     fun enterInput() { inputScreens.incrementAndGet() }
 
     fun leaveInput() { inputScreens.updateAndGet { if (it > 0) it - 1 else 0 } }
+
+    @Volatile private var handedToWatchAtMs = 0L
+
+    /**
+     * The request went to the watch's own calculation because the phone was slow or away. The phone's
+     * answer to it may still arrive; shown then, it lay on top of the watch's screen and the same food was
+     * confirmed on both (12.11.2026 17:26: 10 g dosed 1.0 U by the phone and 0.7 U by the watch).
+     */
+    fun handOverToWatch(nowMs: Long = System.currentTimeMillis()) { handedToWatchAtMs = nowMs }
+
+    /** A new request went to the phone: its answer is wanted again. */
+    fun phoneAsked() { handedToWatchAtMs = 0L }
+
+    /** True while an answer of the phone can only be the late one to a request the watch has taken over. */
+    fun phoneAnswerComesLate(nowMs: Long = System.currentTimeMillis()): Boolean =
+        handedToWatchAtMs > 0L && nowMs - handedToWatchAtMs in 0..HANDED_OVER_MS
+
+    private const val HANDED_OVER_MS = 3 * 60_000L
 }

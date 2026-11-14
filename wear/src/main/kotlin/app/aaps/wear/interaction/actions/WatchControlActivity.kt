@@ -217,6 +217,7 @@ class WatchControlActivity : DaggerActivity() {
                 }
                 buttons.forEach { it.isEnabled = false }
                 showStatus("Ожидание подтверждения телефона")
+                WatchUiState.phoneAsked()
                 rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
                     UUID.randomUUID().toString(), System.currentTimeMillis(), requestKind,
                     insulin = if (kind == "INSULIN") amount / 10.0 else 0.0,
@@ -310,6 +311,7 @@ class WatchControlActivity : DaggerActivity() {
                             return@phoneAnswers
                         }
                         showStatus("Телефон рядом: ожидание его подтверждения")
+                        WatchUiState.phoneAsked()
                         rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
                             UUID.randomUUID().toString(), System.currentTimeMillis(), "INSULIN",
                             insulin = tenths / 10.0
@@ -333,6 +335,7 @@ class WatchControlActivity : DaggerActivity() {
                             return@phoneAnswers
                         }
                         showStatus("Телефон рядом: ожидание его расчёта")
+                        WatchUiState.phoneAsked()
                         rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
                             UUID.randomUUID().toString(), System.currentTimeMillis(), "MEAL",
                             carbs = grams, carbType = type
@@ -413,6 +416,7 @@ class WatchControlActivity : DaggerActivity() {
     private fun openWatchBolus(tenths: Int) {
         if (tenths <= 0) { showStatus("Укажите дозу"); return }
         runCatching {
+            WatchUiState.handOverToWatch()
             startActivity(
                 Intent().setClassName(ComboRelay.CONTROLLER_PACKAGE, ComboRelay.CONTROLLER_BOLUS_ACTIVITY)
                     .putExtra("insulinTenths", tenths)
@@ -425,6 +429,7 @@ class WatchControlActivity : DaggerActivity() {
     private fun openWatchMeal(grams: Int, type: String) {
         if (grams <= 0) { showStatus("Укажите количество"); return }
         runCatching {
+            WatchUiState.handOverToWatch()
             startActivity(
                 Intent().setClassName(ComboRelay.CONTROLLER_PACKAGE, ComboRelay.CONTROLLER_BOLUS_ACTIVITY)
                     .putExtra("carbs", grams).putExtra("foodType", type)

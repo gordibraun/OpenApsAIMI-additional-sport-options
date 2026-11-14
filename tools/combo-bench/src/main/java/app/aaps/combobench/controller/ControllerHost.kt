@@ -755,9 +755,14 @@ internal class ControllerHost private constructor(context: Context) {
      * put in the queue for the phone's records, which get them the moment the phone is in touch -
      * at once when it is, later when it is not. Nobody waits for the phone.
      */
-    fun keepCarbs(grams: Int, atEpochMs: Long, foodType: String?) {
+    fun keepCarbs(grams: Int, atEpochMs: Long, foodType: String?, dosedHere: Boolean = false) {
         autonomy.addCarbs(CarbsRecord(atEpochMs, grams))
-        outbox.append(PumpEvent(0, PumpEvent.Type.CARBS, atEpochMs, pumpSerial = heldPump(), note = foodType, carbsGrams = grams))
+        // Carbohydrates the watch gives its own bolus for carry the tokens the phone's wizard writes for a
+        // meal it has covered, so that the phone does not dose them again as carbs on board nobody covered
+        // (12.11.2026 17:28: 10 g dosed on the watch, then +1.4 U for the same 10 g in the phone's next calculation).
+        val type = when (foodType) { "fast" -> "fast"; "slow" -> "slow"; else -> "balanced" }
+        val note = if (dosedHere) "$type AIMI_CARB_TYPE type=$type AIMI_COB_HANDLED grams=$grams" else foodType
+        outbox.append(PumpEvent(0, PumpEvent.Type.CARBS, atEpochMs, pumpSerial = heldPump(), note = note, carbsGrams = grams))
         sendEvents()
         refreshFace()
     }
@@ -888,7 +893,7 @@ internal class ControllerHost private constructor(context: Context) {
      */
     fun deliverOwnerBolus(carbsG: Int, foodType: String?, tenthsIU: Int): ComboResult? = synchronized(pumpTurn) {
         val now = System.currentTimeMillis()
-        if (carbsG > 0) keepCarbs(carbsG, now, foodType)
+        if (carbsG > 0) keepCarbs(carbsG, now, foodType, dosedHere = tenthsIU > 0)
         if (tenthsIU <= 0) return@synchronized null
         val result = runner.deliverOwnerBolus(tenthsIU, ownerBolusLimitTenths())
         val units = String.format(java.util.Locale.getDefault(), "%.1f", tenthsIU / 10.0)
@@ -912,7 +917,11 @@ internal class ControllerHost private constructor(context: Context) {
 
     /** Glucose now against what the forecasts of an hour or two ago promised; see [InsulinEffectiveness]. */
     fun insulinVerdict(nowEpochMs: Long = System.currentTimeMillis()): InsulinEffectiveness.Verdict =
-        InsulinEffectiveness.evaluate(nowEpochMs, autonomy.readings(), autonomy.forecastsMade(), autonomy.delivery())
+        InsulinEffectiveness.evaluate(
+            nowEpochMs, autonomy.readings(), autonomy.forecastsMade(), autonomy.delivery(),
+            // The phone's count of carbohydrates on board, while its snapshot is fresh enough to stand on the face.
+            carbsOnBoardG = autonomy.snapshot()?.takeIf { FaceFreshness.phoneForecastUsable(nowEpochMs, it.madeAtEpochMs) }?.cobG
+        )
 
     private fun checkInsulinEffect(now: Long) {
         val verdict = insulinVerdict(now)

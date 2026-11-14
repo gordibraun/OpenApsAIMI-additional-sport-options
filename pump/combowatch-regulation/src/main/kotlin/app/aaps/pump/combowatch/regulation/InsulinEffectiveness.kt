@@ -36,13 +36,29 @@ object InsulinEffectiveness {
         }
     }
 
-    fun evaluate(nowEpochMs: Long, readings: List<GlucoseReading>, forecasts: List<ForecastMade>, delivery: DeliveryLog): Verdict {
+    /**
+     * @param carbsOnBoardG carbohydrates the phone still counts as being absorbed, when it has said
+     * @param carbsEnteredAtEpochMs when carbohydrates were last entered, on the watch or the phone, as far as the watch knows
+     */
+    fun evaluate(
+        nowEpochMs: Long, readings: List<GlucoseReading>, forecasts: List<ForecastMade>, delivery: DeliveryLog,
+        carbsOnBoardG: Double? = null, carbsEnteredAtEpochMs: Long? = null
+    ): Verdict {
         val trend = GlucoseTrend.from(readings, nowEpochMs) ?: return Verdict.none()
         if ((nowEpochMs - trend.atEpochMs) / 60_000.0 > WatchRegulator.MAX_READING_AGE_MINUTES) return Verdict.none()
         val bg = trend.mgdl.roundToInt()
+        // A meal still being absorbed is not insulin failing. 12.11.2026 18:23: sugar 183 an hour after a
+        // 50 g supper, 8.6 U given, and the verdict said insulin was acting worse than expected - against
+        // forecasts made before the supper was entered. The owner switched the +20 % mode on, added 7 U
+        // by hand, and the sugar was at 71 by eleven and 65 by two in the morning.
+        if ((carbsOnBoardG ?: 0.0) >= MEAL_ON_BOARD_G) return Verdict.none(bg)
+        val lastCarbsAt = listOfNotNull(carbsEnteredAtEpochMs, delivery.carbs.maxOfOrNull { it.atEpochMs }).maxOrNull()
+        if (lastCarbsAt != null && nowEpochMs - lastCarbsAt in 0 until MEAL_WINDOW_MS) return Verdict.none(bg)
         val residuals = forecasts.mapNotNull { made ->
             val age = nowEpochMs - made.atEpochMs
             if (age !in LOOKBACK_MIN_MS..LOOKBACK_MAX_MS) return@mapNotNull null
+            // A forecast made before carbohydrates were entered knew nothing of them.
+            if (lastCarbsAt != null && made.atEpochMs < lastCarbsAt) return@mapNotNull null
             val step = (age / 300_000.0).roundToInt()
             made.seriesMgdl.getOrNull(step)?.let { predicted -> bg - predicted }
         }.sorted()
@@ -77,4 +93,10 @@ object InsulinEffectiveness {
     /** Without boluses in the window a high glucose is an unannounced meal or basal, not insulin failing. */
     const val WINDOW_MS = 2 * 60 * 60_000L
     const val MIN_BOLUS_U = 1.0
+
+    /** With this much still being absorbed, a high sugar is the meal. */
+    const val MEAL_ON_BOARD_G = 10.0
+
+    /** For this long after carbohydrates were entered nothing is said: the rise is theirs. */
+    const val MEAL_WINDOW_MS = 2 * 60 * 60_000L
 }

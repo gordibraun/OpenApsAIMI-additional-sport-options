@@ -51,4 +51,31 @@ class InsulinEffectivenessTest {
         val v = verdict(240.0, 2.0, listOf(forecast(90.0, 235), forecast(70.0, 238)), listOf(BolusRecord(f.minutesAgo(80.0), 2.0)))
         assertThat(v.level).isEqualTo(Level.NONE)
     }
+
+    @Test fun `a meal still being absorbed is not insulin failing`() {
+        // 12.11.2026 18:23: 183 an hour after supper, 8.6 U given, the forecasts from before the supper promised 101.
+        val forecasts = listOf(forecast(90.0, 100), forecast(70.0, 101))
+        val boluses = listOf(BolusRecord(f.minutesAgo(55.0), 4.8), BolusRecord(f.minutesAgo(45.0), 0.8), BolusRecord(f.minutesAgo(30.0), 1.5))
+        val log = DeliveryLog(boluses = boluses)
+        // The phone still counts the supper on board.
+        assertThat(InsulinEffectiveness.evaluate(f.now, f.glucose(183.0, 3.0).readings, forecasts, log, carbsOnBoardG = 35.0).level).isEqualTo(Level.NONE)
+        // Or the watch knows carbohydrates were entered within the last two hours.
+        assertThat(InsulinEffectiveness.evaluate(f.now, f.glucose(183.0, 3.0).readings, forecasts, log, carbsEnteredAtEpochMs = f.minutesAgo(57.0)).level).isEqualTo(Level.NONE)
+        assertThat(
+            InsulinEffectiveness.evaluate(f.now, f.glucose(183.0, 3.0).readings, forecasts, DeliveryLog(boluses = boluses, carbs = listOf(CarbsRecord(f.minutesAgo(57.0), 40)))).level
+        ).isEqualTo(Level.NONE)
+        // With nothing eaten the same numbers are still a suspicion.
+        assertThat(InsulinEffectiveness.evaluate(f.now, f.glucose(183.0, 3.0).readings, forecasts, log, carbsOnBoardG = 3.0).level).isEqualTo(Level.SUSPECT)
+    }
+
+    @Test fun `forecasts made before the last carbohydrates were entered are not held to the sugar now`() {
+        // Carbs entered two and a half hours ago: outside the quiet window, but the 110-minute-old forecast is the only one that knew them.
+        val boluses = listOf(BolusRecord(f.minutesAgo(80.0), 2.0))
+        val v = InsulinEffectiveness.evaluate(
+            f.now, f.glucose(240.0, 2.0).readings, listOf(forecast(175.0, 120), forecast(110.0, 130), forecast(70.0, 135)),
+            DeliveryLog(boluses = boluses), carbsEnteredAtEpochMs = f.minutesAgo(150.0)
+        )
+        assertThat(v.comparisons).isEqualTo(2)
+        assertThat(v.level).isEqualTo(Level.STRONG)
+    }
 }

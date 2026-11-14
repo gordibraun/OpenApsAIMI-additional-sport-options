@@ -80,6 +80,17 @@ class DataHandlerWear @Inject constructor(
                 // request ended. It settles the status line; while a dose is being entered or
                 // confirmed it must not take the screen and wipe that work (19 Oct 2026), so it goes
                 // out as a notification instead. With no input on screen its own screen opens as before.
+                // The phone's calculation for a request the watch has meanwhile taken over itself: showing
+                // it would put a second «Подтвердить» for the same food on top of the watch's own screen.
+                if (it.returnCommand is EventData.WatchControlConfirmed && WatchUiState.phoneAnswerComesLate()) {
+                    aapsLogger.debug(LTag.WEAR, "Late phone calculation dropped: the watch has taken the request over")
+                    showDeliveryNotification(
+                        "Расчёт телефона пропущен",
+                        "Телефон ответил поздно: эта еда уже считается на часах. Подтверждать расчёт телефона не нужно.",
+                        quiet = true
+                    )
+                    return@subscribe
+                }
                 if (it.returnCommand == null) {
                     DeliveryStatus.answered(context, it.title, it.message)
                     if (WatchUiState.inputOnScreen) {

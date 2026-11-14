@@ -36,12 +36,13 @@ class GlucoseSmoothingTest {
         assertThat(data.all { it.smoothed == null }).isTrue()
     }
 
-    @Test fun `a zigzag sensor gives the watch a smaller rate of change than the raw points say`() {
+    @Test fun `the watch's rate of change comes from the readings as given`() {
+        // Since 11.11.2026, by the owner's word: smoothing is for the screen only, the watch's decisions take the
+        // readings as they are. (Before, the newest reading was set against a smoothed neighbour: about +7 here.)
         val readings = (0 until 9).map { GlucoseReading(now - it * 300_000L, if (it % 2 == 0) 150.0 else 130.0) }
         val trend = GlucoseTrend.from(readings, now)!!
         assertThat(trend.mgdl).isEqualTo(150.0)
-        // Raw points would say +20 in five minutes; against the smoothed neighbour it is about +7.
-        assertThat(abs(trend.delta)).isLessThan(10.0)
+        assertThat(abs(trend.delta)).isWithin(0.01).of(20.0)
         assertThat(trend.known).isTrue()
     }
 }

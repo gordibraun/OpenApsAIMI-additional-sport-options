@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 68
-            versionName = "0.68-face-iob"
+            versionCode = 69
+            versionName = "0.69-meal-not-failure"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }
