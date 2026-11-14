@@ -430,9 +430,24 @@ internal class ControllerHost private constructor(context: Context) {
         autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "SENSING").put("text", "Распознавание нагрузки включено: $what").put("mode", autonomy.mode().name))
     }
 
-    fun onHeartRate(atEpochMs: Long, bpm: Int) = synchronized(sensingLock) {
-        sampleLog.heartRate(atEpochMs, bpm)
-        applySensing(detector.onHeartRate(atEpochMs, bpm))
+    fun onHeartRate(atEpochMs: Long, bpm: Int) = onHeartRates(listOf(atEpochMs to bpm))
+
+    /**
+     * The pulse as Health Services hands it over: a batch every minute or two, a sample a second in it.
+     * The detector's state is written once for the batch. Written after every sample, as 0.64-0.69 did,
+     * it meant a file of thirteen kilobytes read, parsed, built anew and written a hundred times a
+     * batch: twelve seconds of a core every two minutes around the clock, most of what this app took
+     * from the watch's battery (14.11.2026: eight of its thirteen minutes of processor in 77 minutes).
+     */
+    fun onHeartRates(samples: List<Pair<Long, Int>>) = synchronized(sensingLock) {
+        if (samples.isEmpty()) return@synchronized
+        samples.forEach { (atEpochMs, bpm) ->
+            sampleLog.heartRate(atEpochMs, bpm)
+            // A session that starts, grows or ends is acted on at its own sample, in the order it happened.
+            val signals = detector.onHeartRate(atEpochMs, bpm)
+            if (signals.isNotEmpty()) applySensing(signals)
+        }
+        saveSensing()
         keepSamples(System.currentTimeMillis())
     }
 

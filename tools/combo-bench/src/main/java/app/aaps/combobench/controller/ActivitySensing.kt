@@ -89,9 +89,8 @@ class ActivityDetectionService : PassiveListenerService() {
         val uptime = SystemClock.uptimeMillis()
         fun at(duration: java.time.Duration): Long = SampleClock.resolve(now, elapsed, uptime, duration.toMillis())
         val host = ControllerHost.get(this)
-        dataPoints.getData(DataType.HEART_RATE_BPM).forEach { sample ->
-            host.onHeartRate(at(sample.timeDurationFromBoot), sample.value.roundToInt())
-        }
+        // The whole batch at once: the host writes its state down once per batch, not once per sample.
+        host.onHeartRates(dataPoints.getData(DataType.HEART_RATE_BPM).map { sample -> at(sample.timeDurationFromBoot) to sample.value.roundToInt() })
         dataPoints.getData(DataType.STEPS).forEach { interval ->
             host.onSteps(at(interval.startDurationFromBoot), at(interval.endDurationFromBoot), interval.value, daily = false)
         }
