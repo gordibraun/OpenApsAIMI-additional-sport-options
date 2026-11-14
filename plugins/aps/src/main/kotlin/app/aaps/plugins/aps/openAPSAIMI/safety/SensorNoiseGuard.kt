@@ -4,6 +4,11 @@ import kotlin.math.abs
 import kotlin.math.min
 
 /**
+ * NOT IN USE. Wired into the loop for a few hours on 14.11.2026 and taken out the same day at the owner's
+ * word: the jumps came from lying on the sensor, which he is curing by where the sensor sits, and over
+ * two weeks of his data the guard would have delayed the first extra insulin in 37 of 55 real rises
+ * (13 of them at night), mostly by one reading. Kept with its tests in case a night-only form is wanted.
+ *
  * Extra insulin is not given on a jump of the sensor that the next reading has yet to confirm, nor while
  * the sensor's readings jump back and forth.
  *
