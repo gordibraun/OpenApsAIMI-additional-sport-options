@@ -253,6 +253,20 @@ internal class AutonomyRunner(
         runCatching { executor.execute(own.command, own.lease) }.getOrNull()?.let(onOwnResult)
     }
 
+    /**
+     * The owner asked for the pump to be read, phone or no phone: the reading the watch gives itself
+     * when alone, now. Nothing on the pump is changed; what its history added since the last look -
+     * a bolus given with the pump's own buttons - comes back as pump events, as from any session.
+     * The command is made after the sensor's window has been waited for, so that the wait cannot
+     * outlast it.
+     */
+    fun readPumpForOwner(): ComboResult? {
+        val held = heldPump() ?: return null
+        beforePumpSession()
+        val own = policy.ownRead("owner-read-${UUID.randomUUID()}", held)
+        return executor.execute(own.command, own.lease).also(onOwnResult)
+    }
+
     /** The dose for a meal the owner is about to eat, worked out here because the phone is away; see [WatchRegulator.adviseBolus]. */
     fun adviseBolus(carbsG: Int, maxTenthsIU: Int): WatchRegulator.BolusAdvice = regulator.adviseBolus(inputs(nowEpochMs()), carbsG, maxTenthsIU)
 

@@ -100,6 +100,7 @@ class ControllerService : Service() {
                 host.scheduleTickIfAlone()
             }
             PATH_REHEARSAL                     -> host.regulate(rehearsal = true)
+            PATH_OWNER_READ                    -> host.readPumpForOwner(checkNotNull(payload))
             PATH_TRIAGE_CHECK                  -> host.triageCheckAfterSetChange()
         }
     }
@@ -139,6 +140,8 @@ class ControllerService : Service() {
         internal const val PATH_GLUCOSE = "/controller/glucose"
         internal const val PATH_REHEARSAL = "/controller/rehearsal"
         internal const val PATH_TICK = "/controller/tick"
+        /** The owner pressed «Обновить с помпы»: read the pump now; the payload names the request. */
+        internal const val PATH_OWNER_READ = "/controller/owner-read"
         /** An hour after the owner changed the infusion set: did glucose turn? */
         internal const val PATH_TRIAGE_CHECK = "/controller/triage-check"
 
@@ -276,7 +279,8 @@ class ControllerInboundReceiver : BroadcastReceiver() {
  * Drives the controller from adb, standing in for the phone, so that it can be tested against the
  * pump on its own. Guarded by the DUMP permission, which the shell holds and ordinary apps do not,
  * compiled to do nothing outside debug builds, and limited to the off-body test pump: with any
- * other pump paired only STATE and REHEARSAL work, which touch nothing.
+ * other pump paired only STATE, REHEARSAL and OWNER_READ work. The first two touch nothing; the last
+ * is the owner's «Обновить с помпы» - one reading of the pump, which changes nothing on it.
  *
  *   am broadcast -n <pkg>/app.aaps.combobench.controller.ControllerDebugReceiver --es cmd STATUS
  *   ... --es cmd TBR --ei percent 0 --ei minutes 30 [--es tbrKind EMULATED_STOP]
@@ -285,6 +289,7 @@ class ControllerInboundReceiver : BroadcastReceiver() {
  *   ... --es cmd STATE
  *   ... --es cmd REHEARSAL
  *   ... --es cmd TRIAGE [--es screen HOME|SET|RESIST|ADVICE]
+ *   ... --es cmd OWNER_READ [--ez screen true]
  */
 class ControllerDebugReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -305,6 +310,14 @@ class ControllerDebugReceiver : BroadcastReceiver() {
                     Intent(context, app.aaps.combobench.TriageActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         .putExtra("screen", intent.getStringExtra("screen"))
                 )
+                return
+            }
+            // The owner's «Обновить с помпы», as its button asks for it: the pump is read once and nothing on it
+            // is changed. With --ez screen true the owner's screen is opened, which asks for the reading itself.
+            "OWNER_READ" -> {
+                if (intent.getBooleanExtra("screen", false))
+                    context.startActivity(Intent(context, app.aaps.combobench.PumpReadActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                else host.askPumpRead()
                 return
             }
             else     -> return

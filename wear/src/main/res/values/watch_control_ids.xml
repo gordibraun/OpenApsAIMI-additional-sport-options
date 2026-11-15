@@ -9,4 +9,5 @@
     <item name="watch_food_fast" type="id" />
     <item name="watch_control_calculate" type="id" />
     <item name="watch_control_carbs_only" type="id" />
+    <item name="watch_control_read_pump" type="id" />
 </resources>

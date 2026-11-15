@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 70
-            versionName = "0.70-pulse-once-a-batch"
+            versionCode = 72
+            versionName = "0.72-read-the-pump-on-request"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

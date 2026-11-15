@@ -27,4 +27,11 @@ class WearLinkGuardTest {
         assertEquals(WearLinkGuard.Verdict.Fine, WearLinkGuard.check(now, 5, now - minutes(1), now - minutes(1), true, now - minutes(10)))
         assertTrue(WearLinkGuard.check(now, 5, now - minutes(1), now - minutes(1), true, now - minutes(21)) is WearLinkGuard.Verdict.Restart)
     }
+
+    @Test fun `a restart the relay refused as too soon is asked for again in three minutes, not in twenty`() {
+        val refusedAt = now
+        val kept = WearLinkGuard.lastRestartAfterRefusal(refusedAt)
+        assertEquals(WearLinkGuard.Verdict.Fine, WearLinkGuard.check(refusedAt + minutes(2), 5, refusedAt + minutes(1), refusedAt + minutes(1), true, kept))
+        assertTrue(WearLinkGuard.check(refusedAt + minutes(3) + 1_000L, 5, refusedAt + minutes(2), refusedAt + minutes(2), true, kept) is WearLinkGuard.Verdict.Restart)
+    }
 }

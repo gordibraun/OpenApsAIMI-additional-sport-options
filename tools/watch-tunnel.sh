@@ -14,6 +14,13 @@
 # ro.build.characteristics), AAPS_PACKAGE, TUNNEL_PORT (4444), WATCH_ADB_PORT (5555), TUNNEL_IDLE_MIN (120).
 # Speed is what Bluetooth gives: ~0.5 MB/s on 30.10.2026, ~0.1 MB/s on 14.11.2026. The debug APKs keep
 # their code uncompressed (bench 28 MB, wear 48 MB), so `install` pushes them compressed: about a third.
+#
+# THE TUNNEL SHARES THE WEAR LINK WITH THE LOOP. 15.11.2026: pushes to the watch went through (110 MB in
+# a quarter of an hour), but reading back from the watch - a 90 KB file, three times - stopped after
+# 30-50 KB and with it everything the watch sends the phone: glucose arrived four and five minutes late,
+# and after the second time the phone's commands no longer reached the watch until Bluetooth was restarted
+# on the phone. So: push what is needed, ask the watch only for answers of a few hundred bytes (a grep, a
+# count, a version), pull files when the watch is on the Mac's dock, and close the tunnel at once.
 set -euo pipefail
 PKG=${AAPS_PACKAGE:-info.nightscout.androidaps}
 LISTEN=${TUNNEL_PORT:-4444}

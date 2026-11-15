@@ -67,6 +67,11 @@ class ControlLogActivity : Activity() {
         val host = ControllerHost.get(this)
         val now = System.currentTimeMillis()
         runCatching { host.faceFacts() }.getOrNull()?.let { line(summary(it, now), 13f, Color.rgb(255, 195, 50)) }
+        // Before a dose: what the pump's own history holds that nobody has read yet (a bolus given with its buttons).
+        column.addView(android.widget.Button(this).apply {
+            text = "Обновить с помпы"; textSize = 13f; isAllCaps = false
+            setOnClickListener { startActivity(android.content.Intent(this@ControlLogActivity, PumpReadActivity::class.java)) }
+        })
         line("Сообщить Claude (данные часов приложатся сами):", 12f, Color.GRAY)
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL

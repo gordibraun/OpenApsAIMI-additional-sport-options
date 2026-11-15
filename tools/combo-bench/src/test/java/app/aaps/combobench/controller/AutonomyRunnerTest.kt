@@ -9,6 +9,7 @@ import app.aaps.pump.combowatch.executor.SimpleCommandJournal
 import app.aaps.pump.combowatch.protocol.ComboCommand
 import app.aaps.pump.combowatch.protocol.CommandKind
 import app.aaps.pump.combowatch.protocol.ControlLease
+import app.aaps.pump.combowatch.protocol.Outcome
 import app.aaps.pump.combowatch.protocol.PumpEvent
 import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import app.aaps.pump.combowatch.regulation.GlucoseReading
@@ -244,6 +245,37 @@ class AutonomyRunnerTest {
         assertTrue(runner.onReading()!!.getBoolean("done"))
         assertEquals(2, notes.size)
         assertFalse(notes.last().contains("не выполнено"))
+    }
+
+    @Test fun theOwnerCanHaveThePumpReadWhileThePhoneIsInCharge() {
+        // «Обновить с помпы» on the watch: a reading and nothing else, whoever leads.
+        phoneHeard = now
+        phoneLease = ControlLease(6L, now, now + minutes(10), pump, true)
+        val result = runner.readPumpForOwner()
+        assertEquals(Outcome.DONE, result?.outcome)
+        assertEquals(listOf(CommandKind.STATUS), sent.map { it.kind })
+        // Not the watch's own doing: what the driver reports during it is the pump's history.
+        assertFalse(runner.ownCommandInFlight)
+    }
+
+    @Test fun theOwnersReadingOutlastsTheWaitForTheSensor() {
+        // The pump is held back for the sensor's window for up to two minutes; the reading must not expire meanwhile.
+        val patient = AutonomyRunner(
+            store = store, executor = executor,
+            phoneLease = { phoneLease }, phoneLastHeardEpochMs = { phoneHeard }, heldPump = { held },
+            pumpBasalUph = { List(24) { 1.2 } },
+            note = { text, _ -> notes += text }, askForCarbs = { grams, why -> carbs += grams; carbsWhy += why },
+            beforePumpSession = { now += minutes(3) },
+            hourOfDay = { 12 }, nowEpochMs = { now }
+        )
+        assertEquals(Outcome.DONE, patient.readPumpForOwner()?.outcome)
+        assertEquals(1, sent.size)
+    }
+
+    @Test fun withNoPumpPairedThereIsNothingToRead() {
+        held = null
+        assertNull(runner.readPumpForOwner())
+        assertTrue(sent.isEmpty())
     }
 
     @Test fun asSoonAsThePhoneSpeaksAgainTheWatchStepsBack() {

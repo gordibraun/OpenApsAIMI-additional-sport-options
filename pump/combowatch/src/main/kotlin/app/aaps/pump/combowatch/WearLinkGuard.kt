@@ -26,6 +26,17 @@ object WearLinkGuard {
     /** One restart, then time for the link to come back before the next. */
     const val RETRY_MS = 20 * 60_000L
 
+    /** A request the relay turned away as too soon after its own last restart is repeated after this long. */
+    const val RETRY_AFTER_REFUSAL_MS = 3 * 60_000L
+
+    /**
+     * What to keep as "the last restart" when the relay refused one as too soon: a moment that makes
+     * [check] ask again in [RETRY_AFTER_REFUSAL_MS] instead of a whole [RETRY_MS]. A refusal is not a
+     * restart: 15.11.2026 12:45 it was counted as one, and the phone would have gone unheard by the
+     * watch for twenty more minutes while the relay was ready to restart six minutes later.
+     */
+    fun lastRestartAfterRefusal(nowEpochMs: Long): Long = nowEpochMs - RETRY_MS + RETRY_AFTER_REFUSAL_MS
+
     sealed class Verdict {
         object Fine : Verdict()
         data class Restart(val why: String) : Verdict()

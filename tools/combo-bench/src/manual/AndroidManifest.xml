@@ -33,6 +33,10 @@
         <!-- The meal screen the AAPS watch app opens when the phone is away; only a holder of the relay permission can. -->
         <activity android:name=".WatchBolusActivity" android:exported="true" android:excludeFromRecents="true"
             android:permission="app.aaps.combo.permission.RELAY" />
+        <!-- «Обновить с помпы»: reads the pump once and shows what its history added. Opened by the AAPS
+             watch app's entry screens (relay permission) and by this app's own journal screen. -->
+        <activity android:name=".PumpReadActivity" android:exported="true" android:excludeFromRecents="true"
+            android:permission="app.aaps.combo.permission.RELAY" />
         <receiver android:name=".controller.ControllerActivityReceiver" android:exported="true"
             android:permission="app.aaps.combo.permission.RELAY">
             <intent-filter>

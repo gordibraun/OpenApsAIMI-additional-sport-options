@@ -43,6 +43,9 @@ internal object ComboRelay {
 
     /** The controller's meal screen: the dose worked out on the watch when the phone is away. */
     const val CONTROLLER_BOLUS_ACTIVITY = "app.aaps.combobench.WatchBolusActivity"
+
+    /** The controller's «Обновить с помпы» screen: the pump is read once and what its history added is shown. */
+    const val CONTROLLER_PUMP_READ_ACTIVITY = "app.aaps.combobench.PumpReadActivity"
     const val PATH_LEASE = "/combowatch/lease"
 
     const val TAG = "ComboRelay"

@@ -146,6 +146,8 @@ internal class ControllerHost private constructor(context: Context) {
             outbox.append(event.copy(pumpSerial = heldPump()))
             // The watch's own record of what the pump delivered, whoever asked for it.
             runCatching { autonomy.onPumpEvent(event, byWatch = runner.ownCommandInFlight) }
+            // A reading the owner asked for shows what it found; see [readPumpForOwner].
+            if (event.type == PumpEvent.Type.BOLUS_INFUSED) ownerReadFinds?.let { finds -> synchronized(finds) { finds.add(event) } }
             // A bolus or a basal change shows on the face at once, not at its next scheduled redraw.
             if (event.type == PumpEvent.Type.BOLUS_INFUSED || event.type == PumpEvent.Type.TBR_STARTED || event.type == PumpEvent.Type.TBR_ENDED) refreshFace()
         },
@@ -935,7 +937,11 @@ internal class ControllerHost private constructor(context: Context) {
         InsulinEffectiveness.evaluate(
             nowEpochMs, autonomy.readings(), autonomy.forecastsMade(), autonomy.delivery(),
             // The phone's count of carbohydrates on board, while its snapshot is fresh enough to stand on the face.
-            carbsOnBoardG = autonomy.snapshot()?.takeIf { FaceFreshness.phoneForecastUsable(nowEpochMs, it.madeAtEpochMs) }?.cobG
+            carbsOnBoardG = autonomy.snapshot()?.takeIf { FaceFreshness.phoneForecastUsable(nowEpochMs, it.madeAtEpochMs) }?.cobG,
+            // When carbohydrates were last entered on the phone. A meal the phone has dosed counts as no
+            // carbohydrates on board there, and one entered through the phone is not in the watch's own list:
+            // 14.11.2026 21:42 the verdict came in the middle of a 114 g supper, and 2.5 U were added by hand.
+            carbsEnteredAtEpochMs = autonomy.snapshot()?.lastCarbsAtEpochMs
         )
 
     private fun checkInsulinEffect(now: Long) {
@@ -1177,6 +1183,101 @@ internal class ControllerHost private constructor(context: Context) {
     }
 
     val awaitingReconciliation: Boolean get() = executor.awaitingReconciliation
+
+    // ---- the owner asks for the pump to be read ---------------------------------------------------
+
+    /**
+     * A reading of the pump the owner asked for with «Обновить с помпы», and what it found. The
+     * screen that asked looks at it until [finishedAtEpochMs] is set.
+     */
+    class OwnerPumpRead(val id: String, val startedAtEpochMs: Long) {
+
+        @Volatile var finishedAtEpochMs = 0L
+        /** Null with [finishedAtEpochMs] set: no pump is paired with this watch. */
+        @Volatile var outcome: Outcome? = null
+        @Volatile var reason: String? = null
+        /** Boluses the pump's history showed that the watch had not known of: when, and units. */
+        @Volatile var boluses: List<Pair<Long, Double>> = emptyList()
+        @Volatile var snapshot: PumpSnapshot? = null
+        /** Insulin on board as the face shows it after the reading; null when nobody has a figure. */
+        @Volatile var iobU: Double? = null
+        /** True when the phone has been heard within the last few minutes: it gets the records at once. */
+        @Volatile var phoneInTouch = false
+        val finished: Boolean get() = finishedAtEpochMs > 0L
+    }
+
+    @Volatile var ownerPumpRead: OwnerPumpRead? = null
+        private set
+
+    /** Boluses the session reports while the owner's reading runs; null at any other time. */
+    @Volatile private var ownerReadFinds: MutableList<PumpEvent>? = null
+
+    /**
+     * Start a reading of the pump for the owner, or return the one already running. Called from a
+     * screen; the reading itself runs in the controller's service, one pump session at a time
+     * like everything else.
+     */
+    fun askPumpRead(): OwnerPumpRead {
+        val now = System.currentTimeMillis()
+        ownerPumpRead?.takeIf { !it.finished && now - it.startedAtEpochMs < OWNER_READ_GIVE_UP_MS }?.let { return it }
+        val read = OwnerPumpRead("owner-read-$now", now)
+        ownerPumpRead = read
+        ControllerService.start(context, ControllerService.PATH_OWNER_READ, read.id)
+        return read
+    }
+
+    /**
+     * The reading asked for by [askPumpRead]: one session that changes nothing on the pump. What the
+     * pump's history added since anybody last looked - above all a bolus given with the pump's own
+     * buttons - is recorded here at once and goes to the phone like any pump event, so that the next
+     * dose, wherever it is worked out, counts it. Until 15.11.2026 there was no way to ask for this:
+     * with the pump driven through the watch such a bolus was learned only with the next command.
+     */
+    fun readPumpForOwner(id: String) {
+        val read = ownerPumpRead?.takeIf { it.id == id && !it.finished } ?: return
+        val finds = mutableListOf<PumpEvent>()
+        val result: Result<ComboResult?> = runCatching {
+            synchronized(pumpTurn) {
+                when {
+                    heldPump() == null                                 -> null
+                    // The bench's own manual sessions use the same pump and pairing; never overlap with them.
+                    ManualPumpRuntime.get(context).usingBluetoothNow() ->
+                        ComboResult(id, Outcome.REFUSED, System.currentTimeMillis(), reason = "the bench is using the pump")
+
+                    else                                               -> {
+                        ownerReadFinds = finds
+                        try {
+                            runner.readPumpForOwner()
+                        } finally {
+                            ownerReadFinds = null
+                        }
+                    }
+                }
+            }
+        }
+        val now = System.currentTimeMillis()
+        val answer = result.getOrNull()
+        val found = synchronized(finds) { finds.mapNotNull { event -> event.bolusTenthsIU?.let { event.timestampEpochMs to it / 10.0 } } }.sortedBy { it.first }
+        read.outcome = if (result.isFailure) Outcome.UNKNOWN else answer?.outcome
+        read.reason = result.exceptionOrNull()?.let { "${it.javaClass.simpleName}: ${it.message ?: ""}" } ?: answer?.reason
+        read.boluses = found
+        read.snapshot = answer?.snapshot ?: savedSnapshot()
+        read.phoneInTouch = now - phoneLastHeardEpochMs < PHONE_IN_TOUCH_MS
+        val text = when {
+            result.isFailure                 -> "Чтение помпы по кнопке: ошибка (${read.reason})"
+            answer == null                   -> "Чтение помпы по кнопке: помпа не привязана"
+            answer.outcome != Outcome.DONE   -> "Чтение помпы по кнопке: не удалось (${answer.outcome}: ${answer.reason})"
+            found.isEmpty()                  -> "Чтение помпы по кнопке: новых болюсов нет"
+            else                             -> "Чтение помпы по кнопке: найдено " + found.joinToString(", ") { (at, units) ->
+                String.format(java.util.Locale.getDefault(), "%.1f ЕД в %s", units, clock(at))
+            }
+        }
+        runCatching { journalLine(now, "PUMP_READ", text) }
+        // The phone gets the records now, not with the next command.
+        runCatching { sendEvents(); sendHeartbeat() }
+        read.iobU = runCatching { faceFacts().iobU }.getOrNull()
+        read.finishedAtEpochMs = System.currentTimeMillis()
+    }
 
     // ---- outbound --------------------------------------------------------------------------------
 
@@ -1524,6 +1625,12 @@ internal class ControllerHost private constructor(context: Context) {
 
         /** The longest the pump is held back for the sensor; a window and a session, with room to spare. */
         private const val MAX_SENSOR_WAIT_MS = 2 * 60_000L
+
+        /** A reading the owner asked for that has not finished by then is taken for lost, and another may be asked for. */
+        private const val OWNER_READ_GIVE_UP_MS = 6 * 60_000L
+
+        /** Heard within this long, the phone is taken to be in touch and to get the records at once. */
+        private const val PHONE_IN_TOUCH_MS = 5 * 60_000L
         private const val SENSOR_WAIT_SLICE_MS = 5_000L
         private const val CARBS_NOTIFICATION_ID = 42
         private const val ACTIVITY_CHANNEL = "combo-activity"

@@ -20,6 +20,12 @@ class RegulationSnapshotJsonTest {
         assertEquals(120, back.carbsRequiredWithinMin)
     }
 
+    @Test fun `when carbohydrates were last entered on the phone survives the trip, and an older phone says nothing`() {
+        val back = RegulationSnapshot.fromJson(snapshot().copy(lastCarbsAtEpochMs = 1_794_677_258_000L).toJson())
+        assertEquals(1_794_677_258_000L, back.lastCarbsAtEpochMs)
+        assertNull(RegulationSnapshot.fromJson(snapshot().toJson()).lastCarbsAtEpochMs)
+    }
+
     @Test fun `zero grams is a statement, a missing field is not`() {
         val saysNothingNeeded = RegulationSnapshot.fromJson(snapshot(carbs = 0, within = null).toJson())
         assertEquals(0, saysNothingNeeded.carbsRequiredG)

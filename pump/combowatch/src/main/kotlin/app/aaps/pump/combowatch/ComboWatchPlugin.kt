@@ -139,6 +139,27 @@ class ComboWatchPlugin @Inject constructor(
 
     @Volatile private var lastBolus: Pair<Long, Double>? = null
 
+    /** One reading of the pump asked of the watch, and how it ended; for the owner's «Обновить с помпы». */
+    class StatusRead(val startedAtEpochMs: Long, val finishedAtEpochMs: Long, val outcome: Outcome, val reason: String?)
+
+    /** The last reading of the pump this phone asked for, whoever asked - the owner's button or AAPS itself. */
+    @Volatile var lastStatusRead: StatusRead? = null
+        private set
+
+    /** A bolus this phone first heard of from the pump's history: when it heard, and what the pump recorded. */
+    class LearnedBolus(val learnedAtEpochMs: Long, val timestampEpochMs: Long, val units: Double, val smb: Boolean)
+
+    private val learnedBoluses = ArrayDeque<LearnedBolus>()
+
+    /** Boluses filed since [sinceEpochMs] that the records did not hold before; what a reading of the pump brought. */
+    fun bolusesLearnedSince(sinceEpochMs: Long): List<LearnedBolus> =
+        synchronized(learnedBoluses) { learnedBoluses.filter { it.learnedAtEpochMs >= sinceEpochMs } }
+
+    private fun rememberLearned(event: PumpEvent, amount: Double) = synchronized(learnedBoluses) {
+        learnedBoluses.addLast(LearnedBolus(System.currentTimeMillis(), event.timestampEpochMs, amount, event.bolusKind == BolusKind.SMB))
+        while (learnedBoluses.size > MAX_LEARNED_BOLUSES) learnedBoluses.removeFirst()
+    }
+
     override fun onStart() {
         super.onStart()
         scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -196,8 +217,13 @@ class ComboWatchPlugin @Inject constructor(
                         else -> "no answer (relay app missing, or the LINK_RESET permission not granted - reinstall AAPS after WearTester)"
                     }
                     aapsLogger.info(LTag.PUMP, "combowatch: bluetooth restart request: $answer")
+                    // Turned away as too soon is not a restart: asked again in a few minutes, not in twenty.
+                    if (resultCode == 2) lastLinkResetEpochMs = WearLinkGuard.lastRestartAfterRefusal(System.currentTimeMillis())
                     if (resultCode != 1) uiInteraction.addNotificationValidFor(
-                        Notification.USER_MESSAGE, "Связь с часами полуживая, перезапуск Bluetooth не удался: выключите и включите Bluetooth вручную", Notification.NORMAL, 30
+                        Notification.USER_MESSAGE,
+                        if (resultCode == 2) "Связь с часами полуживая; Bluetooth перезапускался недавно, повторю через 3 мин. Быстрее — выключить и включить Bluetooth вручную"
+                        else "Связь с часами полуживая, перезапуск Bluetooth не удался: выключите и включите Bluetooth вручную",
+                        Notification.NORMAL, 30
                     )
                 }
             }, null, 0, null, null)
@@ -299,8 +325,21 @@ class ComboWatchPlugin @Inject constructor(
             return baseRate(onPump, asked)
         }
 
+    /**
+     * The watch connects to the pump and reads it: what it shows, and what its history added since
+     * anybody last looked - a bolus given with the pump's own buttons arrives here as a pump event
+     * and is in the records before this returns. This is what «Обновить с помпы» asks for.
+     */
     override fun getPumpStatus(reason: String) {
-        dispatch(CommandKind.STATUS)
+        val startedAt = System.currentTimeMillis()
+        val result = dispatch(CommandKind.STATUS)
+        val read = StatusRead(startedAt, System.currentTimeMillis(), result.outcome, result.reason)
+        lastStatusRead = read
+        aapsLogger.info(
+            LTag.PUMP,
+            "combowatch: pump read ($reason): ${read.outcome}${read.reason?.let { " ($it)" } ?: ""} in ${(read.finishedAtEpochMs - startedAt) / 1000} s; " +
+                "boluses new to the records: ${bolusesLearnedSince(startedAt).joinToString { "${it.units} U" }.ifEmpty { "none" }}"
+        )
         adoptWatchPumpIfNoneRegistered()
         // Raises the notice about a different pump on the watch as soon as it is known.
         whyNotThisPump()
@@ -540,14 +579,16 @@ class ComboWatchPlugin @Inject constructor(
                     else              -> BS.Type.NORMAL
                 }
                 val bolusId = checkNotNull(event.bolusId)
-                val filed = pumpSync.syncBolusWithPumpId(event.timestampEpochMs, amount, type, bolusId, PumpType.ACCU_CHEK_COMBO, serial)
-                if (!filed && historyOfAKnownPump(serial, event.timestampEpochMs)) {
-                    persistenceLayer.syncPumpBolus(
+                var isNew = pumpSync.syncBolusWithPumpId(event.timestampEpochMs, amount, type, bolusId, PumpType.ACCU_CHEK_COMBO, serial)
+                if (!isNew && historyOfAKnownPump(serial, event.timestampEpochMs)) {
+                    isNew = persistenceLayer.syncPumpBolus(
                         BS(timestamp = event.timestampEpochMs, amount = amount, type = type, ids = IDs(pumpId = bolusId, pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial)),
                         type
-                    ).blockingGet()
+                    ).blockingGet().inserted.isNotEmpty()
                     aapsLogger.info(LTag.PUMP, "combowatch: bolus $bolusId of $amount U, from before AAPS registered $serial anew, filed all the same")
                 }
+                // New to the records: what the owner's «Обновить с помпы» reports back.
+                if (isNew) rememberLearned(event, amount)
                 lastBolus = event.timestampEpochMs to amount
             }
 
@@ -951,6 +992,9 @@ class ComboWatchPlugin @Inject constructor(
         }
 
         private const val UNKNOWN_SERIAL = "неизвестна"
+
+        /** A day's worth and more; the owner's screen only asks for the last minutes. */
+        private const val MAX_LEARNED_BOLUSES = 100
 
         // Five minutes after the phone was last heard from, the watch takes basal into its own
         // care; renewing every two leaves room for one lost renewal without that happening.

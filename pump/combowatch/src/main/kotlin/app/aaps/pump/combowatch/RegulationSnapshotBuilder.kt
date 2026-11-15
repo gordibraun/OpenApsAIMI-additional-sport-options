@@ -66,9 +66,23 @@ class RegulationSnapshotBuilder @Inject constructor(
             validUntilEpochMs = nowEpochMs + VALID_FOR_MS,
             cobG = maxOf(snapshot.cobG, carbohydratesOnBoardNow()),
             activities = activities,
-            cancelledActivityStarts = cancelledActivities(activities, nowEpochMs)
+            cancelledActivityStarts = cancelledActivities(activities, nowEpochMs),
+            lastCarbsAtEpochMs = lastCarbsEntered(nowEpochMs)
         )
     }
+
+    /**
+     * When carbohydrates were last entered on this phone - by the wizard, the photo tab, the watch's
+     * entry relayed here - within the hours a meal takes. Read anew for every snapshot, like the
+     * activities: the watch's check of whether insulin is working must know that a meal is under way
+     * even when the phone, having dosed it, counts nothing on board.
+     */
+    private fun lastCarbsEntered(nowEpochMs: Long): Long? = runCatching {
+        persistenceLayer.get().getCarbsFromTimeToTimeExpanded(nowEpochMs - LAST_CARBS_LOOKBACK_MS, nowEpochMs + 60_000L, true)
+            .filter { it.isValid && it.amount > 0.0 }
+            .maxOfOrNull { it.timestamp }
+    }.onFailure { aapsLogger.debug(LTag.PUMP, "combowatch: last carbohydrates not read for the snapshot: ${it.message}") }
+        .getOrNull()
 
     /**
      * Starts the watch should drop: sent in an earlier snapshot while their window still runs but
@@ -175,6 +189,9 @@ class RegulationSnapshotBuilder @Inject constructor(
 
         /** Without the phone for longer than this the watch stops acting on what the phone last knew. */
         const val VALID_FOR_MS = 24 * 60 * 60_000L
+
+        /** How far back the last entry of carbohydrates is looked for. */
+        private const val LAST_CARBS_LOOKBACK_MS = 6 * 60 * 60_000L
 
         /** The note the phone's Activity v2 puts on an exercise record. */
         const val ACTIVITY_NOTE_PREFIX = "AIMI_ACTIVITY_V2 "

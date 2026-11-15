@@ -380,8 +380,28 @@ class WatchControlActivity : DaggerActivity() {
                 root.addView(watchBolusButton, LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(2) })
             }
         }
+        // Before a dose is worked out, here or on the phone: have the pump read now, so that a bolus given
+        // with its own buttons is counted. Only with the pump driven through this watch; the amount entered
+        // above stays as it is while the controller's screen is open.
+        if (kind != "ACTIVITY" && ComboWatchMode.isWatchMode(this)) {
+            root.addView(Button(this).apply {
+                id = R.id.watch_control_read_pump
+                text = "Обновить с помпы"; isAllCaps = false; textSize = 12f; letterSpacing = 0f
+                minHeight = 0; minimumHeight = 0; setPadding(dp(6), 0, dp(6), 0); includeFontPadding = false
+                setOnClickListener { openPumpRead() }
+            }, LinearLayout.LayoutParams(-1, dp(34)).apply { topMargin = dp(2); marginStart = dp(20); marginEnd = dp(20) })
+        }
         root.addView(status)
         scroll.requestFocus()
+    }
+
+    private fun openPumpRead() {
+        runCatching {
+            startActivity(
+                Intent().setClassName(ComboRelay.CONTROLLER_PACKAGE, ComboRelay.CONTROLLER_PUMP_READ_ACTIVITY)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }.onFailure { showStatus("Экран чтения помпы не открылся: ${it.javaClass.simpleName}") }
     }
 
     private lateinit var watchMealButton: Button

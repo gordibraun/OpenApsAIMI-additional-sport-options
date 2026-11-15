@@ -589,7 +589,14 @@ data class RegulationSnapshot(
      * owner's «не нагрузка» on the phone, or a record found false. The watch drops its own copy
      * (which it may have sensed itself and still be counting a tail for) and stops asking.
      */
-    val cancelledActivityStarts: List<Long> = emptyList()
+    val cancelledActivityStarts: List<Long> = emptyList(),
+    /**
+     * When carbohydrates were last entered on the phone, by whatever screen, whether or not it still
+     * counts any of them as on board; null when none were in the last hours or the phone's build does
+     * not say. For the watch's «инсулин действует хуже» check: a meal the phone has dosed shows as no
+     * carbohydrates on board ([cobG] 0) while it is still being absorbed (14.11.2026 21:42).
+     */
+    val lastCarbsAtEpochMs: Long? = null
 ) {
 
     /** A temporary basal as an absolute rate, and when it was due to end. */
@@ -635,6 +642,7 @@ data class RegulationSnapshot(
             carbsRequiredWithinMin?.let { put("carbsRequiredWithin", it) }
             if (activities.isNotEmpty()) put("activities", JSONArray().apply { activities.forEach { put(it.toJson()) } })
             if (cancelledActivityStarts.isNotEmpty()) put("cancelledActivities", JSONArray().apply { cancelledActivityStarts.forEach { put(it) } })
+            lastCarbsAtEpochMs?.let { put("lastCarbsAt", it) }
         }
 
     companion object {
@@ -660,7 +668,8 @@ data class RegulationSnapshot(
             carbsRequiredWithinMin = if (json.has("carbsRequiredWithin")) json.optInt("carbsRequiredWithin").takeIf { it > 0 } else null,
             phoneForecast = json.optJSONArray("phoneForecast")?.let { array -> List(array.length()) { array.getInt(it) } },
             activities = json.optJSONArray("activities")?.let { array -> List(array.length()) { ActivityWindow.fromJson(array.getJSONObject(it)) } } ?: emptyList(),
-            cancelledActivityStarts = json.optJSONArray("cancelledActivities")?.let { array -> List(array.length()) { array.getLong(it) } } ?: emptyList()
+            cancelledActivityStarts = json.optJSONArray("cancelledActivities")?.let { array -> List(array.length()) { array.getLong(it) } } ?: emptyList(),
+            lastCarbsAtEpochMs = if (json.has("lastCarbsAt")) json.optLong("lastCarbsAt").takeIf { it > 0L } else null
         )
     }
 }
