@@ -290,7 +290,7 @@ class ControllerInboundReceiver : BroadcastReceiver() {
  *   ... --es cmd REHEARSAL
  *   ... --es cmd TRIAGE [--es screen HOME|SET|RESIST|ADVICE]
  *   ... --es cmd OWNER_READ [--ez screen true]
- *   ... --es cmd TAP [--ei taps 3] [--es plain log|controller]
+ *   ... --es cmd TAP [--ei taps 3] [--es plain log|controller]     (am broadcast --allow-background-activity-starts ...)
  */
 class ControllerDebugReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -326,17 +326,18 @@ class ControllerDebugReceiver : BroadcastReceiver() {
             "TAP" -> {
                 val taps = intent.getIntExtra("taps", 1).coerceIn(1, 3)
                 val plain = intent.getStringExtra("plain") ?: app.aaps.combobench.PumpTapGateActivity.PLAIN_LOG
-                val handler = android.os.Handler(android.os.Looper.getMainLooper())
-                repeat(taps) { index ->
-                    handler.postDelayed({
-                        runCatching {
-                            context.startActivity(
-                                Intent(context, app.aaps.combobench.PumpTapGateActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    .putExtra(app.aaps.combobench.PumpTapGateActivity.EXTRA_PLAIN, plain)
-                            )
-                        }
-                    }, index * 250L)
+                fun tap() = runCatching {
+                    context.startActivity(
+                        Intent(context, app.aaps.combobench.PumpTapGateActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            .putExtra(app.aaps.combobench.PumpTapGateActivity.EXTRA_PLAIN, plain)
+                    )
                 }
+                // The first tap goes while the broadcast is being handled: sent with `am broadcast --allow-background-activity-starts`,
+                // that is when this app may open a screen from the background. The next ones reach the gate, which is in front by then,
+                // as launches of the same instance - on the wrist they are touches on its window.
+                tap()
+                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                repeat(taps - 1) { index -> handler.postDelayed({ tap() }, (index + 1) * 250L) }
                 return
             }
             else     -> return
