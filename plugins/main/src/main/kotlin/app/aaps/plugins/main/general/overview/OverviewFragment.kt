@@ -879,7 +879,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         pumpRefreshAskedAt = askedAt
         binding.pumpRefreshButton.isEnabled = false
         binding.pumpRefreshResult.visibility = View.VISIBLE
-        binding.pumpRefreshResult.text = rh.gs(R.string.pump_refresh_running)
+        tickPumpRefresh(askedAt)
         val reporter = activePlugin.activePump as? app.aaps.core.interfaces.pump.PumpReadReporter
         commandQueue.readStatus(rh.gs(R.string.pump_refresh_reason), object : app.aaps.core.interfaces.queue.Callback() {
             override fun run() {
@@ -889,14 +889,29 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
                 runOnUiThread { showPumpRefreshAnswer(askedAt, text) }
             }
         })
-        // A watch that never answers is given up on after twelve minutes; the button comes back long before.
-        binding.pumpRefreshButton.postDelayed({ showPumpRefreshAnswer(askedAt, rh.gs(R.string.pump_refresh_slow), keepWaiting = true) }, PUMP_REFRESH_SLOW_MS)
     }
 
-    private fun showPumpRefreshAnswer(askedAt: Long, text: String, keepWaiting: Boolean = false) {
+    /**
+     * The seconds counted on the line while the reading runs: the pump lets the sensor speak first, so a reading
+     * asked just before the sensor's turn takes two minutes and more, and a line that stood still looked dead
+     * (15.11.2026: 138 s). A watch that never answers is given up on after twelve minutes; the button comes back
+     * long before.
+     */
+    private fun tickPumpRefresh(askedAt: Long) {
         val binding = _binding ?: return
         if (pumpRefreshAskedAt != askedAt) return
-        if (!keepWaiting) pumpRefreshAskedAt = 0L
+        val elapsedMs = System.currentTimeMillis() - askedAt
+        if (elapsedMs > PUMP_REFRESH_GIVE_UP_MS) return showPumpRefreshAnswer(askedAt, rh.gs(R.string.pump_refresh_failed))
+        val slow = elapsedMs >= PUMP_REFRESH_SLOW_MS
+        if (slow) binding.pumpRefreshButton.isEnabled = true
+        binding.pumpRefreshResult.text = rh.gs(if (slow) R.string.pump_refresh_slow else R.string.pump_refresh_running, (elapsedMs / 1000L).toInt())
+        binding.pumpRefreshResult.postDelayed({ tickPumpRefresh(askedAt) }, 1000L)
+    }
+
+    private fun showPumpRefreshAnswer(askedAt: Long, text: String) {
+        val binding = _binding ?: return
+        if (pumpRefreshAskedAt != askedAt) return
+        pumpRefreshAskedAt = 0L
         binding.pumpRefreshButton.isEnabled = true
         binding.pumpRefreshResult.visibility = View.VISIBLE
         binding.pumpRefreshResult.text = text
@@ -2324,6 +2339,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
         /** After this long without an answer the button is given back; the reading goes on in the queue. */
         private const val PUMP_REFRESH_SLOW_MS = 3 * 60_000L
+        private const val PUMP_REFRESH_GIVE_UP_MS = 15 * 60_000L
         private const val TRIAL_EVENTS_SHOWN = 12
     }
 }

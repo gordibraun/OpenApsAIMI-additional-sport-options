@@ -34,6 +34,7 @@ import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.profile.ProfileUtil
+import app.aaps.core.interfaces.pump.PumpNarration
 import app.aaps.core.interfaces.pump.DetailedBolusInfo
 import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.pump.PumpEnactResult
@@ -773,13 +774,20 @@ class BolusWizard @Inject constructor(
                     // glucose record (compared by value, with tolerance, below), not temporary basals
                     // and not the loop's run counter: with the watch driving the pump those move every
                     // minute and refused nearly every meal confirmed from the watch (21 Oct 2026).
+                    // Therapy events: those since a day before the calculation (the same span for both
+                    // snapshots, so none drops out between them), without the pump driver's own narration -
+                    // a note landing mid-calculation had a confirmed dose refused (15 Nov 2026).
                     historyIds = listOf(
                         persistenceLayer.getLastBolusId(), persistenceLayer.getLastCarbsId(),
                         persistenceLayer.getLastTemporaryTargetId(),
-                        persistenceLayer.getLastTherapyEventId(), persistenceLayer.getLastEffectiveProfileSwitchId(),
+                        persistenceLayer.getLastEffectiveProfileSwitchId(),
                         persistenceLayer.getLastProfileSwitchId(),
                         persistenceLayer.getLastExtendedBolusId(), persistenceLayer.getLastRunningModeId()
-                    ),
+                    ) + therapyEventsThatCount(
+                        persistenceLayer.getTherapyEventDataIncludingInvalidFromTime(
+                            (calculatedAt.takeIf { it > 0L } ?: now) - WizardCalculationInputs.THERAPY_EVENTS_LOOKBACK_MS, true
+                        ).blockingGet()
+                    ) { event -> (activePlugin.activePump as? PumpNarration)?.onlyNarrates(event) == true },
                     profile = current.toPureNsJson(dateUtil).toString(),
                     // The sensitivity must stay last: it is the one entry compared with tolerance.
                     profileValues = listOf(

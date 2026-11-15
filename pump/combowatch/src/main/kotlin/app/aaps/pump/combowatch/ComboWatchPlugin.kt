@@ -100,7 +100,7 @@ class ComboWatchPlugin @Inject constructor(
         .description(R.string.combowatch_plugin_description),
     ownPreferences = emptyList(),
     aapsLogger, rh, preferences, commandQueue
-), Pump, app.aaps.core.interfaces.pump.PumpReadReporter {
+), Pump, app.aaps.core.interfaces.pump.PumpReadReporter, app.aaps.core.interfaces.pump.PumpNarration {
 
     private var scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var leaseJob: Job? = null
@@ -869,6 +869,10 @@ class ComboWatchPlugin @Inject constructor(
         }.onFailure { aapsLogger.warn(LTag.PUMP, "combowatch: could not mark the watch's meal as covered: ${it.message}") }
     }
 
+    /** The watch's notes are filed with the pump's serial; those that say nothing of insulin only narrate. */
+    override fun onlyNarrates(event: TE): Boolean =
+        event.type == TE.Type.NOTE && event.ids.pumpSerial != null && !speaksOfInsulin(event.note)
+
     private fun historyOfAKnownPump(serial: String, timestamp: Long): Boolean {
         val registeredAt = preferences.get(LongNonKey.ActivePumpChangeTimestamp)
         if (registeredAt <= 0L || timestamp >= registeredAt) return false
@@ -1003,6 +1007,18 @@ class ComboWatchPlugin @Inject constructor(
 
         private val WATCH_MEAL_BOLUS = Regex("""^Болюс с часов: [0-9]+(?:[.,][0-9]+)? ЕД на ([0-9]+) г — подан""")
         private const val WATCH_MEAL_MATCH_MS = 3_000L
+
+        /**
+         * Whether a note of the watch speaks of insulin given or tried: a bolus the owner gave on the watch
+         * («Болюс с часов: … — подан / исход не выяснен / FAILED») or a microbolus of the watch's own («Часы без
+         * телефона: микродоза 0.5 ЕД …»). Such a note is not narration: a dose being confirmed on the phone may
+         * have been calculated without that insulin. What the watch noticed («Часы: Инсулин действует хуже…: за
+         * 2 ч подано 3.7 ЕД болюсами», «Часы без телефона: сахар 108 … базал остановлен») speaks of insulin the
+         * records already hold, or of basal. A note without text counts as speaking of insulin - what is not
+         * known is not waved through.
+         */
+        internal fun speaksOfInsulin(note: String?): Boolean =
+            note.isNullOrBlank() || note.trimStart().startsWith("Болюс с часов", ignoreCase = true) || note.contains("микродоз", ignoreCase = true)
 
         /** Grams of a meal the watch dosed itself and the pump delivered for, from the watch's note; null for any other note. */
         internal fun gramsCoveredOnTheWatch(note: String): Int? =

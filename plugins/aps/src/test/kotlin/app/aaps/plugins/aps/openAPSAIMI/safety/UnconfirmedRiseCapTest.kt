@@ -50,6 +50,21 @@ class UnconfirmedRiseCapTest {
     }
 
     @Test
+    fun `a rise that goes on is confirmed also when every other reading is missed`() {
+        // 15.11.2026 evening, the sensor heard every ten minutes: 168, 189, 209, then 220 five minutes on.
+        assertFalse(UnconfirmedRiseCap.evaluate(readings(20 to 168, 10 to 189, 0 to 209), now, 0.7).capped)
+        assertFalse(UnconfirmedRiseCap.evaluate(readings(15 to 189, 5 to 209, 0 to 220), now, 1.1).capped)
+    }
+
+    @Test
+    fun `a jump after a missed reading is cut when glucose was not rising before the gap`() {
+        // The night's shape again, with the step before the gap flat: one reading's word.
+        val d = UnconfirmedRiseCap.evaluate(readings(15 to 121, 10 to 121, 0 to 150), now, 1.8)
+        assertTrue(d.capped)
+        assertTrue(d.acrossMissedReading)
+    }
+
+    @Test
     fun `a slow rise is not asked about, and a small microbolus is never raised`() {
         assertFalse(UnconfirmedRiseCap.evaluate(readings(10 to 120, 5 to 120, 0 to 127), now, 1.5).capped) // +7
         val small = UnconfirmedRiseCap.evaluate(readings(10 to 120, 5 to 120, 0 to 150), now, 0.3)
@@ -71,7 +86,7 @@ class UnconfirmedRiseCapTest {
 
     @Test
     fun `with no reading before the one before, the rise is one reading's word`() {
-        // The reading before last is itself the first after a long silence.
+        // The reading before last is itself the first after a long silence: nothing says what glucose did before it.
         val d = UnconfirmedRiseCap.evaluate(readings(40 to 110, 5 to 118, 0 to 131), now, 1.2)
         assertTrue(d.capped)
         assertFalse(d.acrossMissedReading)

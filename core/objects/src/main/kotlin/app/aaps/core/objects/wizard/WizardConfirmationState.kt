@@ -1,17 +1,37 @@
 package app.aaps.core.objects.wizard
 
+import app.aaps.core.data.model.TE
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+
+/**
+ * The therapy events a displayed dose is compared by, for [WizardCalculationInputs.historyIds]: of each its id,
+ * its version and whether it is valid, so that a new event, an edit and a removal all show.
+ *
+ * Left out are the notes the pump driver calls its own narration ([onlyNarrates], see
+ * [app.aaps.core.interfaces.pump.PumpNarration]): the watch telling what it noticed is no treatment and nothing
+ * the owner typed, and a dose he has just confirmed is not to be refused because such a note landed. Everything
+ * else counts as before: activities, notes typed by hand, announcements (an unclear bolus is one), and the
+ * driver's notes about insulin.
+ *
+ * 15 Nov 2026: a note the loop filed about its own decision, three seconds into a calculation, had the phone
+ * refuse the 3.7 U confirmed on the watch; the owner dosed on the pump by hand. That note is no longer written;
+ * the watch's notes arrive the same way, a dozen a day.
+ */
+fun therapyEventsThatCount(events: List<TE>, onlyNarrates: (TE) -> Boolean = { false }): List<Long> =
+    events.filterNot(onlyNarrates)
+        .sortedBy { it.id }
+        .flatMap { listOf(it.id, it.version.toLong(), if (it.isValid) 1L else 0L) }
 
 /**
  * What the displayed dose was computed from; [matches] says whether a later snapshot still
  * describes the same situation.
  *
  * Strict - any change invalidates the dose: the newest bolus, carbs and extended bolus (a treatment
- * filed since the calculation), the temporary target, profile switches, therapy events and the
- * running mode ([historyIds]); the profile itself; the carb ratio, basal and targets (all of
- * [profileValues] but the last entry); the temporary target text; the meal assist's last accepted
- * treatment.
+ * filed since the calculation), the temporary target, profile switches, the running mode and the
+ * therapy events of the last day but the pump driver's own narration, see [therapyEventsThatCount]
+ * ([historyIds]); the profile itself; the carb ratio, basal and targets (all of [profileValues] but
+ * the last entry); the temporary target text; the meal assist's last accepted treatment.
  *
  * Tolerant: the sensitivity (last entry of [profileValues]; dynamic ISF drifts a little between
  * loop runs) within 10 %, and the glucose value within 10 mg/dL.
@@ -58,6 +78,9 @@ data class WizardCalculationInputs(
     companion object {
         const val SENSITIVITY_TOLERANCE = 0.10
         const val GLUCOSE_TOLERANCE_MGDL = 10.0
+
+        /** Therapy events are compared this far back from the calculation: a day covers any activity and its tail. */
+        const val THERAPY_EVENTS_LOOKBACK_MS = 24 * 3_600_000L
     }
 }
 

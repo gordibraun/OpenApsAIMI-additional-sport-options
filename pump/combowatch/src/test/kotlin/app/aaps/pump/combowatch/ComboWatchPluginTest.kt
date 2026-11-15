@@ -327,6 +327,29 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
     }
 
     @Test
+    fun `a note of the watch about a dose is told from one that only narrates`() {
+        // Doses given or tried on the watch: a dose being confirmed on the phone may not know of them.
+        listOf(
+            "Болюс с часов: 0,9 ЕД на 7 г — подан",
+            "Болюс с часов: 1,8 ЕД, доза владельца — подан",
+            "Болюс с часов: 0,7 ЕД на 15 г — исход не выяснен, часы сверяются с помпой",
+            "Болюс с часов: 0,7 ЕД на 10 г — FAILED: pump not reached",
+            "Часы без телефона: микродоза 0.1 ЕД. сахар 145, изменение +5 за 5 мин: прогноз 133 (после 60 мин), цель 117 — нужно 0.3 ЕД, микродоза 0.1 ЕД, базал 140 %",
+            "Часы без телефона: микродоза 0.0 ЕД — не выполнено (pump is Suspended, not ready for a bolus). сахар 139",
+            "", null
+        ).forEach { assertThat(ComboWatchPlugin.speaksOfInsulin(it)).isTrue() }
+        // What the watch noticed or did with the basal rate: the records the dose was calculated from are as they were.
+        listOf(
+            "Часы: Инсулин почти не действует: сахар 220 (+11 за 5 мин), за 2 ч подано 2.9 ЕД болюсами, прогноз обещал около 99 — по факту на 104 выше.",
+            "Часы: Инсулин действует хуже, чем ожидалось: сахар 181 (+3 за 5 мин), за 2 ч подано 3.7 ЕД болюсами, прогноз обещал около 39 — по факту на 142 выше.",
+            "Часы без телефона: сахар 108, изменение -6 за 5 мин: за 30 мин опустится до 72, цель 117 — базал остановлен",
+            "Часы без телефона: сахар 112, изменение +10 за 5 мин: прогноз 140 (после 60 мин), цель 117 — нужно 0.4 ЕД, базал 150 %",
+            "часы: Похоже на нагрузку: спорт с 14:43 (пульс 99 при покое 67). Дозы не меняются, пока хозяин не ответит на часах",
+            "Часы: владелец сменил набор/канюлю при сахаре 180; проверка через час"
+        ).forEach { assertThat(ComboWatchPlugin.speaksOfInsulin(it)).isFalse() }
+    }
+
+    @Test
     fun `a meal the watch dosed itself is read from its note, and only when the pump delivered`() {
         assertThat(ComboWatchPlugin.gramsCoveredOnTheWatch("Болюс с часов: 0,7 ЕД на 10 г — подан")).isEqualTo(10)
         assertThat(ComboWatchPlugin.gramsCoveredOnTheWatch("Болюс с часов: 2.3 ЕД на 35 г — подан")).isEqualTo(35)

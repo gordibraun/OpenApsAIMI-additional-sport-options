@@ -176,8 +176,8 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     // ---- rules on trial since 15.11.2026; see TrialRules ------------------------------------------------
     //
     // Both act on the finished decision and both say so: a «🧪 Проба» line in the reason of the run, a notice
-    // on the main screen, a note among the treatments and an event in TrialRules, which the main screen and the
-    // watch show. Each has its switch there; with it off, the rule is not even asked.
+    // on the main screen and an event in TrialRules, which the main screen and the watch show. Each has its
+    // switch there; with it off, the rule is not even asked.
 
     @Volatile private var lowForecastState = app.aaps.plugins.aps.openAPSAIMI.safety.LowForecastWarning.State()
     @Volatile private var capNotedForReadingAt = 0L
@@ -226,7 +226,6 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         capNotedForReadingAt = decision.newestAtEpochMs
         trials.add(app.aaps.core.objects.trials.TrialRules.KEY_CAP, now, text)
         uiInteraction.addNotificationValidFor(TRIAL_CAP_NOTIFICATION, "🧪 $text", app.aaps.core.interfaces.notifications.Notification.INFO, 30)
-        noteTrialAmongTreatments(now, text)
         return did
     }
 
@@ -252,22 +251,13 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
             TRIAL_WARN_NOTIFICATION, "🧪 $text",
             if (buzz) app.aaps.core.interfaces.notifications.Notification.NORMAL else app.aaps.core.interfaces.notifications.Notification.INFO, 30
         )
-        noteTrialAmongTreatments(now, text)
         return "forecast min ${warning.minMgdl}: said"
     }
 
-    /** A note beside the glucose curve, so that what a trial rule did can be read against what followed. */
-    private fun noteTrialAmongTreatments(now: Long, text: String) {
-        runCatching {
-            persistenceLayer.insertPumpTherapyEventIfNewByTimestamp(
-                therapyEvent = app.aaps.core.data.model.TE(
-                    timestamp = now, type = app.aaps.core.data.model.TE.Type.NOTE, duration = 0, note = text, glucoseUnit = GlucoseUnit.MGDL
-                ),
-                timestamp = now, action = app.aaps.core.data.ue.Action.CAREPORTAL, source = app.aaps.core.data.ue.Sources.Aaps, note = text,
-                listValues = listOf(app.aaps.core.data.ue.ValueWithUnit.Timestamp(now), app.aaps.core.data.ue.ValueWithUnit.TEType(app.aaps.core.data.model.TE.Type.NOTE))
-            ).blockingGet()
-        }.onFailure { aapsLogger.warn(LTag.APS, "Trial rule note not stored: ${it.javaClass.simpleName}: ${it.message}") }
-    }
+    // No note among the treatments. The first evening had one (15.11.2026 21:13): it was written three seconds into a
+    // meal calculation the owner had asked for on the watch, the wizard took it for a change in the records since
+    // the calculation, and the 3.7 U he confirmed were refused - he dosed on the pump by hand. What a rule did is
+    // kept in TrialRules, in the reason of the run and in the notice; that is enough to see it.
 
     private fun shouldDelayAimiForMissingMealContext(mealData: MealData, now: Long): Boolean {
         if (mealData.mealCOB > 1.0) return false

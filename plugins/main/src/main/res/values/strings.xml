@@ -411,14 +411,14 @@
     <string name="pump_refresh_button">Refresh from pump ×3</string>
     <string name="pump_refresh_hint">Refresh from pump: three quick taps</string>
     <string name="pump_refresh_reason">refresh by button</string>
-    <string name="pump_refresh_running">Reading the pump… Usually half a minute; up to two if the sensor is about to speak. Tap this line to hide it.</string>
-    <string name="pump_refresh_slow">No answer yet. The reading goes on; its result will show here.</string>
+    <string name="pump_refresh_running">Reading the pump… %1$d s. Usually half a minute; two or three if the sensor is about to speak: the pump waits for it. Tap this line to hide it.</string>
+    <string name="pump_refresh_slow">No answer yet, %1$d s. The reading goes on; its result will show here.</string>
     <string name="pump_refresh_done">Pump read at %1$s.</string>
     <string name="pump_refresh_failed">Pump not read. Nothing was changed on it.</string>
     <string name="trials_button">🧪 Trials %1$d/%2$d</string>
     <string name="trials_title">Rules on trial since %1$s</string>
     <string name="trials_intro">Each time a rule acts there is a «🧪 Проба» line in the loop\'s reason, a notice here, a note among the treatments, and a line in this list and in the watch\'s journal. A switch takes the rule back at once.</string>
-    <string name="trials_cap_explain">A rise that only one reading shows (or one seen across a missed reading) gets 0.5 U at most; the next reading, five minutes on, decides the rest. Acted in the last 24 h: %1$d.</string>
+    <string name="trials_cap_explain">A rise that only one reading shows (glucose was not rising before it) gets 0.5 U at most; the next reading decides the rest. A rise already under way is not cut, also when readings are missed in between. Acted in the last 24 h: %1$d.</string>
     <string name="trials_warn_title">Early warning of a forecast low</string>
     <string name="trials_warn_explain">The loop\'s own forecast below 55 within three hours, on two readings in a row. Replayed over four weeks: it would have fired 66 times and a low followed 8 of them; at night 14 and 3. So it is recorded only until you choose the buzz. Fired in the last 24 h: %1$d.</string>
     <string name="trials_warn_off">off</string>

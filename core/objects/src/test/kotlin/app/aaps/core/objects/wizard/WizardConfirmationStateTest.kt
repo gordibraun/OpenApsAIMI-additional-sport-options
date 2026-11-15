@@ -1,5 +1,8 @@
 package app.aaps.core.objects.wizard
 
+import app.aaps.core.data.model.GlucoseUnit
+import app.aaps.core.data.model.IDs
+import app.aaps.core.data.model.TE
 import com.google.common.truth.Truth.assertThat
 import org.junit.jupiter.api.Test
 
@@ -7,6 +10,38 @@ class WizardConfirmationStateTest {
     private val now = 1_000_000L
     // profileValues: carb ratio, basal, target, and last the sensitivity (the one compared with tolerance).
     private val inputs = WizardCalculationInputs(listOf(1L, 2L), "profile", listOf(8.0, 1.0, 117.0, 60.0), 100.0, null, 0L)
+
+    private fun event(id: Long, type: TE.Type, pumpSerial: String? = null, version: Int = 0, valid: Boolean = true) =
+        TE(id = id, version = version, isValid = valid, ids = IDs(pumpSerial = pumpSerial), timestamp = now, type = type, glucoseUnit = GlucoseUnit.MGDL)
+
+    // What the watch's driver answers: its own notes narrate, unless they speak of a dose (here: id 13).
+    private val watchNarrates: (TE) -> Boolean = { it.type == TE.Type.NOTE && it.ids.pumpSerial != null && it.id != 13L }
+    private val recordsAtCalculation = listOf(event(10, TE.Type.EXERCISE, pumpSerial = "PUMP"), event(11, TE.Type.NOTE))
+
+    @Test fun aNoteThatOnlyNarratesDoesNotRefuseTheConfirmedDose() {
+        // 15 Nov 2026 21:13: a note landed three seconds into a meal calculation; the 3.7 U confirmed on the watch were refused.
+        val atConfirmation = recordsAtCalculation + event(12, TE.Type.NOTE, pumpSerial = "PUMP")
+        val calculated = inputs.copy(historyIds = listOf(1L, 2L) + therapyEventsThatCount(recordsAtCalculation, watchNarrates))
+        val current = inputs.copy(historyIds = listOf(1L, 2L) + therapyEventsThatCount(atConfirmation, watchNarrates))
+        assertThat(WizardConfirmationState().claim(calculated, current, false, now, now)).isTrue()
+        // Without a driver that says so, any note counts, as it always did.
+        assertThat(therapyEventsThatCount(atConfirmation)).isNotEqualTo(therapyEventsThatCount(recordsAtCalculation))
+    }
+
+    @Test fun everyOtherTherapyEventStillRefusesTheDose() {
+        val before = therapyEventsThatCount(recordsAtCalculation, watchNarrates)
+        listOf(
+            recordsAtCalculation + event(13, TE.Type.NOTE, pumpSerial = "PUMP"),      // the watch's note about a dose
+            recordsAtCalculation + event(12, TE.Type.NOTE),                            // a note typed by hand
+            recordsAtCalculation + event(12, TE.Type.EXERCISE, pumpSerial = "PUMP"),   // an activity the watch reported
+            recordsAtCalculation + event(12, TE.Type.ANNOUNCEMENT),                    // an unclear bolus is announced this way
+            listOf(event(10, TE.Type.EXERCISE, pumpSerial = "PUMP", version = 1), event(11, TE.Type.NOTE)),   // edited
+            listOf(event(10, TE.Type.EXERCISE, pumpSerial = "PUMP", valid = false), event(11, TE.Type.NOTE)), // removed
+            listOf(event(11, TE.Type.NOTE))
+        ).forEach { assertThat(therapyEventsThatCount(it, watchNarrates)).isNotEqualTo(before) }
+        // The order the records are read in does not matter.
+        assertThat(therapyEventsThatCount(recordsAtCalculation.reversed(), watchNarrates)).isEqualTo(before)
+    }
 
     @Test fun unchangedCalculationCanBeSubmittedOnlyOnce() {
         val state = WizardConfirmationState()

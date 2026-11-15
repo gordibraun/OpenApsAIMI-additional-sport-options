@@ -13,12 +13,16 @@ import kotlin.math.max
  * half later although basal had been at zero for two hours.
  *
  * A rise is unconfirmed when the newest reading stands at least [MIN_STEP_MGDL_PER_5MIN] above the one before it,
- * counted per five minutes, and the step before that one is not known - a reading was missed, so the rise is
- * seen across a gap - or was no rise itself (at most [CONFIRMING_STEP_MGDL_PER_5MIN]).
+ * counted per five minutes, and the step before that one was no rise itself (at most
+ * [CONFIRMING_STEP_MGDL_PER_5MIN] per five minutes) or is not known. Both steps are counted per five minutes
+ * whatever lies between the readings, so a rise that has been going on stays confirmed when a reading or two
+ * were missed on the way. The first evening (15.11.2026) it was not so: any reading after a missed one counted
+ * as unconfirmed, the sensor was heard every ten minutes, and a rise of 189, 209, 220 was cut twice (0.7 and
+ * 1.1 U to 0.5) although three readings in a row showed it.
  *
- * Replayed over four weeks of this owner's data, 606 microboluses: 20 would have been cut. In 11 of them the
- * rise held ten minutes later, and the part above half a unit would have come five minutes late; in 6 glucose
- * had fallen back by then, two of those ending below 70.
+ * Replayed over four weeks of this owner's data, 606 microboluses: 13 would have been cut. In 7 of them the
+ * rise held ten minutes later, and the part above half a unit would have come with the next reading; in 4
+ * glucose had fallen back by then.
  *
  * It is not [SensorNoiseGuard] (wired in for a few hours on 14.11 and taken out): no dose is held back
  * altogether, basal is not touched, and a jump across a missed reading - which that guard could not see - is
@@ -53,6 +57,9 @@ object UnconfirmedRiseCap {
     /** Two readings further apart than this have a missed one between them. */
     private const val MISSED_READING_MS = 450_000L
 
+    /** The step before the newest is looked for this far back: two missed readings at most. */
+    private const val CONFIRMING_SPAN_MS = 16 * 60_000L
+
     /** A decision made on a reading older than this is not a decision on that reading's jump. */
     private const val NEWEST_MAX_AGE_MS = 7 * 60_000L
 
@@ -77,9 +84,10 @@ object UnconfirmedRiseCap {
         val step = (newest.mgdl - before.mgdl) / overMinutes * 5.0
         if (step < MIN_STEP_MGDL_PER_5MIN) return unchanged
         val acrossMissedReading = newest.atEpochMs - before.atEpochMs > MISSED_READING_MS
-        val earlier = points.getOrNull(points.size - 3)?.takeIf { before.atEpochMs - it.atEpochMs <= MISSED_READING_MS }
+        // The step before, per five minutes, across a missed reading or two if need be: a rise already under way confirms this one.
+        val earlier = points.getOrNull(points.size - 3)?.takeIf { before.atEpochMs - it.atEpochMs <= CONFIRMING_SPAN_MS }
         val stepBefore = earlier?.let { (before.mgdl - it.mgdl) / ((before.atEpochMs - it.atEpochMs) / 60_000.0) * 5.0 }
-        val confirmed = !acrossMissedReading && stepBefore != null && stepBefore > CONFIRMING_STEP_MGDL_PER_5MIN
+        val confirmed = stepBefore != null && stepBefore > CONFIRMING_STEP_MGDL_PER_5MIN
         if (confirmed) return unchanged
         // In steps the pump can give; what is left of the reading's share after what it has had already.
         val allowed = max(0.0, Math.floor((CAP_U - smbGivenSinceNewestU) * 10.0 + 1e-6) / 10.0)

@@ -60,6 +60,8 @@ class BolusWizardTest : TestBaseWithProfile() {
         whenever(activePlugin.activeAPS).thenReturn(openAPSSMBPlugin)
         whenever(preferences.get(StringKey.GeneralUnits)).thenReturn(GlucoseUnit.MMOL.asText)
         whenever(profileFunction.getUnits()).thenReturn(GlucoseUnit.MMOL)
+        // No therapy events unless a test files some.
+        whenever(persistenceLayer.getTherapyEventDataIncludingInvalidFromTime(any(), any())).thenReturn(io.reactivex.rxjava3.core.Single.just(emptyList()))
         // Isolate the wizard arithmetic; meal policy has its own tests.
         whenever(aimiMealAssist.evaluate(any())).thenAnswer {
             val input = it.getArgument<AimiMealInput>(0)
@@ -491,6 +493,10 @@ class BolusWizardTest : TestBaseWithProfile() {
             reads.incrementAndGet()
             42L
         }
+        whenever(persistenceLayer.getTherapyEventDataIncludingInvalidFromTime(any(), any())).thenAnswer {
+            check(Thread.currentThread() !== uiThread) { "Cannot access database on the main thread" }
+            io.reactivex.rxjava3.core.Single.just(emptyList<app.aaps.core.data.model.TE>())
+        }
         val wizard = BolusWizard(
             aapsLogger, rh, rxBus, preferences, profileFunction, profileUtil, constraintChecker, activePlugin,
             commandQueue, loop, iobCobCalculator, clock, config, uel, automation, glucoseStatusProvider, uiInteraction,
@@ -508,6 +514,53 @@ class BolusWizardTest : TestBaseWithProfile() {
         assertThat(reads.get()).isEqualTo(2)
         verify(aimiMealAssist).markTreatmentAccepted(1_000_000L)
         // This test only claims a local confirmation, never enqueues a physical treatment.
+        verify(commandQueue, never()).bolus(any(), anyOrNull())
+    }
+
+    @Test
+    fun aNoteTheWatchFiledSinceTheCalculationDoesNotRefuseTheDoseButItsNoteAboutADoseDoes() {
+        val profile = setupProfile(4.0, 8.0, 20.0, 10.0)
+        val clock = mock<app.aaps.core.interfaces.utils.DateUtil>()
+        whenever(clock.now()).thenReturn(1_000_000L)
+        whenever(profileFunction.getProfile()).thenReturn(profile)
+        whenever(profile.toPureNsJson(clock)).thenReturn(JSONObject("{\"profile\":\"stable\"}"))
+        // The watch's driver: its notes narrate unless they speak of a dose.
+        val pump = mock<app.aaps.core.interfaces.pump.Pump>(extraInterfaces = arrayOf(app.aaps.core.interfaces.pump.PumpNarration::class))
+        whenever(pump.pumpDescription).thenReturn(PumpDescription())
+        whenever((pump as app.aaps.core.interfaces.pump.PumpNarration).onlyNarrates(any())).thenAnswer {
+            it.getArgument<app.aaps.core.data.model.TE>(0).note?.startsWith("Болюс с часов") == false
+        }
+        whenever(activePlugin.activePump).thenReturn(pump)
+        val filed = mutableListOf<app.aaps.core.data.model.TE>()
+        whenever(persistenceLayer.getTherapyEventDataIncludingInvalidFromTime(any(), any())).thenAnswer { io.reactivex.rxjava3.core.Single.just(filed.toList()) }
+        fun note(id: Long, text: String) = app.aaps.core.data.model.TE(
+            id = id, timestamp = 999_000L, type = app.aaps.core.data.model.TE.Type.NOTE, note = text, glucoseUnit = GlucoseUnit.MGDL,
+            ids = app.aaps.core.data.model.IDs(pumpSerial = "PUMP")
+        )
+        fun calculated() = BolusWizard(
+            aapsLogger, rh, rxBus, preferences, profileFunction, profileUtil, constraintChecker, activePlugin,
+            commandQueue, loop, iobCobCalculator, clock, config, uel, automation, glucoseStatusProvider, uiInteraction,
+            persistenceLayer, decimalFormatter, processedDeviceStatusData, aimiMealAssist
+        ).doCalc(
+            profile, "test", null, 13, 0.0, 5.0, 0.0,
+            useBg = false, useCob = false, includeBolusIOB = false, includeBasalIOB = false,
+            useSuperBolus = false, useTT = false, useTrend = false, useAlarm = false
+        )
+        val confirm = BolusWizard::class.java.getDeclaredMethod("claimConfirmation", android.content.Context::class.java, Boolean::class.javaPrimitiveType, Function1::class.java)
+            .also { it.isAccessible = true }
+
+        // 15.11.2026 21:13: a note landed three seconds into the calculation of a meal the owner then confirmed on the watch.
+        val meal = calculated()
+        assertThat(meal.insulinAfterConstraints).isGreaterThan(0.0)
+        filed += note(1, "Часы: Инсулин почти не действует: сахар 220 (+11 за 5 мин), за 2 ч подано 2.9 ЕД болюсами")
+        assertThat(confirm.invoke(meal, null, true, null)).isEqualTo(1_000_000L)
+
+        // A dose given on the watch whose outcome is not known is another matter: the dose on the screen does not count it.
+        val next = calculated()
+        filed += note(2, "Болюс с часов: 0,7 ЕД на 15 г — исход не выяснен, часы сверяются с помпой")
+        val refusals = mutableListOf<String>()
+        assertThat(confirm.invoke(next, null, true, { reason: String -> refusals += reason; Unit })).isNull()
+        assertThat(refusals).hasSize(1)
         verify(commandQueue, never()).bolus(any(), anyOrNull())
     }
 
