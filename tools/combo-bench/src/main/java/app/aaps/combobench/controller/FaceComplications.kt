@@ -21,8 +21,7 @@ import androidx.wear.watchface.complications.datasource.ComplicationDataSourceSe
 import androidx.wear.watchface.complications.datasource.ComplicationDataSourceUpdateRequester
 import androidx.wear.watchface.complications.datasource.ComplicationRequest
 import app.aaps.combobench.BuildConfig
-import app.aaps.combobench.ControlLogActivity
-import app.aaps.combobench.ManualPumpSetupActivity
+import app.aaps.combobench.PumpTapGateActivity
 import app.aaps.pump.combowatch.executor.AutonomyPolicy
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -61,15 +60,18 @@ object FaceComplications {
         TimeDifferenceComplicationText.Builder(TimeDifferenceStyle.SHORT_SINGLE_UNIT, CountDownTimeReference(Instant.ofEpochMilli(epochMs)))
             .setMinimumTimeUnit(TimeUnit.MINUTES).build()
 
-    /** Opens the controller's screen: pump, mode, journal. */
-    internal fun openController(context: Context): PendingIntent = PendingIntent.getActivity(
-        context, 7, Intent(context, ManualPumpSetupActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
+    /**
+     * A tap opens the controller's screen: pump, mode, journal. Three quick taps read the pump instead
+     * («Обновить с помпы»); both go through [PumpTapGateActivity], which tells them apart.
+     */
+    internal fun openController(context: Context): PendingIntent = throughTheGate(context, 7, PumpTapGateActivity.PLAIN_CONTROLLER)
 
-    /** Opens the log of who led the basal when, and what the watch decided by itself. */
-    internal fun openLog(context: Context): PendingIntent = PendingIntent.getActivity(
-        context, 8, Intent(context, ControlLogActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    /** A tap opens the log of who led the basal when, and what the watch decided by itself; three quick taps read the pump. */
+    internal fun openLog(context: Context): PendingIntent = throughTheGate(context, 8, PumpTapGateActivity.PLAIN_LOG)
+
+    private fun throughTheGate(context: Context, requestCode: Int, plain: String): PendingIntent = PendingIntent.getActivity(
+        context, requestCode,
+        Intent(context, PumpTapGateActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra(PumpTapGateActivity.EXTRA_PLAIN, plain),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 

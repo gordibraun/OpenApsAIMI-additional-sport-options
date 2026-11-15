@@ -11,6 +11,7 @@ import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.objects.activity.ActivityPlanCalculator
+import app.aaps.core.objects.trials.TrialRules
 import app.aaps.pump.combowatch.protocol.RegulationSnapshot
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -31,7 +32,8 @@ class RegulationSnapshotBuilder @Inject constructor(
     private val iobCobCalculator: dagger.Lazy<IobCobCalculator>,
     private val persistenceLayer: dagger.Lazy<PersistenceLayer>,
     private val pumpSync: PumpSync,
-    private val aapsLogger: AAPSLogger
+    private val aapsLogger: AAPSLogger,
+    private val context: android.content.Context
 ) {
 
     @Volatile private var built: RegulationSnapshot? = null
@@ -67,9 +69,23 @@ class RegulationSnapshotBuilder @Inject constructor(
             cobG = maxOf(snapshot.cobG, carbohydratesOnBoardNow()),
             activities = activities,
             cancelledActivityStarts = cancelledActivities(activities, nowEpochMs),
-            lastCarbsAtEpochMs = lastCarbsEntered(nowEpochMs)
+            lastCarbsAtEpochMs = lastCarbsEntered(nowEpochMs),
+            trials = trialsNow(nowEpochMs)
         )
     }
+
+    /**
+     * The rules on trial as they stand on this phone, with what they did in the last day: the watch shows the
+     * same list and buzzes for the early warning when the owner has switched that on. See [TrialRules].
+     */
+    private fun trialsNow(nowEpochMs: Long): RegulationSnapshot.Trials? = runCatching {
+        val rules = TrialRules.get(context)
+        RegulationSnapshot.Trials(
+            capOn = rules.capEnabled,
+            warnMode = rules.warnMode.name,
+            notes = rules.events(nowEpochMs - TRIAL_NOTES_KEPT_MS).takeLast(TRIAL_NOTES_MAX).map { RegulationSnapshot.Trials.Note(it.key, it.atEpochMs, it.text) }
+        )
+    }.onFailure { aapsLogger.debug(LTag.PUMP, "combowatch: trial rules not read for the snapshot: ${it.message}") }.getOrNull()
 
     /**
      * When carbohydrates were last entered on this phone - by the wizard, the photo tab, the watch's
@@ -189,6 +205,10 @@ class RegulationSnapshotBuilder @Inject constructor(
 
         /** Without the phone for longer than this the watch stops acting on what the phone last knew. */
         const val VALID_FOR_MS = 24 * 60 * 60_000L
+
+        /** What the trial rules did in the last day goes to the watch, the newest few. */
+        private const val TRIAL_NOTES_KEPT_MS = 24 * 60 * 60_000L
+        private const val TRIAL_NOTES_MAX = 8
 
         /** How far back the last entry of carbohydrates is looked for. */
         private const val LAST_CARBS_LOOKBACK_MS = 6 * 60 * 60_000L

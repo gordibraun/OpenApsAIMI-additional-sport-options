@@ -67,6 +67,11 @@ class ControlLogActivity : Activity() {
         val host = ControllerHost.get(this)
         val now = System.currentTimeMillis()
         runCatching { host.faceFacts() }.getOrNull()?.let { line(summary(it, now), 13f, Color.rgb(255, 195, 50)) }
+        // The phone's rules on trial, as its last lease said them: that they exist, and which are on.
+        runCatching { host.autonomy.snapshot()?.trials }.getOrNull()?.let { trials ->
+            line("Пробы с 15.11 (выключаются на телефоне: главный экран → «Пробы»):", 12f, Color.GRAY)
+            app.aaps.combobench.controller.TrialNotes.state(trials).forEach { line(it, 12f, Color.rgb(190, 160, 255)) }
+        }
         // Before a dose: what the pump's own history holds that nobody has read yet (a bolus given with its buttons).
         column.addView(android.widget.Button(this).apply {
             text = "Обновить с помпы"; textSize = 13f; isAllCaps = false
@@ -125,7 +130,8 @@ class ControlLogActivity : Activity() {
         val text = entry.optString("text")
         val action = entry.optString("action")
         val outcome = when {
-            action == "ACTIVITY" || action == "BOLUS" || action == "BOLUS_ADVICE" -> ""
+            // Only a basal decision has an outcome to add; everything else in the journal is a line that says it all.
+            action != "LEAVE" && !action.startsWith("TBR ")                   -> ""
             action == "LEAVE"                        -> {
                 val hold = entry.optString("hold").takeIf { it.isNotBlank() && it != "null" }
                 if (hold != null) " Оставили как есть: $hold." else " Ничего менять не нужно."

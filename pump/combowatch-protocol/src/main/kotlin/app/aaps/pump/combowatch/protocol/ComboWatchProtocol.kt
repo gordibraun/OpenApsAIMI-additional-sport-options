@@ -596,8 +596,42 @@ data class RegulationSnapshot(
      * not say. For the watch's «инсулин действует хуже» check: a meal the phone has dosed shows as no
      * carbohydrates on board ([cobG] 0) while it is still being absorbed (14.11.2026 21:42).
      */
-    val lastCarbsAtEpochMs: Long? = null
+    val lastCarbsAtEpochMs: Long? = null,
+    /**
+     * The rules on trial on the phone - which are on, and what they did lately - so that the watch shows the
+     * same and, for the early warning, buzzes when the owner has asked for that. Null from a phone that has none.
+     */
+    val trials: Trials? = null
 ) {
+
+    /**
+     * Rules on trial (15.11.2026): the cap on the first microbolus of an unconfirmed rise, and the early warning
+     * of a forecast low with its mode (OFF, RECORD, BUZZ). [notes] are the last things they did, oldest first.
+     */
+    data class Trials(val capOn: Boolean, val warnMode: String, val notes: List<Note> = emptyList()) {
+
+        data class Note(val key: String, val atEpochMs: Long, val text: String)
+
+        fun toJson(): JSONObject = JSONObject().put("cap", capOn).put("warn", warnMode)
+            .put("notes", JSONArray().apply { notes.forEach { put(JSONObject().put("key", it.key).put("at", it.atEpochMs).put("text", it.text)) } })
+
+        companion object {
+
+            const val KEY_CAP = "unconfirmed-rise-cap"
+            const val KEY_WARN = "low-forecast-warning"
+            const val WARN_OFF = "OFF"
+            const val WARN_RECORD = "RECORD"
+            const val WARN_BUZZ = "BUZZ"
+
+            fun fromJson(json: JSONObject) = Trials(
+                capOn = json.optBoolean("cap", false),
+                warnMode = json.optString("warn", WARN_OFF),
+                notes = json.optJSONArray("notes")?.let { array ->
+                    List(array.length()) { array.getJSONObject(it) }.map { Note(it.getString("key"), it.getLong("at"), it.getString("text")) }
+                } ?: emptyList()
+            )
+        }
+    }
 
     /** A temporary basal as an absolute rate, and when it was due to end. */
     data class AssumedTbr(val rateUph: Double, val endsAtEpochMs: Long)
@@ -643,6 +677,7 @@ data class RegulationSnapshot(
             if (activities.isNotEmpty()) put("activities", JSONArray().apply { activities.forEach { put(it.toJson()) } })
             if (cancelledActivityStarts.isNotEmpty()) put("cancelledActivities", JSONArray().apply { cancelledActivityStarts.forEach { put(it) } })
             lastCarbsAtEpochMs?.let { put("lastCarbsAt", it) }
+            trials?.let { put("trials", it.toJson()) }
         }
 
     companion object {
@@ -669,7 +704,8 @@ data class RegulationSnapshot(
             phoneForecast = json.optJSONArray("phoneForecast")?.let { array -> List(array.length()) { array.getInt(it) } },
             activities = json.optJSONArray("activities")?.let { array -> List(array.length()) { ActivityWindow.fromJson(array.getJSONObject(it)) } } ?: emptyList(),
             cancelledActivityStarts = json.optJSONArray("cancelledActivities")?.let { array -> List(array.length()) { array.getLong(it) } } ?: emptyList(),
-            lastCarbsAtEpochMs = if (json.has("lastCarbsAt")) json.optLong("lastCarbsAt").takeIf { it > 0L } else null
+            lastCarbsAtEpochMs = if (json.has("lastCarbsAt")) json.optLong("lastCarbsAt").takeIf { it > 0L } else null,
+            trials = json.optJSONObject("trials")?.let { runCatching { Trials.fromJson(it) }.getOrNull() }
         )
     }
 }

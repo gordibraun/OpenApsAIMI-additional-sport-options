@@ -60,7 +60,8 @@ class RegulationSnapshotBuilderTest : TestBaseWithProfile() {
         whenever(request.mealData).thenReturn(MealData().also { it.mealCOB = 12.0 })
 
         whenever(persistence.getTherapyEventDataFromTime(any(), any(), any())).thenReturn(emptyList())
-        builder = RegulationSnapshotBuilder({ loop }, { activePlugin }, { iobCobCalculator }, { persistence }, pumpSync, aapsLogger)
+        // The trial rules live in preferences; a context without any gives a snapshot without them, as an older phone would.
+        builder = RegulationSnapshotBuilder({ loop }, { activePlugin }, { iobCobCalculator }, { persistence }, pumpSync, aapsLogger, org.mockito.kotlin.mock())
     }
 
     private fun exercise(start: Long, note: String, valid: Boolean = true) =

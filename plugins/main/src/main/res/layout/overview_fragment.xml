@@ -112,6 +112,58 @@
                     android:textAppearance="?android:attr/textAppearanceSmall" />
             </LinearLayout>
 
+            <!-- «Обновить с помпы»: three quick taps have the pump read now, so that a bolus given with its own
+                 buttons is counted before the next dose (15.11.2026). Beside it, the rules on trial: which are
+                 on, what they did, and their switches. Below, what the last reading brought. -->
+            <LinearLayout
+                android:id="@+id/combo_tools_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:visibility="gone"
+                tools:visibility="visible">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/pump_refresh_button"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="3"
+                    android:layout_marginEnd="6dp"
+                    android:minHeight="40dp"
+                    android:insetTop="2dp"
+                    android:insetBottom="2dp"
+                    android:text="@string/pump_refresh_button"
+                    android:textAllCaps="false"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/trials_button"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="2"
+                    android:minHeight="40dp"
+                    android:insetTop="2dp"
+                    android:insetBottom="2dp"
+                    android:text="@string/trials_button"
+                    android:textAllCaps="false"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/pump_refresh_result"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:layout_marginBottom="2dp"
+                android:textAppearance="?android:attr/textAppearanceSmall"
+                android:visibility="gone" />
+
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/infoCard"
                 style="@style/Widget.MaterialComponents.CardView"

@@ -119,6 +119,7 @@ import app.aaps.core.objects.profile.ProfileSealed
 import app.aaps.core.objects.forecast.ForecastCarbsCalculator
 import app.aaps.core.objects.wizard.QuickWizard
 import app.aaps.core.ui.UIRunnable
+import app.aaps.core.objects.trials.TrialRules
 import app.aaps.core.ui.dialogs.OKDialog
 import app.aaps.core.ui.elements.SingleClickButton
 import app.aaps.core.ui.extensions.runOnUiThread
@@ -266,6 +267,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
         overview.setVersionView(binding.infoLayout.version)
         setupComboModeRow()
+        setupComboToolsRow()
         if (config.APS || config.PUMPCONTROL) {
             binding.infoLayout.version.setOnClickListener {
                 activity?.let { OKDialog.show(it, rh.gs(R.string.overview_release_title), rh.gs(R.string.overview_release_changes)) }
@@ -844,16 +846,129 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         }
     }
 
+    // ---- «Обновить с помпы» and the rules on trial ---------------------------------------------------
+    //
+    // The owner's words (15.11.2026): the button that has the pump read before a dose belongs on the main
+    // screen and works on three quick taps, like the other buttons on the watch's main screen. Beside it,
+    // the rules that are on trial, so that it is plain here that they exist, what they did and how to take
+    // them back.
+
+    /** When the reading now awaited was asked for; zero when none is. */
+    private var pumpRefreshAskedAt = 0L
+    private var pumpRefreshTaps = 0
+    private val pumpRefreshTapsExpire = Runnable {
+        if (pumpRefreshTaps in 1 until PUMP_REFRESH_TAPS) context?.let { android.widget.Toast.makeText(it, R.string.pump_refresh_hint, android.widget.Toast.LENGTH_SHORT).show() }
+        pumpRefreshTaps = 0
+    }
+
+    private fun setupComboToolsRow() {
+        binding.pumpRefreshButton.setOnClickListener { button ->
+            button.removeCallbacks(pumpRefreshTapsExpire)
+            if (++pumpRefreshTaps >= PUMP_REFRESH_TAPS) {
+                pumpRefreshTaps = 0
+                refreshFromPump()
+            } else button.postDelayed(pumpRefreshTapsExpire, PUMP_REFRESH_TAP_WINDOW_MS)
+        }
+        binding.pumpRefreshResult.setOnClickListener { it.visibility = View.GONE }
+        binding.trialsButton.setOnClickListener { showTrials() }
+    }
+
+    /** One reading of the pump through the queue; the active driver says what it brought, if it can. */
+    private fun refreshFromPump() {
+        val askedAt = System.currentTimeMillis()
+        pumpRefreshAskedAt = askedAt
+        binding.pumpRefreshButton.isEnabled = false
+        binding.pumpRefreshResult.visibility = View.VISIBLE
+        binding.pumpRefreshResult.text = rh.gs(R.string.pump_refresh_running)
+        val reporter = activePlugin.activePump as? app.aaps.core.interfaces.pump.PumpReadReporter
+        commandQueue.readStatus(rh.gs(R.string.pump_refresh_reason), object : app.aaps.core.interfaces.queue.Callback() {
+            override fun run() {
+                // On the queue's thread: the records are written by now, so the driver can count insulin on board.
+                val text = runCatching { reporter?.readReport(askedAt) }.getOrNull()
+                    ?: if (result.success) rh.gs(R.string.pump_refresh_done, dateUtil.timeString(dateUtil.now())) else rh.gs(R.string.pump_refresh_failed)
+                runOnUiThread { showPumpRefreshAnswer(askedAt, text) }
+            }
+        })
+        // A watch that never answers is given up on after twelve minutes; the button comes back long before.
+        binding.pumpRefreshButton.postDelayed({ showPumpRefreshAnswer(askedAt, rh.gs(R.string.pump_refresh_slow), keepWaiting = true) }, PUMP_REFRESH_SLOW_MS)
+    }
+
+    private fun showPumpRefreshAnswer(askedAt: Long, text: String, keepWaiting: Boolean = false) {
+        val binding = _binding ?: return
+        if (pumpRefreshAskedAt != askedAt) return
+        if (!keepWaiting) pumpRefreshAskedAt = 0L
+        binding.pumpRefreshButton.isEnabled = true
+        binding.pumpRefreshResult.visibility = View.VISIBLE
+        binding.pumpRefreshResult.text = text
+    }
+
+    private fun updateTrialsButton() {
+        val binding = _binding ?: return
+        val trials = runCatching { TrialRules.get(binding.root.context) }.getOrNull() ?: return
+        val on = (if (trials.capEnabled) 1 else 0) + (if (trials.warnMode != TrialRules.WarnMode.OFF) 1 else 0)
+        binding.trialsButton.text = rh.gs(R.string.trials_button, on, 2)
+    }
+
+    /** The rules on trial: what each does, its switch, and what they did lately. */
+    private fun showTrials() {
+        val activity = activity ?: return
+        val trials = runCatching { TrialRules.get(activity) }.getOrNull() ?: return
+        val dayAgo = System.currentTimeMillis() - 24 * 60 * 60_000L
+        val dp = resources.displayMetrics.density
+        fun text(value: String, sp: Float, bold: Boolean = false) = TextView(activity).apply {
+            text = value; textSize = sp
+            if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, (6 * dp).toInt(), 0, (2 * dp).toInt())
+        }
+        val column = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((20 * dp).toInt(), (8 * dp).toInt(), (20 * dp).toInt(), (8 * dp).toInt())
+        }
+        column.addView(text(rh.gs(R.string.trials_intro), 13f))
+        column.addView(androidx.appcompat.widget.SwitchCompat(activity).apply {
+            text = TrialRules.name(TrialRules.KEY_CAP); textSize = 15f
+            isChecked = trials.capEnabled
+            setOnCheckedChangeListener { _, checked -> trials.capEnabled = checked; updateTrialsButton() }
+        })
+        column.addView(text(rh.gs(R.string.trials_cap_explain, trials.timesActed(TrialRules.KEY_CAP, dayAgo)), 13f))
+        column.addView(text(rh.gs(R.string.trials_warn_title), 15f, bold = true))
+        column.addView(android.widget.RadioGroup(activity).apply {
+            val modes = listOf(
+                TrialRules.WarnMode.OFF to R.string.trials_warn_off, TrialRules.WarnMode.RECORD to R.string.trials_warn_record, TrialRules.WarnMode.BUZZ to R.string.trials_warn_buzz
+            )
+            val ids = modes.map { (mode, label) ->
+                android.widget.RadioButton(activity).apply { id = View.generateViewId(); text = rh.gs(label); textSize = 14f }.also { addView(it) }.id to mode
+            }
+            check(ids.first { it.second == trials.warnMode }.first)
+            setOnCheckedChangeListener { _, checkedId ->
+                ids.firstOrNull { it.first == checkedId }?.second?.takeIf { it != trials.warnMode }?.let { trials.warnMode = it; updateTrialsButton() }
+            }
+        })
+        column.addView(text(rh.gs(R.string.trials_warn_explain, trials.timesActed(TrialRules.KEY_WARN, dayAgo)), 13f))
+        column.addView(text(rh.gs(R.string.trials_events_title), 15f, bold = true))
+        val events = trials.events().takeLast(TRIAL_EVENTS_SHOWN).asReversed()
+        if (events.isEmpty()) column.addView(text(rh.gs(R.string.trials_events_none), 13f))
+        else events.forEach { column.addView(text("${dateUtil.dateAndTimeString(it.atEpochMs)} — ${it.text}", 13f)) }
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(activity)
+            .setTitle(rh.gs(R.string.trials_title, TrialRules.SINCE))
+            .setView(android.widget.ScrollView(activity).apply { addView(column) })
+            .setPositiveButton(app.aaps.core.ui.R.string.ok, null)
+            .show()
+    }
+
     private fun updateComboModeRow() {
         val binding = _binding ?: return
         val direct = comboDirectDriver
         val watch = comboWatchDriver
         if (direct == null || watch == null) {
             binding.comboModeRow.visibility = View.GONE
+            binding.comboToolsRow.visibility = View.GONE
             return
         }
         val active = activePlugin.activePump
         binding.comboModeRow.visibility = View.VISIBLE
+        binding.comboToolsRow.visibility = View.VISIBLE
+        updateTrialsButton()
         binding.comboModeSwitch.isChecked = active === watch
         binding.comboModeText.text = when {
             active === watch  -> rh.gs(R.string.combo_mode_watch)
@@ -2202,5 +2317,13 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
 
         /** The driver that has always driven the Combo from the phone. */
         private const val COMBO_DIRECT_DRIVER = "ComboV2Plugin"
+
+        /** «Обновить с помпы» answers to this many taps, each within the window of the one before. */
+        private const val PUMP_REFRESH_TAPS = 3
+        private const val PUMP_REFRESH_TAP_WINDOW_MS = 700L
+
+        /** After this long without an answer the button is given back; the reading goes on in the queue. */
+        private const val PUMP_REFRESH_SLOW_MS = 3 * 60_000L
+        private const val TRIAL_EVENTS_SHOWN = 12
     }
 }

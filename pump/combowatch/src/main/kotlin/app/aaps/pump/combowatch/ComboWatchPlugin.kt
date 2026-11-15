@@ -90,7 +90,8 @@ class ComboWatchPlugin @Inject constructor(
     private val uiInteraction: UiInteraction,
     private val pumpEnactResultProvider: Provider<PumpEnactResult>,
     private val snapshots: RegulationSnapshotBuilder,
-    private val persistenceLayer: PersistenceLayer
+    private val persistenceLayer: PersistenceLayer,
+    private val iobCobCalculator: dagger.Lazy<app.aaps.core.interfaces.iob.IobCobCalculator>
 ) : PumpPluginBase(
     pluginDescription = PluginDescription()
         .mainType(PluginType.PUMP)
@@ -99,7 +100,7 @@ class ComboWatchPlugin @Inject constructor(
         .description(R.string.combowatch_plugin_description),
     ownPreferences = emptyList(),
     aapsLogger, rh, preferences, commandQueue
-), Pump {
+), Pump, app.aaps.core.interfaces.pump.PumpReadReporter {
 
     private var scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var leaseJob: Job? = null
@@ -154,6 +155,40 @@ class ComboWatchPlugin @Inject constructor(
     /** Boluses filed since [sinceEpochMs] that the records did not hold before; what a reading of the pump brought. */
     fun bolusesLearnedSince(sinceEpochMs: Long): List<LearnedBolus> =
         synchronized(learnedBoluses) { learnedBoluses.filter { it.learnedAtEpochMs >= sinceEpochMs } }
+
+    /**
+     * What the reading the owner asked for at [askedAtEpochMs] brought, for the screens with «Обновить с помпы»:
+     * whether the pump was read, the boluses that were new to the records, and insulin on board with them in it.
+     */
+    override fun readReport(askedAtEpochMs: Long): String {
+        val read = lastStatusRead?.takeIf { it.startedAtEpochMs >= askedAtEpochMs - READ_CLOCK_SLACK_MS }
+            ?: return rh.gs(R.string.combomode_refresh_busy)
+        val clock = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+        if (read.outcome != Outcome.DONE) {
+            val reason = read.reason.orEmpty()
+            val why = when {
+                reason.contains("watch unreachable")                         -> rh.gs(R.string.combomode_refresh_no_watch)
+                reason.startsWith("pump not reached")                        -> rh.gs(R.string.combomode_refresh_no_pump)
+                reason.contains("busy") || reason.contains("bench is using") -> rh.gs(R.string.combomode_refresh_watch_busy)
+                reason.contains("no answer from the watch")                  -> rh.gs(R.string.combomode_refresh_no_answer)
+                else                                                         -> rh.gs(R.string.combomode_refresh_other)
+            }
+            return rh.gs(R.string.combomode_refresh_not_read, why, reason)
+        }
+        val lines = mutableListOf(rh.gs(R.string.combomode_refresh_read, clock.format(java.util.Date(read.finishedAtEpochMs)), (read.finishedAtEpochMs - read.startedAtEpochMs) / 1000))
+        val found = bolusesLearnedSince(askedAtEpochMs)
+        lines += if (found.isEmpty()) rh.gs(R.string.combomode_refresh_nothing_new)
+        else rh.gs(
+            R.string.combomode_refresh_found,
+            found.joinToString("; ") { rh.gs(if (it.smb) R.string.combomode_refresh_bolus_smb else R.string.combomode_refresh_bolus, it.units, clock.format(java.util.Date(it.timestampEpochMs))) }
+        )
+        runCatching {
+            val bolus = iobCobCalculator.get().calculateIobFromBolus().iob
+            val basal = iobCobCalculator.get().calculateIobFromTempBasalsIncludingConvertedExtended().basaliob
+            lines += rh.gs(R.string.combomode_refresh_iob, bolus + basal, bolus, basal)
+        }
+        return lines.joinToString("\n")
+    }
 
     private fun rememberLearned(event: PumpEvent, amount: Double) = synchronized(learnedBoluses) {
         learnedBoluses.addLast(LearnedBolus(System.currentTimeMillis(), event.timestampEpochMs, amount, event.bolusKind == BolusKind.SMB))
@@ -992,6 +1027,9 @@ class ComboWatchPlugin @Inject constructor(
         }
 
         private const val UNKNOWN_SERIAL = "неизвестна"
+
+        /** The driver stamps the start of a reading a moment after the button's press was noted. */
+        private const val READ_CLOCK_SLACK_MS = 2_000L
 
         /** A day's worth and more; the owner's screen only asks for the last minutes. */
         private const val MAX_LEARNED_BOLUSES = 100

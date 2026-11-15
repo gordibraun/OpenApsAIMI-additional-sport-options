@@ -45,6 +45,9 @@ import javax.inject.Inject
  * the phone missed - say, boluses the pump reported while AAPS was turning its history away.
  * Records are keyed on the pump's own ids, so one filed twice is filed once.
  *
+ * And `--es cmd TRIAL_NOTE [--es text '...']` puts a test line through the path of the rules on trial (main
+ * screen list, lease, watch journal and notice); it changes no dose and counts as neither rule acting.
+ *
  * The answer is written to files/combowatch-debug.json.
  */
 class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
@@ -62,6 +65,17 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
         if (cmd == "LINK_RESET") {
             plugin.forceLinkReset(intent.getStringExtra("reason") ?: "проверка с adb")
             val answer = JSONObject().put("tag", tag).put("cmd", cmd).put("asked", true)
+            runCatching { out.writeText(answer.toString()) }
+            aapsLogger.info(LTag.PUMP, "combowatch debug: $answer")
+            return
+        }
+        if (cmd == "TRIAL_NOTE") {
+            // A line through the trial rules' own path - the main screen's list, the next lease, the watch's journal and
+            // notice - to see that the path works without waiting for a rule to act. Filed under a key of its own, so it
+            // is not counted as either rule acting.
+            val text = intent.getStringExtra("text") ?: "Проверка: правила на пробе видны на телефоне и на часах (тестовая запись, доз не меняет)"
+            runCatching { app.aaps.core.objects.trials.TrialRules.get(context).add("test", System.currentTimeMillis(), text) }
+            val answer = JSONObject().put("tag", tag).put("cmd", cmd).put("noted", true)
             runCatching { out.writeText(answer.toString()) }
             aapsLogger.info(LTag.PUMP, "combowatch debug: $answer")
             return

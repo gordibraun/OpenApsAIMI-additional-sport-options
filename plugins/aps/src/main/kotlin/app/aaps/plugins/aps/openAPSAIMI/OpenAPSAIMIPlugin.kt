@@ -173,6 +173,102 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         )
     }
 
+    // ---- rules on trial since 15.11.2026; see TrialRules ------------------------------------------------
+    //
+    // Both act on the finished decision and both say so: a «🧪 Проба» line in the reason of the run, a notice
+    // on the main screen, a note among the treatments and an event in TrialRules, which the main screen and the
+    // watch show. Each has its switch there; with it off, the rule is not even asked.
+
+    @Volatile private var lowForecastState = app.aaps.plugins.aps.openAPSAIMI.safety.LowForecastWarning.State()
+    @Volatile private var capNotedForReadingAt = 0L
+
+    private fun applyTrialRules(result: app.aaps.core.interfaces.aps.RT, readingAtEpochMs: Long, now: Long) {
+        val trials = runCatching { app.aaps.core.objects.trials.TrialRules.get(context) }.getOrNull() ?: return
+        val cap =
+            if (!trials.capEnabled) "off"
+            else runCatching { capFirstMicrobolusOnUnconfirmedRise(result, now, trials) }
+                .onFailure { aapsLogger.warn(LTag.APS, "Trial rule, unconfirmed rise cap: ${it.javaClass.simpleName}: ${it.message}") }
+                .getOrDefault("failed")
+        val warning =
+            if (trials.warnMode == app.aaps.core.objects.trials.TrialRules.WarnMode.OFF) "off"
+            else runCatching { noteLowForecast(result, readingAtEpochMs, now, trials) }
+                .onFailure { aapsLogger.warn(LTag.APS, "Trial rule, low forecast warning: ${it.javaClass.simpleName}: ${it.message}") }
+                .getOrDefault("failed")
+        // One line per run, so that the log shows the rules were asked and what each made of the run.
+        aapsLogger.debug(LTag.APS, "Trial rules: unconfirmed rise cap: $cap; low forecast warning (${trials.warnMode}): $warning")
+    }
+
+    /** See [app.aaps.plugins.aps.openAPSAIMI.safety.UnconfirmedRiseCap]. */
+    private fun capFirstMicrobolusOnUnconfirmedRise(result: app.aaps.core.interfaces.aps.RT, now: Long, trials: app.aaps.core.objects.trials.TrialRules): String {
+        val asked = result.units ?: 0.0
+        if (asked <= 0.0) return "no microbolus asked"
+        val readings = persistenceLayer.getBgReadingsDataFromTimeToTime(now - 40 * 60_000L, now + 60_000L, true)
+            .filter { it.isValid }.map { app.aaps.plugins.aps.openAPSAIMI.safety.UnconfirmedRiseCap.Reading(it.timestamp, it.value) }
+        val newestAt = readings.maxOfOrNull { it.atEpochMs } ?: return "no readings"
+        // What this very reading has had already: its share is half a unit in all, however often the loop runs on it.
+        val given = persistenceLayer.getBolusesFromTimeToTime(newestAt, now + 60_000L, true)
+            .filter { it.isValid && it.type == app.aaps.core.data.model.BS.Type.SMB }.sumOf { it.amount }
+        val decision = app.aaps.plugins.aps.openAPSAIMI.safety.UnconfirmedRiseCap.evaluate(readings, now, asked, given)
+        if (!decision.capped) return "${"%.2f".format(asked)} U left as asked"
+        result.units = decision.smbU
+        val how = if (decision.acrossMissedReading) "после пропущенного показания (за ${"%.0f".format(decision.overMinutes)} мин)" else "в одном показании"
+        val text = "Проба: микродоза ${"%.1f".format(asked)} → ${"%.1f".format(decision.smbU)} ЕД. Подъём +${"%.0f".format(decision.stepMgdlPer5Min)} за 5 мин виден только $how; " +
+            "остальное решит следующее показание"
+        result.reason.append("\n🧪 ").append(text).append(" (правило с ").append(app.aaps.core.objects.trials.TrialRules.SINCE).append(", выключается на главном экране: «Пробы»)")
+        aapsLogger.info(
+            LTag.APS,
+            "Unconfirmed rise cap: SMB ${"%.2f".format(asked)} -> ${"%.2f".format(decision.smbU)} U (step ${"%.1f".format(decision.stepMgdlPer5Min)} per 5 min over " +
+                "${"%.1f".format(decision.overMinutes)} min, missed reading ${decision.acrossMissedReading}, given since the reading ${"%.2f".format(given)} U)"
+        )
+        val did = "${"%.2f".format(asked)} -> ${"%.2f".format(decision.smbU)} U"
+        // Said once per reading: the loop may look at the same reading more than once.
+        if (capNotedForReadingAt == decision.newestAtEpochMs) return "$did (said before for this reading)"
+        capNotedForReadingAt = decision.newestAtEpochMs
+        trials.add(app.aaps.core.objects.trials.TrialRules.KEY_CAP, now, text)
+        uiInteraction.addNotificationValidFor(TRIAL_CAP_NOTIFICATION, "🧪 $text", app.aaps.core.interfaces.notifications.Notification.INFO, 30)
+        noteTrialAmongTreatments(now, text)
+        return did
+    }
+
+    /** See [app.aaps.plugins.aps.openAPSAIMI.safety.LowForecastWarning]. */
+    private fun noteLowForecast(result: app.aaps.core.interfaces.aps.RT, readingAtEpochMs: Long, now: Long, trials: app.aaps.core.objects.trials.TrialRules): String {
+        val series = result.predBGs?.AIMI_FINAL?.takeIf { it.isNotEmpty() } ?: return "no forecast"
+        val verdict = app.aaps.plugins.aps.openAPSAIMI.safety.LowForecastWarning.evaluate(
+            lowForecastState, app.aaps.plugins.aps.openAPSAIMI.safety.LowForecastWarning.Run(now, readingAtEpochMs, series)
+        )
+        lowForecastState = verdict.state
+        val low = series.take(app.aaps.plugins.aps.openAPSAIMI.safety.LowForecastWarning.HORIZON_MIN / 5 + 1).minOrNull()
+        val warning = verdict.warning ?: return "forecast min $low, nothing to say"
+        val buzz = trials.warnMode == app.aaps.core.objects.trials.TrialRules.WarnMode.BUZZ
+        val grams = (result.carbsReq ?: 0).takeIf { it > 0 }
+        val text = "Проба: прогноз цикла опускается до ${warning.minMgdl} через ${warning.minInMinutes} мин" +
+            (warning.below70InMinutes?.let { ", ниже 70 — через $it мин" } ?: "") +
+            (grams?.let { "; цикл просит $it г углеводов" } ?: "") +
+            (if (buzz) ". Часы жужжат" else ". Только запись, часы не жужжат")
+        result.reason.append("\n🧪 ").append(text).append(" (правило с ").append(app.aaps.core.objects.trials.TrialRules.SINCE).append(", «Пробы» на главном экране)")
+        aapsLogger.info(LTag.APS, "Low forecast warning: min ${warning.minMgdl} in ${warning.minInMinutes} min, below 70 in ${warning.below70InMinutes ?: -1} min, carbs asked ${grams ?: 0} g, buzz $buzz")
+        trials.add(app.aaps.core.objects.trials.TrialRules.KEY_WARN, now, text)
+        uiInteraction.addNotificationValidFor(
+            TRIAL_WARN_NOTIFICATION, "🧪 $text",
+            if (buzz) app.aaps.core.interfaces.notifications.Notification.NORMAL else app.aaps.core.interfaces.notifications.Notification.INFO, 30
+        )
+        noteTrialAmongTreatments(now, text)
+        return "forecast min ${warning.minMgdl}: said"
+    }
+
+    /** A note beside the glucose curve, so that what a trial rule did can be read against what followed. */
+    private fun noteTrialAmongTreatments(now: Long, text: String) {
+        runCatching {
+            persistenceLayer.insertPumpTherapyEventIfNewByTimestamp(
+                therapyEvent = app.aaps.core.data.model.TE(
+                    timestamp = now, type = app.aaps.core.data.model.TE.Type.NOTE, duration = 0, note = text, glucoseUnit = GlucoseUnit.MGDL
+                ),
+                timestamp = now, action = app.aaps.core.data.ue.Action.CAREPORTAL, source = app.aaps.core.data.ue.Sources.Aaps, note = text,
+                listValues = listOf(app.aaps.core.data.ue.ValueWithUnit.Timestamp(now), app.aaps.core.data.ue.ValueWithUnit.TEType(app.aaps.core.data.model.TE.Type.NOTE))
+            ).blockingGet()
+        }.onFailure { aapsLogger.warn(LTag.APS, "Trial rule note not stored: ${it.javaClass.simpleName}: ${it.message}") }
+    }
+
     private fun shouldDelayAimiForMissingMealContext(mealData: MealData, now: Long): Boolean {
         if (mealData.mealCOB > 1.0) return false
         val currentCob = try {
@@ -973,6 +1069,8 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
                 dynIsfMode = dynIsfMode,
                 uiInteraction = uiInteraction
             ).also {
+                // Rules on trial have the last word on the microbolus, before the decision is kept and enacted.
+                applyTrialRules(it, glucoseStatus.date, now)
                 val determineBasalResult = apsResultProvider.get().with(it)
                 // Preserve input data
                 determineBasalResult.inputConstraints = inputConstraints
@@ -1710,3 +1808,7 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
         }
     }
 }
+
+/** The trial rules' notices on the main screen: ids of their own, so that one does not push another message out. */
+private const val TRIAL_CAP_NOTIFICATION = 9741
+private const val TRIAL_WARN_NOTIFICATION = 9742

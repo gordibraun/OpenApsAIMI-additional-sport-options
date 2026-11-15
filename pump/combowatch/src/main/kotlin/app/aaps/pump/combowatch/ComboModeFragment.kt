@@ -15,7 +15,6 @@ import androidx.appcompat.widget.SwitchCompat
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.interfaces.configuration.ConfigBuilder
-import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.plugin.ActivePlugin
@@ -28,7 +27,6 @@ import app.aaps.core.interfaces.notifications.Notification
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.ui.dialogs.OKDialog
-import app.aaps.pump.combowatch.protocol.Outcome
 import dagger.android.support.DaggerFragment
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -62,7 +60,6 @@ class ComboModeFragment : DaggerFragment() {
     @Inject lateinit var link: ComboWatchLink
     @Inject lateinit var uiInteraction: UiInteraction
     @Inject lateinit var commandQueue: CommandQueue
-    @Inject lateinit var iobCobCalculator: IobCobCalculator
 
     private lateinit var refresh: Button
     private lateinit var refreshResult: TextView
@@ -150,7 +147,7 @@ class ComboModeFragment : DaggerFragment() {
         commandQueue.readStatus(rh.gs(R.string.combomode_refresh_reason), object : Callback() {
             override fun run() {
                 // On the queue's thread: the records are already written, so insulin on board is counted here.
-                val text = runCatching { refreshAnswer(askedAt) }.getOrElse { rh.gs(R.string.combomode_refresh_failed, it.message ?: it.javaClass.simpleName) }
+                val text = runCatching { watchDriver.readReport(askedAt) }.getOrElse { rh.gs(R.string.combomode_refresh_failed, it.message ?: it.javaClass.simpleName) }
                 handler.post { showRefreshAnswer(askedAt, text) }
             }
         })
@@ -164,35 +161,6 @@ class ComboModeFragment : DaggerFragment() {
         refresh.isEnabled = true
         refreshResult.text = text
         renderLink()
-    }
-
-    private fun refreshAnswer(askedAt: Long): String {
-        val read = watchDriver.lastStatusRead?.takeIf { it.startedAtEpochMs >= askedAt - REFRESH_CLOCK_SLACK_MS }
-            ?: return rh.gs(R.string.combomode_refresh_busy)
-        if (read.outcome != Outcome.DONE) {
-            val reason = read.reason.orEmpty()
-            val why = when {
-                reason.contains("watch unreachable")         -> rh.gs(R.string.combomode_refresh_no_watch)
-                reason.startsWith("pump not reached")        -> rh.gs(R.string.combomode_refresh_no_pump)
-                reason.contains("busy") || reason.contains("bench is using") -> rh.gs(R.string.combomode_refresh_watch_busy)
-                reason.contains("no answer from the watch") -> rh.gs(R.string.combomode_refresh_no_answer)
-                else                                         -> rh.gs(R.string.combomode_refresh_other)
-            }
-            return rh.gs(R.string.combomode_refresh_not_read, why, reason)
-        }
-        val lines = mutableListOf(rh.gs(R.string.combomode_refresh_read, timeOfDay.format(Date(read.finishedAtEpochMs)), (read.finishedAtEpochMs - read.startedAtEpochMs) / 1000))
-        val found = watchDriver.bolusesLearnedSince(askedAt)
-        lines += if (found.isEmpty()) rh.gs(R.string.combomode_refresh_nothing_new)
-        else rh.gs(
-            R.string.combomode_refresh_found,
-            found.joinToString("; ") { rh.gs(if (it.smb) R.string.combomode_refresh_bolus_smb else R.string.combomode_refresh_bolus, it.units, timeOfDay.format(Date(it.timestampEpochMs))) }
-        )
-        runCatching {
-            val bolus = iobCobCalculator.calculateIobFromBolus().iob
-            val basal = iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended().basaliob
-            lines += rh.gs(R.string.combomode_refresh_iob, bolus + basal, bolus, basal)
-        }
-        return lines.joinToString("\n")
     }
 
     private fun renderLink() {
@@ -277,9 +245,6 @@ class ComboModeFragment : DaggerFragment() {
 
         /** After this long without an answer the button is given back; the reading goes on in the queue. */
         const val REFRESH_SLOW_MS = 3 * 60_000L
-
-        /** The driver stamps the start of a reading a moment after the button's press was noted. */
-        const val REFRESH_CLOCK_SLACK_MS = 2_000L
 
         /** The same id the Overview's switch uses, so the newer switch replaces the older reminder. */
         const val COMBO_MODE_REMINDER_NOTIFICATION = 9731

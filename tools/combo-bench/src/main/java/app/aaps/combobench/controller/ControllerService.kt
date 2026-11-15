@@ -290,6 +290,7 @@ class ControllerInboundReceiver : BroadcastReceiver() {
  *   ... --es cmd REHEARSAL
  *   ... --es cmd TRIAGE [--es screen HOME|SET|RESIST|ADVICE]
  *   ... --es cmd OWNER_READ [--ez screen true]
+ *   ... --es cmd TAP [--ei taps 3] [--es plain log|controller]
  */
 class ControllerDebugReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -318,6 +319,24 @@ class ControllerDebugReceiver : BroadcastReceiver() {
                 if (intent.getBooleanExtra("screen", false))
                     context.startActivity(Intent(context, app.aaps.combobench.PumpReadActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 else host.askPumpRead()
+                return
+            }
+            // Taps on a complication of the face, as the gate in front of them sees them: --ei taps 1 is a plain tap (opens
+            // the journal, or the pump's screen with --es plain controller), --ei taps 3 is the triple tap, which reads the pump.
+            "TAP" -> {
+                val taps = intent.getIntExtra("taps", 1).coerceIn(1, 3)
+                val plain = intent.getStringExtra("plain") ?: app.aaps.combobench.PumpTapGateActivity.PLAIN_LOG
+                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                repeat(taps) { index ->
+                    handler.postDelayed({
+                        runCatching {
+                            context.startActivity(
+                                Intent(context, app.aaps.combobench.PumpTapGateActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    .putExtra(app.aaps.combobench.PumpTapGateActivity.EXTRA_PLAIN, plain)
+                            )
+                        }
+                    }, index * 250L)
+                }
                 return
             }
             else     -> return

@@ -26,6 +26,16 @@ class RegulationSnapshotJsonTest {
         assertNull(RegulationSnapshot.fromJson(snapshot().toJson()).lastCarbsAtEpochMs)
     }
 
+    @Test fun `the rules on trial and what they did reach the watch as the phone said them`() {
+        val trials = RegulationSnapshot.Trials(
+            capOn = true, warnMode = RegulationSnapshot.Trials.WARN_RECORD,
+            notes = listOf(RegulationSnapshot.Trials.Note(RegulationSnapshot.Trials.KEY_CAP, 1_794_691_430_000L, "Проба: микродоза 2,4 → 0,5 ЕД"))
+        )
+        val back = RegulationSnapshot.fromJson(snapshot().copy(trials = trials).toJson())
+        assertEquals(trials, back.trials)
+        assertNull(RegulationSnapshot.fromJson(snapshot().toJson()).trials)
+    }
+
     @Test fun `zero grams is a statement, a missing field is not`() {
         val saysNothingNeeded = RegulationSnapshot.fromJson(snapshot(carbs = 0, within = null).toJson())
         assertEquals(0, saysNothingNeeded.carbsRequiredG)

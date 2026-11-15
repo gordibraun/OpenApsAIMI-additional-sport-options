@@ -23,6 +23,9 @@
             android:taskAffinity="${applicationId}" android:windowSoftInputMode="adjustResize" />
         <activity android:name=".ManualPumpSetupActivity" android:exported="false" />
         <activity android:name=".ControlLogActivity" android:exported="false" />
+        <!-- In front of the face's complications: three quick taps read the pump, a plain tap opens what it always did. Shows nothing. -->
+        <activity android:name=".PumpTapGateActivity" android:exported="false" android:excludeFromRecents="true"
+            android:noHistory="true" android:taskAffinity="" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <activity android:name=".TriageActivity" android:exported="false" />
         <activity android:name=".controller.ActivitySensingPermissionActivity" android:exported="false" />
         <!-- Health Services hands heart rate and workout state to this service; only Health Services may bind it. -->

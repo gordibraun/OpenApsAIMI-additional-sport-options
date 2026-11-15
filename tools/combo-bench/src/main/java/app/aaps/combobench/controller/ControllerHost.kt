@@ -365,6 +365,7 @@ internal class ControllerHost private constructor(context: Context) {
                 // The phone's forecast is what the system expected: kept to check insulin's effect against later.
                 snapshot.phoneForecast?.let { autonomy.addForecastMade(snapshot.madeAtEpochMs, it, byWatch = false) }
                 keepPhoneActivities(snapshot)
+                keepTrials(snapshot)
             }
         }
         observeLeadership()
@@ -866,6 +867,58 @@ internal class ControllerHost private constructor(context: Context) {
                 "хвост ${record.tailMinutes} мин. Часы учтут её в прогнозе и не будут корректировать подъём во время неё"
             autonomy.addToJournal(JSONObject().put("at", System.currentTimeMillis()).put("action", "ACTIVITY").put("text", text).put("mode", autonomy.mode().name))
             notifyActivity(record, "Нагрузка записана на телефоне", "Часы учтут её.")
+        }
+    }
+
+    // ---- the phone's rules on trial, shown on the wrist ------------------------------------------------
+
+    /**
+     * The phone's rules on trial (15.11.2026) and what they did come with every lease, so that the owner sees
+     * on the watch too that they exist and what they do. Each new thing is written into the journal and shown
+     * as a notice: silent for the cap on a microbolus, which is information, and for the early warning of a
+     * forecast low a buzz when the owner has switched that on, silent otherwise. Something older than
+     * [TRIAL_NOTE_FRESH_MS] is written down without a notice: it is no longer news.
+     */
+    private fun keepTrials(snapshot: RegulationSnapshot) {
+        val trials = snapshot.trials ?: return
+        val seen = runCatching { if (files.exists(TRIALS_SEEN_FILE)) files.read(TRIALS_SEEN_FILE).optLong("at") else 0L }.getOrDefault(0L)
+        val fresh = TrialNotes.fresh(trials, seen)
+        if (fresh.isEmpty()) return
+        val now = System.currentTimeMillis()
+        fresh.forEach { note ->
+            journalLine(note.atEpochMs, "TRIAL", "Телефон. ${note.text}")
+            if (now - note.atEpochMs <= TRIAL_NOTE_FRESH_MS) notifyTrial(note, TrialNotes.buzzes(trials, note))
+        }
+        files.write(TRIALS_SEEN_FILE, JSONObject().put("at", fresh.last().atEpochMs))
+    }
+
+    private fun notifyTrial(note: RegulationSnapshot.Trials.Note, buzz: Boolean) {
+        runCatching {
+            val manager = context.getSystemService(android.app.NotificationManager::class.java)
+            val channel = if (buzz) TRIAL_BUZZ_CHANNEL else TRIAL_CHANNEL
+            manager.createNotificationChannel(
+                if (buzz) android.app.NotificationChannel(channel, "Пробы: раннее предупреждение", android.app.NotificationManager.IMPORTANCE_HIGH).apply {
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 500, 250, 500, 250, 500)
+                }
+                else android.app.NotificationChannel(channel, "Пробы: что сделали", android.app.NotificationManager.IMPORTANCE_LOW)
+            )
+            val open = PendingIntent.getActivity(
+                context, 9, Intent(context, app.aaps.combobench.ControlLogActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            manager.notify(
+                if (note.key == RegulationSnapshot.Trials.KEY_WARN) TRIAL_WARN_NOTIFICATION_ID else TRIAL_CAP_NOTIFICATION_ID,
+                android.app.Notification.Builder(context, channel)
+                    .setSmallIcon(android.R.drawable.stat_notify_more)
+                    .setContentTitle(TrialNotes.title(note, buzz))
+                    .setContentText(note.text)
+                    .setStyle(android.app.Notification.BigTextStyle().bigText(note.text + " Выключается на телефоне: главный экран → «Пробы»."))
+                    .setContentIntent(open)
+                    .setAutoCancel(true)
+                    .apply { if (buzz) setCategory(android.app.Notification.CATEGORY_ALARM) }
+                    .build()
+            )
         }
     }
 
@@ -1625,6 +1678,15 @@ internal class ControllerHost private constructor(context: Context) {
 
         /** The longest the pump is held back for the sensor; a window and a session, with room to spare. */
         private const val MAX_SENSOR_WAIT_MS = 2 * 60_000L
+
+        private const val TRIALS_SEEN_FILE = "trials-seen.json"
+        private const val TRIAL_CHANNEL = "combo-trials"
+        private const val TRIAL_BUZZ_CHANNEL = "combo-trials-warning"
+        private const val TRIAL_CAP_NOTIFICATION_ID = 46
+        private const val TRIAL_WARN_NOTIFICATION_ID = 47
+
+        /** What a trial rule did longer ago than this is written down without a notice. */
+        private const val TRIAL_NOTE_FRESH_MS = 20 * 60_000L
 
         /** A reading the owner asked for that has not finished by then is taken for lost, and another may be asked for. */
         private const val OWNER_READ_GIVE_UP_MS = 6 * 60_000L
