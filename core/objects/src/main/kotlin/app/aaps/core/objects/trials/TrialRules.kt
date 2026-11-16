@@ -46,6 +46,14 @@ class TrialRules private constructor(context: Context) {
         get() = prefs.getBoolean(PREF_ANCHOR, true)
         set(value) { prefs.edit().putBoolean(PREF_ANCHOR, value).apply(); noteSwitch(KEY_ANCHOR, if (value) "включено" else "выключено") }
 
+    /**
+     * The basal tuner measures the need for basal in the hours without food and proposes changes to the profile;
+     * it changes nothing by itself. See BasalTuner. On trial since 16.11.2026.
+     */
+    var tunerEnabled: Boolean
+        get() = prefs.getBoolean(PREF_TUNER, true)
+        set(value) { prefs.edit().putBoolean(PREF_TUNER, value).apply(); noteSwitch(KEY_TUNER, if (value) "включено" else "выключено") }
+
     /** How a rule stands right now, in one sentence, for the screen; not an event - a rule that acts on every run says it here. */
     fun state(key: String): String? = prefs.getString(PREF_STATE + key, null)
 
@@ -76,6 +84,7 @@ class TrialRules private constructor(context: Context) {
         const val KEY_CAP = "unconfirmed-rise-cap"
         const val KEY_WARN = "low-forecast-warning"
         const val KEY_ANCHOR = "basal-estimate-anchor"
+        const val KEY_TUNER = "basal-tuner"
 
         /** The day both went on trial. */
         const val SINCE = "15.11.2026"
@@ -90,6 +99,7 @@ class TrialRules private constructor(context: Context) {
             KEY_CAP  -> "Первая микродоза на неподтверждённом скачке не больше 0,5 ЕД"
             KEY_WARN -> "Раннее предупреждение о низком прогнозе"
             KEY_ANCHOR -> "Внутренний базал AIMI держится за средний базал профиля"
+            KEY_TUNER -> "Подстройщик базала: предлагает, сам не меняет"
             else     -> key
         }
 
@@ -97,6 +107,7 @@ class TrialRules private constructor(context: Context) {
         private const val PREF_CAP = "cap_enabled"
         private const val PREF_WARN = "warn_mode"
         private const val PREF_ANCHOR = "anchor_enabled"
+        private const val PREF_TUNER = "tuner_enabled"
         private const val PREF_STATE = "state_"
         private const val PREF_EVENTS = "events"
         private const val MAX_EVENTS = 60

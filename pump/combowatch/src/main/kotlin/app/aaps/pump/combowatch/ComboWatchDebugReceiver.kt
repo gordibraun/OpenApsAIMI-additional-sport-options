@@ -6,6 +6,8 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
+import app.aaps.core.objects.profile.ProfileHours
+import app.aaps.core.objects.profile.RunningProfileEditor
 import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.CommandKind
 import app.aaps.pump.combowatch.protocol.PumpEvent
@@ -48,11 +50,16 @@ import javax.inject.Inject
  * And `--es cmd TRIAL_NOTE [--es text '...']` puts a test line through the path of the rules on trial (main
  * screen list, lease, watch journal and notice); it changes no dose and counts as neither rule acting.
  *
- * And `--es cmd PROFILE_BASAL --es rates '1=1.05,2=1.05,...' [--ez dry true]` changes the named hours (from
- * midnight, U/h) of the basal of the local profile that is running, saves it and activates it - the same two
- * steps as «Сохранить» and «Активировать профиль» on the profile screen, so the pump is then written the usual
- * way. With `dry` it only says what would change. It refuses when the profile shown in the editor is not the one
- * running, when a rate is not one the pump holds, or when an hour would move by more than a third.
+ * And `--es cmd PROFILE_EDIT [--es rates '1=1.05,2=1.05'] [--es ic '6-10=9.0'] [--es target '0-6=6.0'] [--ez dry true]`
+ * changes the named hours (from midnight; a span includes both ends) of the local profile that is running - basal
+ * in U/h, carb ratio in g/U, target in the profile's own units, low and high together - saves it and activates
+ * it: the same two steps as «Сохранить» and «Активировать профиль» on the profile screen, so the pump is then
+ * written the usual way. With `dry` it only says what would change. It refuses when the profile shown in the
+ * editor is not the one running, when a basal rate is not one the pump holds, or when a value would move by more
+ * than ProfileHours.Limits allows. `PROFILE_BASAL` is the same command under its first name.
+ *
+ * And `--es cmd BASAL_TUNER [--ez save true] [--ez announce true]` has the basal tuner measure and judge now, and
+ * puts its whole table and proposal into the answer; without `save` nothing is remembered.
  *
  * The answer is written to files/combowatch-debug.json.
  */
@@ -61,9 +68,9 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
     @Inject lateinit var link: ComboWatchLink
     @Inject lateinit var plugin: ComboWatchPlugin
     @Inject lateinit var aapsLogger: AAPSLogger
-    @Inject lateinit var activePlugin: app.aaps.core.interfaces.plugin.ActivePlugin
     @Inject lateinit var preferences: app.aaps.core.keys.interfaces.Preferences
-    @Inject lateinit var profileFunction: app.aaps.core.interfaces.profile.ProfileFunction
+    @Inject lateinit var profileEditor: RunningProfileEditor
+    @Inject lateinit var basalTuner: app.aaps.core.objects.basaltuner.BasalTuner
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
@@ -102,40 +109,24 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
             aapsLogger.info(LTag.PUMP, "combowatch debug: $answer")
             return
         }
-        if (cmd == "PROFILE_BASAL") {
+        if (cmd == "PROFILE_BASAL" || cmd == "PROFILE_EDIT") {
             val answer = JSONObject().put("tag", tag).put("cmd", cmd)
             try {
-                val changes = checkNotNull(ProfileBasalEdit.parse(intent.getStringExtra("rates") ?: "")) { "rates must be like 1=1.05,2=1.05" }
-                val source = activePlugin.activeProfileSource
-                val current = checkNotNull(source.currentProfile()) { "no local profile is open in the editor" }
-                val running = profileFunction.getOriginalProfileName()
-                check(current.name == running) { "the editor shows «${current.name}», the running profile is «$running»" }
-                val before = checkNotNull(ProfileBasalEdit.hourly(current.basal)) { "the profile's basal blocks cannot be read: ${current.basal}" }
-                val after = ProfileBasalEdit.apply(before, changes)
-                // Only the hours that are being changed are held to the pump's own steps: the others stay as the owner
-                // wrote them (1.23 is kept by the pump as 1.25, and AAPS has always been told so).
-                changes.forEach { (hour, rate) ->
-                    check(ComboWatchPlugin.comboBasalFactor(kotlin.math.round(rate * 1000.0).toInt()) == kotlin.math.round(rate * 1000.0).toInt()) { "hour $hour: $rate U/h is not a rate the pump holds" }
-                    check(rate >= 0.05) { "hour $hour: $rate U/h is below what the pump holds" }
-                    check(kotlin.math.abs(rate - before[hour]) <= before[hour] / 3.0 + 1e-9) { "hour $hour: ${before[hour]} -> $rate is a change of more than a third" }
-                }
-                answer.put("profile", current.name)
+                fun hours(extra: String) = intent.getStringExtra(extra)?.let { checkNotNull(ProfileHours.parse(it)) { "$extra must be like 1=1.05,2=1.05 or 6-10=9.0" } } ?: emptyMap()
+                val edit = RunningProfileEditor.Edit(basal = hours("rates"), carbRatio = hours("ic"), target = hours("target"))
+                val plan = profileEditor.plan(edit) { rate -> kotlin.math.round(rate * 1000.0).toInt().let { ComboWatchPlugin.comboBasalFactor(it) == it } }
+                answer.put("profile", plan.profileName)
                     .put("watchWritesProfiles", link.lastHeartbeat?.capabilities?.contains(app.aaps.pump.combowatch.protocol.ComboWatchProtocol.CAN_SET_BASAL_PROFILE) == true)
                     .put("onPump", link.lastSnapshot?.basalProfileFactors?.let { org.json.JSONArray(it) } ?: JSONObject.NULL)
-                    .put("before", org.json.JSONArray(before)).put("after", org.json.JSONArray(after))
-                    .put("totalBefore", before.sum()).put("totalAfter", after.sum())
+                    .put("before", org.json.JSONArray(plan.basalBefore)).put("after", org.json.JSONArray(plan.basalAfter))
+                    .put("totalBefore", plan.basalBefore.sum()).put("totalAfter", plan.basalAfter.sum())
+                if (plan.changesCarbRatio) answer.put("icBefore", org.json.JSONArray(plan.carbRatioBefore)).put("icAfter", org.json.JSONArray(plan.carbRatioAfter))
+                if (plan.changesTarget) answer.put("mgdl", plan.mgdl)
+                    .put("targetLowBefore", org.json.JSONArray(plan.targetLowBefore)).put("targetLowAfter", org.json.JSONArray(plan.targetLowAfter))
+                    .put("targetHighBefore", org.json.JSONArray(plan.targetHighBefore)).put("targetHighAfter", org.json.JSONArray(plan.targetHighAfter))
                 if (intent.getBooleanExtra("dry", false)) answer.put("dry", true)
                 else {
-                    val now = System.currentTimeMillis()
-                    current.basal = ProfileBasalEdit.blocks(after)
-                    source.storeSettings(null, now)
-                    val store = checkNotNull(source.profile) { "the profile store is empty after saving" }
-                    val switched = profileFunction.createProfileSwitch(
-                        profileStore = store, profileName = current.name, durationInMinutes = 0, percentage = 100, timeShiftInHours = 0, timestamp = now,
-                        action = app.aaps.core.data.ue.Action.PROFILE_SWITCH, source = app.aaps.core.data.ue.Sources.Maintenance,
-                        note = intent.getStringExtra("note") ?: "Базал по часам обновлён по слову владельца",
-                        listValues = listOf(app.aaps.core.data.ue.ValueWithUnit.SimpleString(current.name), app.aaps.core.data.ue.ValueWithUnit.Percent(100))
-                    )
+                    val switched = profileEditor.apply(plan, intent.getStringExtra("note") ?: "Профиль обновлён по слову владельца", System.currentTimeMillis())
                     answer.put("saved", true).put("switchCreated", switched)
                 }
             } catch (t: Throwable) {
@@ -143,6 +134,26 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
             }
             runCatching { out.writeText(answer.toString()) }
             aapsLogger.info(LTag.PUMP, "combowatch debug: $answer")
+            return
+        }
+        if (cmd == "BASAL_TUNER") {
+            // By default it only measures and judges, remembering nothing. `--ez save true` keeps the calculation as the
+            // owner's «Пересчитать» does; `--ez announce true` goes the daily run's way, notice included.
+            val save = intent.getBooleanExtra("save", false)
+            val announce = intent.getBooleanExtra("announce", false)
+            scope.launch {
+                val answer = JSONObject().put("tag", tag).put("cmd", cmd)
+                try {
+                    val now = System.currentTimeMillis()
+                    val calculation = if (save || announce) basalTuner.calculate(now, announce) else basalTuner.measure(now)
+                    answer.put("enabled", basalTuner.enabled).put("run", calculation.run.toJson()).put("proposal", calculation.proposal?.toJson() ?: JSONObject.NULL)
+                        .put("pending", basalTuner.pending()?.toJson() ?: JSONObject.NULL).put("tookMs", System.currentTimeMillis() - now)
+                } catch (t: Throwable) {
+                    answer.put("error", "${t.javaClass.simpleName}: ${t.message}")
+                }
+                runCatching { out.writeText(answer.toString()) }
+                aapsLogger.info(LTag.PUMP, "combowatch debug: BASAL_TUNER ${answer.optString("error", "done")}")
+            }
             return
         }
         if (cmd == "EVENT") {

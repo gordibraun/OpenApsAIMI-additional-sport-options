@@ -194,6 +194,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     @Inject lateinit var notificationUiBinder: NotificationUiBinder
     @Inject lateinit var bolusWizardProvider: Provider<BolusWizard>
     @Inject lateinit var aimiMealAssist: AimiMealAssist
+    @Inject lateinit var basalTuner: app.aaps.core.objects.basaltuner.BasalTuner
 
     private val disposable = CompositeDisposable()
 
@@ -871,6 +872,7 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         }
         binding.pumpRefreshResult.setOnClickListener { it.visibility = View.GONE }
         binding.trialsButton.setOnClickListener { showTrials() }
+        binding.basalTunerButton.setOnClickListener { showBasalTuner() }
     }
 
     /** One reading of the pump through the queue; the active driver says what it brought, if it can. */
@@ -920,8 +922,11 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     private fun updateTrialsButton() {
         val binding = _binding ?: return
         val trials = runCatching { TrialRules.get(binding.root.context) }.getOrNull() ?: return
-        val on = (if (trials.capEnabled) 1 else 0) + (if (trials.warnMode != TrialRules.WarnMode.OFF) 1 else 0) + (if (trials.anchorEnabled) 1 else 0)
-        binding.trialsButton.text = rh.gs(R.string.trials_button, on, 3)
+        val on = (if (trials.capEnabled) 1 else 0) + (if (trials.warnMode != TrialRules.WarnMode.OFF) 1 else 0) + (if (trials.anchorEnabled) 1 else 0) + (if (trials.tunerEnabled) 1 else 0)
+        binding.trialsButton.text = rh.gs(R.string.trials_button, on, 4)
+        // A dot on the tuner's button says a proposal is waiting for an answer.
+        val waiting = trials.tunerEnabled && runCatching { basalTuner.pending() != null }.getOrDefault(false)
+        binding.basalTunerButton.text = rh.gs(if (waiting) R.string.basal_tuner_button_pending else R.string.basal_tuner_button)
     }
 
     /** The rules on trial: what each does, its switch, and what they did lately. */
@@ -966,6 +971,12 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             setOnCheckedChangeListener { _, checked -> trials.anchorEnabled = checked; updateTrialsButton() }
         })
         column.addView(text(rh.gs(R.string.trials_anchor_explain, trials.state(TrialRules.KEY_ANCHOR) ?: rh.gs(R.string.trials_anchor_no_state)), 13f))
+        column.addView(androidx.appcompat.widget.SwitchCompat(activity).apply {
+            text = TrialRules.name(TrialRules.KEY_TUNER); textSize = 15f
+            isChecked = trials.tunerEnabled
+            setOnCheckedChangeListener { _, checked -> trials.tunerEnabled = checked; updateTrialsButton() }
+        })
+        column.addView(text(rh.gs(R.string.trials_tuner_explain), 13f))
         column.addView(text(rh.gs(R.string.trials_events_title), 15f, bold = true))
         val events = trials.events().takeLast(TRIAL_EVENTS_SHOWN).asReversed()
         if (events.isEmpty()) column.addView(text(rh.gs(R.string.trials_events_none), 13f))
@@ -975,6 +986,108 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             .setView(android.widget.ScrollView(activity).apply { addView(column) })
             .setPositiveButton(app.aaps.core.ui.R.string.ok, null)
             .show()
+    }
+
+    /**
+     * The basal tuner: what it proposes and why, the table it is checked by, and the owner's answer.
+     * It proposes; only «Применить» here changes the profile and, through it, the pump.
+     */
+    private fun showBasalTuner() {
+        val activity = activity ?: return
+        val trials = runCatching { TrialRules.get(activity) }.getOrNull() ?: return
+        val dp = resources.displayMetrics.density
+        fun text(value: String, sp: Float, bold: Boolean = false) = TextView(activity).apply {
+            text = value; textSize = sp
+            if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, (6 * dp).toInt(), 0, (2 * dp).toInt())
+        }
+        val rules = app.aaps.core.objects.basaltuner.BasalTunerRules
+        val column = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((20 * dp).toInt(), (8 * dp).toInt(), (20 * dp).toInt(), (8 * dp).toInt())
+        }
+        var dialog: androidx.appcompat.app.AlertDialog? = null
+        fun reopen() { dialog?.dismiss(); updateTrialsButton(); showBasalTuner() }
+
+        column.addView(text(rh.gs(R.string.basal_tuner_intro, app.aaps.core.objects.basaltuner.BasalNeed.DAYS), 13f))
+        column.addView(androidx.appcompat.widget.SwitchCompat(activity).apply {
+            text = rh.gs(R.string.basal_tuner_switch); textSize = 15f
+            isChecked = trials.tunerEnabled
+            setOnCheckedChangeListener { _, checked -> trials.tunerEnabled = checked; updateTrialsButton() }
+        })
+
+        val proposal = runCatching { basalTuner.pending() }.getOrNull()
+        val run = runCatching { basalTuner.lastRun() }.getOrNull()
+        if (proposal != null) {
+            column.addView(text(rh.gs(R.string.basal_tuner_proposal_title, dateUtil.dateAndTimeString(proposal.createdAtEpochMs)), 15f, bold = true))
+            column.addView(text(rh.gs(R.string.basal_tuner_proposal_total, proposal.headline, rules.number(proposal.totalBeforeU), rules.number(proposal.totalAfterU)), 14f))
+            proposal.reasons.forEach { column.addView(text(it, 13f)) }
+            column.addView(LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(com.google.android.material.button.MaterialButton(activity).apply {
+                    text = rh.gs(R.string.basal_tuner_apply); isAllCaps = false
+                    setOnClickListener {
+                        com.google.android.material.dialog.MaterialAlertDialogBuilder(activity)
+                            .setMessage(rh.gs(R.string.basal_tuner_apply_confirm, proposal.headline))
+                            .setNegativeButton(app.aaps.core.ui.R.string.cancel, null)
+                            .setPositiveButton(R.string.basal_tuner_apply) { _, _ ->
+                                val outcome = basalTuner.apply(System.currentTimeMillis())
+                                reopen()
+                                android.widget.Toast.makeText(activity, outcome, android.widget.Toast.LENGTH_LONG).show()
+                            }
+                            .show()
+                    }
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = (8 * dp).toInt() })
+                addView(com.google.android.material.button.MaterialButton(activity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                    text = rh.gs(R.string.basal_tuner_decline); isAllCaps = false
+                    setOnClickListener {
+                        basalTuner.decline(System.currentTimeMillis())
+                        reopen()
+                        android.widget.Toast.makeText(activity, R.string.basal_tuner_decline_done, android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            })
+        } else column.addView(text(run?.note?.let { rh.gs(R.string.basal_tuner_note, it) } ?: rh.gs(R.string.basal_tuner_no_proposal), 14f, bold = true))
+
+        if (run == null) column.addView(text(rh.gs(R.string.basal_tuner_run_none), 13f))
+        else {
+            column.addView(text(rh.gs(R.string.basal_tuner_run_title, dateUtil.dateAndTimeString(run.atEpochMs), run.cleanHours, run.days, rules.number(run.totalDailyU, 1)), 15f, bold = true))
+            column.addView(text(rh.gs(R.string.basal_tuner_table_explain), 13f))
+            run.rows.filter { it.samples > 0 }.forEach { row -> column.addView(text(rules.tableLine(row.estimate(), row.profileUph, row.judged()), 13f)) }
+            if (run.rows.any { it.samples == 0 }) column.addView(text(rh.gs(R.string.basal_tuner_no_data_hours), 13f))
+        }
+
+        val history = runCatching { basalTuner.history() }.getOrDefault(emptyList())
+        if (history.isNotEmpty()) {
+            column.addView(text(rh.gs(R.string.basal_tuner_history_title), 15f, bold = true))
+            history.take(BASAL_TUNER_HISTORY_SHOWN).forEach {
+                column.addView(text("${dateUtil.dateAndTimeString(it.createdAtEpochMs)} — ${it.headline} — ${it.status.text}" + (it.outcome?.let { why -> " ($why)" } ?: ""), 13f))
+            }
+        }
+
+        dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(activity)
+            .setTitle(rh.gs(R.string.basal_tuner_title))
+            .setView(android.widget.ScrollView(activity).apply { addView(column) })
+            .setPositiveButton(app.aaps.core.ui.R.string.ok, null)
+            .setNeutralButton(R.string.basal_tuner_recalculate, null)
+            .show()
+        // «Пересчитать» keeps the dialog open while the records are read, on a thread of its own, and then shows the new table.
+        dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)?.setOnClickListener { button ->
+            button.isEnabled = false
+            (button as? android.widget.Button)?.text = rh.gs(R.string.basal_tuner_calculating)
+            Thread({
+                val failure = runCatching { basalTuner.calculate(System.currentTimeMillis(), announce = false) }.exceptionOrNull()
+                activity.runOnUiThread {
+                    if (!isAdded) return@runOnUiThread
+                    if (failure == null) reopen()
+                    else {
+                        button.isEnabled = true
+                        (button as? android.widget.Button)?.text = rh.gs(R.string.basal_tuner_recalculate)
+                        android.widget.Toast.makeText(activity, rh.gs(R.string.basal_tuner_failed, failure.message ?: failure.javaClass.simpleName), android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }, "basal-tuner-asked").start()
+        }
     }
 
     private fun updateComboModeRow() {
@@ -2347,5 +2460,6 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
         private const val PUMP_REFRESH_SLOW_MS = 3 * 60_000L
         private const val PUMP_REFRESH_GIVE_UP_MS = 15 * 60_000L
         private const val TRIAL_EVENTS_SHOWN = 12
+        private const val BASAL_TUNER_HISTORY_SHOWN = 6
     }
 }

@@ -152,6 +152,21 @@
                     android:text="@string/trials_button"
                     android:textAllCaps="false"
                     android:textSize="13sp" />
+
+                <!-- The basal tuner (on trial since 16.11.2026): its table, its proposal and the owner's answer to it. -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/basal_tuner_button"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="2"
+                    android:layout_marginStart="6dp"
+                    android:minHeight="40dp"
+                    android:insetTop="2dp"
+                    android:insetBottom="2dp"
+                    android:text="@string/basal_tuner_button"
+                    android:textAllCaps="false"
+                    android:textSize="13sp" />
             </LinearLayout>
 
             <TextView

@@ -558,12 +558,20 @@ class ComboWatchPlugin @Inject constructor(
      */
     override fun setNewBasalProfile(profile: Profile): PumpEnactResult {
         val enact = pumpEnactResultProvider.get()
+        val factors = basalFactors(profile)
+        // A profile whose basal the pump already holds - only its target or its carb ratio changed - asks nothing
+        // of the pump: AAPS is told "set, nothing written", which is what it expects of a driver in that case.
+        // (16.11.2026: such a change cost a session of a minute and a half reading the pump's 24 hours over.)
+        if (snapshot?.basalProfileFactors == factors) {
+            aapsLogger.info(LTag.PUMP, "combowatch: the pump already holds this basal profile; nothing is written")
+            profileLastCompared = profile
+            return enact.also { it.success = true; it.enacted = false }
+        }
         if (link.lastHeartbeat?.capabilities?.contains(ComboWatchProtocol.CAN_SET_BASAL_PROFILE) != true)
             return enact.also {
                 it.success = false; it.enacted = false
                 it.comment = rh.gs(R.string.combowatch_profile_needs_newer_watch)
             }
-        val factors = basalFactors(profile)
         aapsLogger.info(LTag.PUMP, "combowatch: basal profile asked of the pump: ${factors.joinToString(",")} (${factors.sum() / 1000.0} U a day)")
         val result = dispatch(CommandKind.SET_BASAL_PROFILE, basalProfileFactors = factors)
         aapsLogger.info(

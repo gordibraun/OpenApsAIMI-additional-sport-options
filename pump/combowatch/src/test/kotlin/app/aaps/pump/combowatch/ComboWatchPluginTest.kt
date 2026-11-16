@@ -328,6 +328,20 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
     }
 
     @Test
+    fun `a profile whose basal the pump already holds asks nothing of the watch - only its target or carb ratio changed`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        watchCanSetProfiles(true)
+        whenever(link.lastSnapshot).thenReturn(PumpSnapshot(1L, false, null, null, 100, "FULL_BATTERY", pumpA, plugin.basalFactors(validProfile)))
+
+        val result = plugin.setNewBasalProfile(validProfile)
+
+        assertThat(result.success).isTrue()
+        assertThat(result.enacted).isFalse()
+        verifyNothingSentExceptStatus()
+    }
+
+    @Test
     fun `a watch whose build cannot write profiles is not asked, and AAPS is told the pump is unchanged`() {
         registered(pumpA)
         watchHolds(pumpA)

@@ -130,7 +130,8 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
     private val apsResultProvider: Provider<APSResult>,
     private val isfStateStore: IsfStateStore,
     private val mealCarbRatioLearner: app.aaps.plugins.aps.openAPSAIMI.learning.MealCarbRatioLearner,
-    private val activityOutcomeReporter: app.aaps.plugins.aps.openAPSAIMI.activity.ActivityOutcomeReporter
+    private val activityOutcomeReporter: app.aaps.plugins.aps.openAPSAIMI.activity.ActivityOutcomeReporter,
+    private val basalTuner: app.aaps.core.objects.basaltuner.BasalTuner
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.APS)
@@ -1061,6 +1062,8 @@ open class OpenAPSAIMIPlugin  @Inject constructor(
             ).also {
                 // Rules on trial have the last word on the microbolus, before the decision is kept and enacted.
                 applyTrialRules(it, glucoseStatus.date, now)
+                // The basal tuner's daily look at the records starts from here: it touches nothing of this run.
+                runCatching { basalTuner.onLoopRun(now) }
                 val determineBasalResult = apsResultProvider.get().with(it)
                 // Preserve input data
                 determineBasalResult.inputConstraints = inputConstraints
