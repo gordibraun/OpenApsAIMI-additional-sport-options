@@ -26,6 +26,8 @@ interface CommandJournal {
         val kind: CommandKind? = null,
         val bolusTenthsIU: Int? = null,
         val tbrPercentage: Int? = null,
+        /** The basal profile a [CommandKind.SET_BASAL_PROFILE] asked for, so that an unclear ending can be judged against the pump's own. */
+        val basalProfileFactors: List<Int>? = null,
         /**
          * Set when the pump this command ran on was given up before its outcome was established;
          * see [abandonUnresolved]. The answer stays [Outcome.UNKNOWN], because nothing was
@@ -49,7 +51,8 @@ interface CommandJournal {
         startedAtEpochMs: Long,
         kind: CommandKind? = null,
         bolusTenthsIU: Int? = null,
-        tbrPercentage: Int? = null
+        tbrPercentage: Int? = null,
+        basalProfileFactors: List<Int>? = null
     )
 
     /** Record how it ended. [Outcome.UNKNOWN] leaves the executor awaiting reconciliation. */
@@ -113,10 +116,10 @@ class SimpleCommandJournal(
     override fun recordedOutcome(id: String): CommandJournal.Entry? = entries[id]?.takeIf { it.outcome != null }
 
     @Synchronized
-    override fun markStarted(id: String, startedAtEpochMs: Long, kind: CommandKind?, bolusTenthsIU: Int?, tbrPercentage: Int?) {
+    override fun markStarted(id: String, startedAtEpochMs: Long, kind: CommandKind?, bolusTenthsIU: Int?, tbrPercentage: Int?, basalProfileFactors: List<Int>?) {
         entries[id] = CommandJournal.Entry(
             id, startedAtEpochMs, outcome = null, reason = null,
-            kind = kind, bolusTenthsIU = bolusTenthsIU, tbrPercentage = tbrPercentage
+            kind = kind, bolusTenthsIU = bolusTenthsIU, tbrPercentage = tbrPercentage, basalProfileFactors = basalProfileFactors
         )
         // Trim only resolved entries: an unresolved one is the reason therapy is being held, and
         // dropping it to save space would silently unblock the pump.

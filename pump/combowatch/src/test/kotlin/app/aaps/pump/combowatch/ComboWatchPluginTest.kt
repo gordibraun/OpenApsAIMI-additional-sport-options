@@ -90,14 +90,14 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
 
     private fun commandsAnswer(result: ComboResult) = link.stub {
         onBlocking {
-            execute(any(), any(), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(any(), any(), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         } doReturn result
     }
 
     private fun verifyNothingSentExceptStatus() = verifyBlocking(link, never()) {
         execute(
             org.mockito.kotlin.argThat { this != CommandKind.STATUS }, any(), any(), any(), any(),
-            anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
     }
 
     // ---- records --------------------------------------------------------------------------------
@@ -294,6 +294,76 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         assertThat(records.minutesOf(340)).isEqualTo(5.0)
     }
 
+    // ---- basal profile ---------------------------------------------------------------------------
+
+    private fun watchCanSetProfiles(can: Boolean) {
+        whenever(link.lastHeartbeat).thenReturn(
+            app.aaps.pump.combowatch.protocol.WatchHeartbeat(
+                atEpochMs = 1L, leaseGeneration = 7L, leaseLive = true, executorBusy = false, awaitingReconciliation = false,
+                pumpReachable = true, watchBatteryPercent = 80, heldPump = pumpA,
+                capabilities = if (can) listOf(app.aaps.pump.combowatch.protocol.ComboWatchProtocol.CAN_SET_BASAL_PROFILE) else null
+            )
+        )
+    }
+
+    @Test
+    fun `the profile's 24 hourly rates go to the watch as the pump holds them`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        watchCanSetProfiles(true)
+        val expected = plugin.basalFactors(validProfile)
+        commandsAnswer(ComboResult("p", Outcome.DONE, 1L, snapshot = PumpSnapshot(1L, false, null, null, 100, "FULL_BATTERY", pumpA, expected)))
+
+        val result = plugin.setNewBasalProfile(validProfile)
+
+        assertThat(expected).hasSize(24)
+        assertThat(result.success).isTrue()
+        assertThat(result.enacted).isTrue()
+        verifyBlocking(link) {
+            execute(
+                eq(CommandKind.SET_BASAL_PROFILE), eq(pumpA), any(), any(), any(),
+                anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), eq(expected)
+            )
+        }
+    }
+
+    @Test
+    fun `a watch whose build cannot write profiles is not asked, and AAPS is told the pump is unchanged`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        watchCanSetProfiles(false)
+        doReturn("needs a newer watch app").whenever(rh).gs(R.string.combowatch_profile_needs_newer_watch)
+
+        val result = plugin.setNewBasalProfile(validProfile)
+
+        assertThat(result.success).isFalse()
+        assertThat(result.enacted).isFalse()
+        verifyNothingSentExceptStatus()
+    }
+
+    @Test
+    fun `a profile the pump did not take, or whose fate is not known, is reported as not set`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        watchCanSetProfiles(true)
+        doReturn("not set").whenever(rh).gs(eq(R.string.combowatch_profile_not_set), anyString())
+        doReturn("unknown").whenever(rh).gs(eq(R.string.combowatch_profile_unknown), anyString())
+        commandsAnswer(ComboResult("p", Outcome.FAILED, 1L, reason = "the pump holds another basal profile than the one asked for"))
+        assertThat(plugin.setNewBasalProfile(validProfile).success).isFalse()
+        commandsAnswer(ComboResult("p", Outcome.UNKNOWN, 1L, reason = "the pump was not reached to read it back"))
+        val unknown = plugin.setNewBasalProfile(validProfile)
+        assertThat(unknown.success).isFalse()
+        assertThat(unknown.enacted).isFalse()
+    }
+
+    @Test
+    fun `rates are rounded to what the pump holds - hundredths below one unit an hour, twentieths above`() {
+        assertThat(ComboWatchPlugin.comboBasalFactor(1230)).isEqualTo(1250)
+        assertThat(ComboWatchPlugin.comboBasalFactor(1050)).isEqualTo(1050)
+        assertThat(ComboWatchPlugin.comboBasalFactor(949)).isEqualTo(950)
+        assertThat(ComboWatchPlugin.comboBasalFactor(1149)).isEqualTo(1150)
+    }
+
     @Test
     fun `carbohydrates entered on the watch are filed as carbohydrates, whatever the pump's registration says`() {
         registered(pumpA)
@@ -356,7 +426,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         commandsAnswer(ComboResult("s", Outcome.DONE, 1L))
         plugin.getPumpStatus("test")
         verifyBlocking(link) {
-            execute(eq(CommandKind.STATUS), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(eq(CommandKind.STATUS), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         }
     }
 
@@ -396,7 +466,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         val order = inOrder(pumpSync, link)
         order.verify(pumpSync).syncStopTemporaryBasalWithPumpId(any(), any(), eq(PumpType.ACCU_CHEK_COMBO), eq(pumpA), any())
         order.verifyBlocking(link) {
-            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         }
     }
 
@@ -519,7 +589,7 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         assertThat(tbr.success).isTrue()
         assertThat(tbr.enacted).isTrue()
         verifyBlocking(link) {
-            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), eq(0), eq(30), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+            execute(eq(CommandKind.SET_TBR), eq(pumpA), any(), any(), any(), eq(0), eq(30), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
         }
         assertThat(plugin.isInitialized()).isTrue()
     }

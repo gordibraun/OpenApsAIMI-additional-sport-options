@@ -417,13 +417,15 @@
     <string name="pump_refresh_failed">Pump not read. Nothing was changed on it.</string>
     <string name="trials_button">🧪 Trials %1$d/%2$d</string>
     <string name="trials_title">Rules on trial since %1$s</string>
-    <string name="trials_intro">Each time a rule acts there is a «🧪 Проба» line in the loop\'s reason, a notice here, a note among the treatments, and a line in this list and in the watch\'s journal. A switch takes the rule back at once.</string>
+    <string name="trials_intro">Each time a rule acts there is a «🧪 Проба» line in the loop\'s reason, a notice here, and a line in this list and in the watch\'s journal (nothing is written among the treatments). A switch takes the rule back at once.</string>
     <string name="trials_cap_explain">A rise that only one reading shows (glucose was not rising before it) gets 0.5 U at most; the next reading decides the rest. A rise already under way is not cut, also when readings are missed in between. Acted in the last 24 h: %1$d.</string>
     <string name="trials_warn_title">Early warning of a forecast low</string>
     <string name="trials_warn_explain">The loop\'s own forecast below 55 within three hours, on two readings in a row. Replayed over four weeks: it would have fired 66 times and a low followed 8 of them; at night 14 and 3. So it is recorded only until you choose the buzz. Fired in the last 24 h: %1$d.</string>
     <string name="trials_warn_off">off</string>
     <string name="trials_warn_record">record only</string>
     <string name="trials_warn_buzz">record and buzz on the watch</string>
+    <string name="trials_anchor_explain">С 16.11.2026. Число, от которого AIMI считает свои добавки базала на подъёмах, равно среднему базалу профиля и меняется вместе с профилем. Раньше его задавал «учитель базала», который не учится с 28.10 и застыл на множителе ×1,99. Выключите — вернётся прежний множитель. Сейчас: %1$s</string>
+    <string name="trials_anchor_no_state">цикл ещё не считал после установки.</string>
     <string name="trials_events_title">What they did lately</string>
     <string name="trials_events_none">Nothing yet.</string>
     <string name="combo_mode_title">Pump mode</string>

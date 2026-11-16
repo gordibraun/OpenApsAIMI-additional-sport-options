@@ -4142,11 +4142,21 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             consoleLog.add("ISF réduit de 10% (tendance FC anormale).")
         }
         if (tdd7Days.toFloat() != 0.0f) {
-            val learnedBasalMultiplier = basalLearner.getMultiplier()
-            basalaimi = ((tdd7Days / preferences.get(DoubleKey.OApsAIMIweight)) * learnedBasalMultiplier).toFloat()
-            if (learnedBasalMultiplier != 1.0) {
-                consoleLog.add("Basal adjusted by learner (x${"%.2f".format(learnedBasalMultiplier)})")
-            }
+            // On trial since 16.11.2026: the figure holds to the profile's mean basal instead of to what the basal
+            // learner last learned (frozen at x1.99 since 28.10.2026); see BasalEstimateAnchor.
+            val trials = runCatching { app.aaps.core.objects.trials.TrialRules.get(context) }.getOrNull()
+            val fromDose = tdd7Days / preferences.get(DoubleKey.OApsAIMIweight)
+            val anchor = app.aaps.plugins.aps.openAPSAIMI.learning.BasalEstimateAnchor.decide(
+                anchorEnabled = trials?.anchorEnabled == true,
+                fromDoseUph = fromDose,
+                profileMeanUph = runCatching { profileFunction.getProfile()?.percentageBasalSum()?.div(24.0) }.getOrNull(),
+                learnedMultiplier = basalLearner.getMultiplier(),
+                learnerLastObservedAtEpochMs = basalLearner.lastObservationAtEpochMs,
+                nowEpochMs = currentTime
+            )
+            basalaimi = (fromDose * anchor.multiplier).toFloat()
+            consoleLog.add(anchor.line)
+            runCatching { trials?.setState(app.aaps.core.objects.trials.TrialRules.KEY_ANCHOR, anchor.line.removePrefix("🧪 ")) }
         }
         this.basalaimi = basalDecisionEngine.smoothBasalRate(tdd7P.toFloat(), tdd7Days.toFloat(), basalaimi)
         if (tdd7Days.toFloat() != 0.0f) {

@@ -920,8 +920,8 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
     private fun updateTrialsButton() {
         val binding = _binding ?: return
         val trials = runCatching { TrialRules.get(binding.root.context) }.getOrNull() ?: return
-        val on = (if (trials.capEnabled) 1 else 0) + (if (trials.warnMode != TrialRules.WarnMode.OFF) 1 else 0)
-        binding.trialsButton.text = rh.gs(R.string.trials_button, on, 2)
+        val on = (if (trials.capEnabled) 1 else 0) + (if (trials.warnMode != TrialRules.WarnMode.OFF) 1 else 0) + (if (trials.anchorEnabled) 1 else 0)
+        binding.trialsButton.text = rh.gs(R.string.trials_button, on, 3)
     }
 
     /** The rules on trial: what each does, its switch, and what they did lately. */
@@ -960,6 +960,12 @@ class OverviewFragment : DaggerFragment(), View.OnClickListener, OnLongClickList
             }
         })
         column.addView(text(rh.gs(R.string.trials_warn_explain, trials.timesActed(TrialRules.KEY_WARN, dayAgo)), 13f))
+        column.addView(androidx.appcompat.widget.SwitchCompat(activity).apply {
+            text = TrialRules.name(TrialRules.KEY_ANCHOR); textSize = 15f
+            isChecked = trials.anchorEnabled
+            setOnCheckedChangeListener { _, checked -> trials.anchorEnabled = checked; updateTrialsButton() }
+        })
+        column.addView(text(rh.gs(R.string.trials_anchor_explain, trials.state(TrialRules.KEY_ANCHOR) ?: rh.gs(R.string.trials_anchor_no_state)), 13f))
         column.addView(text(rh.gs(R.string.trials_events_title), 15f, bold = true))
         val events = trials.events().takeLast(TRIAL_EVENTS_SHOWN).asReversed()
         if (events.isEmpty()) column.addView(text(rh.gs(R.string.trials_events_none), 13f))

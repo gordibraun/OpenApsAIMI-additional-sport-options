@@ -28,8 +28,8 @@ android {
         create("manual") {
             dimension = "device"
             applicationIdSuffix = ".manual"
-            versionCode = 73
-            versionName = "0.73-trials-and-three-taps"
+            versionCode = 74
+            versionName = "0.74-basal-profile"
             buildConfigField("boolean", "MANUAL_TARGET", "true")
         }
     }

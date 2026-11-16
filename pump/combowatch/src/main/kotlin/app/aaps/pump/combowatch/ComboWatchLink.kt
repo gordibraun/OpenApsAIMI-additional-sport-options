@@ -217,7 +217,8 @@ class ComboWatchLink @Inject constructor(
         bolusTenthsIU: Int? = null,
         bolusKind: BolusKind? = null,
         snapshot: RegulationSnapshot? = null,
-        maxBolusTenthsIU: Int? = null
+        maxBolusTenthsIU: Int? = null,
+        basalProfileFactors: List<Int>? = null
     ): ComboResult {
         // A command is refused without a live lease naming the pump it is meant for, so make
         // sure the watch holds a current one. A command that changes delivery comes straight
@@ -238,7 +239,8 @@ class ComboWatchLink @Inject constructor(
             tbrKind = tbrKind,
             force100Percent = force100Percent,
             bolusTenthsIU = bolusTenthsIU,
-            bolusKind = bolusKind
+            bolusKind = bolusKind,
+            basalProfileFactors = basalProfileFactors
         )
         val waiter = CompletableDeferred<ComboResult>()
         pending[command.id] = waiter
@@ -263,6 +265,7 @@ class ComboWatchLink @Inject constructor(
         CommandKind.CANCEL_TBR    -> "отмена временного базала"
         CommandKind.SET_TBR       -> "временный базал ${command.percentage} % на ${command.durationMinutes} мин"
         CommandKind.DELIVER_BOLUS -> "болюс %.1f ЕД".format(Locale.getDefault(), (command.bolusTenthsIU ?: 0) / 10.0)
+        CommandKind.SET_BASAL_PROFILE -> "запись базального профиля, %.2f ЕД/сут".format(Locale.getDefault(), (command.basalProfileFactors?.sum() ?: 0) / 1000.0)
     }
 
     private fun describe(result: ComboResult, elapsedMs: Long): String {

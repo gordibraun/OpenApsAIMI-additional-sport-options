@@ -156,4 +156,75 @@ class ComboExecutorTest {
         assertTrue(result.reason!!.contains("expired"))
         assertTrue(session.runs.isEmpty())
     }
+
+    // ---- basal profile ---------------------------------------------------------------------------
+
+    private val profile = listOf(
+        930, 1050, 1050, 1050, 1000, 950, 1050, 1000, 950, 940, 1000, 950,
+        1000, 1150, 1200, 1100, 940, 810, 1050, 1050, 1050, 1100, 1050, 1150
+    )
+    private val oldProfile = profile.toMutableList().also { it[1] = 1250; it[6] = 1350 }
+
+    private fun profileCommand(id: String = "p1") =
+        ComboCommand(id, 7L, CommandKind.SET_BASAL_PROFILE, now, now + 30_000, basalProfileFactors = profile)
+
+    private fun holding(factors: List<Int>?) =
+        PumpSnapshot(now, tbrRunning = false, tbrPercentage = null, tbrRemainingMinutes = null, reservoirUnits = 95, batteryState = "FULL_BATTERY", pumpSerial = "10392647", basalProfileFactors = factors)
+
+    @Test fun `a profile the pump was read back to hold is done, and the answer carries what was read`() {
+        val session = RecordingSession { PumpSession.SessionResult.Done(holding(profile)) }
+        val (executor, journal, _) = executor(session)
+
+        val result = executor.execute(profileCommand(), lease())
+
+        assertEquals(Outcome.DONE, result.outcome)
+        assertEquals(profile, result.snapshot?.basalProfileFactors)
+        assertEquals(profile, journal.entry("p1")?.basalProfileFactors)
+        assertFalse(journal.hasUnresolved())
+    }
+
+    @Test fun `a profile write that ended unclear is settled by the next reading of the pump - it holds the new profile`() {
+        val session = RecordingSession { PumpSession.SessionResult.Unknown("the walk was confirmed, and the pump was not reached to read it back") }
+        val (executor, journal, _) = executor(session)
+        assertEquals(Outcome.UNKNOWN, executor.execute(profileCommand(), lease()).outcome)
+        assertTrue(executor.awaitingReconciliation)
+
+        executor.reconcile(holding(profile))
+
+        assertFalse(executor.awaitingReconciliation)
+        assertEquals(Outcome.DONE, journal.entry("p1")?.outcome)
+    }
+
+    @Test fun `a profile write that ended unclear is settled by the next reading of the pump - it holds the old profile`() {
+        val session = RecordingSession { PumpSession.SessionResult.Unknown("the walk was broken off") }
+        val (executor, journal, _) = executor(session)
+        executor.execute(profileCommand(), lease())
+
+        executor.reconcile(holding(oldProfile))
+
+        assertFalse(executor.awaitingReconciliation)
+        assertEquals(Outcome.FAILED, journal.entry("p1")?.outcome)
+    }
+
+    @Test fun `an unclear profile write does not hold boluses and basals back once the pump has been read, whatever the reading brought`() {
+        var answer: PumpSession.SessionResult = PumpSession.SessionResult.Unknown("link lost")
+        val session = RecordingSession { answer }
+        val (executor, journal, _) = executor(session)
+        executor.execute(profileCommand(), lease())
+
+        executor.reconcile(holding(null))
+
+        assertFalse(executor.awaitingReconciliation)
+        assertEquals(Outcome.FAILED, journal.entry("p1")?.outcome)
+        answer = PumpSession.SessionResult.Done(snapshot())
+        assertEquals(Outcome.DONE, executor.execute(command("c2"), lease()).outcome)
+    }
+
+    @Test fun `the same profile command is never walked into the pump twice`() {
+        val session = RecordingSession { PumpSession.SessionResult.Done(holding(profile)) }
+        val (executor, _, _) = executor(session)
+        executor.execute(profileCommand(), lease())
+        executor.execute(profileCommand(), lease())
+        assertEquals(listOf("p1"), session.runs)
+    }
 }

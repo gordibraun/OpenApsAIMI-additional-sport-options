@@ -194,4 +194,46 @@ class CommandGateTest {
             admit(command = command(kind = CommandKind.CANCEL_TBR, percentage = null, duration = null))
         )
     }
+
+    // ---- basal profile ---------------------------------------------------------------------------
+
+    /** The owner's profile of 16.11.2026 with the night and morning hours lowered, in 0.001 U/h. */
+    private val profile = listOf(
+        930, 1050, 1050, 1050, 1000, 950, 1050, 1000, 950, 940, 1000, 950,
+        1000, 1150, 1200, 1100, 940, 810, 1050, 1050, 1050, 1100, 1050, 1150
+    )
+
+    private fun profileCommand(factors: List<Int>? = profile) =
+        ComboCommand("p1", 7L, CommandKind.SET_BASAL_PROFILE, now, now + 30_000, basalProfileFactors = factors)
+
+    @Test fun `a whole, plausible basal profile under a live lease runs`() {
+        assertInstanceOf(CommandGate.Admission.Run::class.java, admit(command = profileCommand()))
+    }
+
+    @Test fun `a basal profile is not written without a lease, nor while an earlier command is unsettled`() {
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = profileCommand(), lease = null))
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = profileCommand(), awaiting = true))
+    }
+
+    @Test fun `a profile that is missing, short or long is turned away`() {
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = profileCommand(null)))
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = profileCommand(profile.dropLast(1))))
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = profileCommand(profile + 1000)))
+    }
+
+    @Test fun `an hour the pump could not hold, or far above anything this owner has had, is turned away`() {
+        val zeroHour = profile.toMutableList().also { it[3] = 0 }
+        val hugeHour = profile.toMutableList().also { it[3] = 5_050 }
+        val refusedZero = assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = profileCommand(zeroHour)))
+        assertTrue(refusedZero.reason.contains("hour 3"))
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = profileCommand(hugeHour)))
+        // The edges themselves are rates the pump holds.
+        assertInstanceOf(CommandGate.Admission.Run::class.java, admit(command = profileCommand(profile.toMutableList().also { it[3] = 50 })))
+        assertInstanceOf(CommandGate.Admission.Run::class.java, admit(command = profileCommand(profile.toMutableList().also { it[3] = 5_000 })))
+    }
+
+    @Test fun `a profile adding up to more than sixty units a day is turned away`() {
+        assertInstanceOf(CommandGate.Admission.Refused::class.java, admit(command = profileCommand(List(24) { 2_600 })))
+        assertInstanceOf(CommandGate.Admission.Run::class.java, admit(command = profileCommand(List(24) { 2_500 })))
+    }
 }

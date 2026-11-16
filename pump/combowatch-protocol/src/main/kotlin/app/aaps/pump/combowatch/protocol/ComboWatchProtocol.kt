@@ -31,6 +31,12 @@ object ComboWatchProtocol {
     const val CAPABILITY_EXECUTOR = "combowatch_executor"
 
     const val PROTOCOL_VERSION = 1
+
+    /**
+     * What a watch says it can do beyond the first set of commands, in [WatchHeartbeat.capabilities]. A command
+     * of a newer kind is sent only to a watch that names it: an older build does not know the kind at all.
+     */
+    const val CAN_SET_BASAL_PROFILE = "set-basal-profile"
 }
 
 /**
@@ -52,7 +58,16 @@ enum class CommandKind {
     CANCEL_TBR,
 
     /** Deliver a standard bolus of [ComboCommand.bolusTenthsIU] tenths of a unit. */
-    DELIVER_BOLUS
+    DELIVER_BOLUS,
+
+    /**
+     * Program the pump's basal profile: [ComboCommand.basalProfileFactors], 24 hourly rates in 0.001 U/h.
+     *
+     * The pump keeps the new profile only at the confirming press that ends the walk through its 24 screens, so a
+     * walk that breaks off leaves the old profile in place. Whatever the walk reported, the watch then reads all
+     * 24 hours back from the pump on a connection of its own, and the answer is what that reading shows.
+     */
+    SET_BASAL_PROFILE
 }
 
 /** Why a temporary basal is being set, so the watch's driver records the same type the phone would. */
@@ -128,7 +143,9 @@ data class ComboCommand(
     val force100Percent: Boolean? = null,
     /** Bolus amount in tenths of a unit, the Combo's own resolution: 3 means 0.3 U. */
     val bolusTenthsIU: Int? = null,
-    val bolusKind: BolusKind? = null
+    val bolusKind: BolusKind? = null,
+    /** For [CommandKind.SET_BASAL_PROFILE]: the 24 hourly rates from midnight, in 0.001 U/h. */
+    val basalProfileFactors: List<Int>? = null
 ) {
 
     fun toJson(): JSONObject = JSONObject()
@@ -145,6 +162,7 @@ data class ComboCommand(
             force100Percent?.let { put("force100Percent", it) }
             bolusTenthsIU?.let { put("bolusTenthsIU", it) }
             bolusKind?.let { put("bolusKind", it.name) }
+            basalProfileFactors?.let { factors -> put("basalProfileFactors", JSONArray().apply { factors.forEach { put(it) } }) }
         }
 
     companion object {
@@ -160,7 +178,8 @@ data class ComboCommand(
             tbrKind = if (json.has("tbrKind")) TbrKind.valueOf(json.getString("tbrKind")) else null,
             force100Percent = if (json.has("force100Percent")) json.getBoolean("force100Percent") else null,
             bolusTenthsIU = json.optIntOrNull("bolusTenthsIU"),
-            bolusKind = if (json.has("bolusKind")) BolusKind.valueOf(json.getString("bolusKind")) else null
+            bolusKind = if (json.has("bolusKind")) BolusKind.valueOf(json.getString("bolusKind")) else null,
+            basalProfileFactors = json.optJSONArray("basalProfileFactors")?.let { array -> List(array.length()) { array.getInt(it) } }
         )
     }
 }
@@ -479,7 +498,9 @@ data class WatchHeartbeat(
      * for a while sits behind a half-open Bluetooth link (03.11.2026), which only a Bluetooth
      * restart on the phone clears. Null from builds before this field.
      */
-    val phoneHeardAtEpochMs: Long? = null
+    val phoneHeardAtEpochMs: Long? = null,
+    /** What this build can do beyond the first commands, see [ComboWatchProtocol.CAN_SET_BASAL_PROFILE]; null from builds before this field. */
+    val capabilities: List<String>? = null
 ) {
 
     fun toJson(): JSONObject = JSONObject()
@@ -495,6 +516,7 @@ data class WatchHeartbeat(
             snapshot?.let { put("snapshot", it.toJson()) }
             heldPump?.let { put("heldPump", it) }
             phoneHeardAtEpochMs?.let { put("phoneHeardAt", it) }
+            capabilities?.let { list -> put("capabilities", JSONArray().apply { list.forEach { put(it) } }) }
         }
 
     companion object {
@@ -509,7 +531,8 @@ data class WatchHeartbeat(
             watchBatteryPercent = json.optIntOrNull("watchBattery"),
             snapshot = if (json.has("snapshot")) PumpSnapshot.fromJson(json.getJSONObject("snapshot")) else null,
             heldPump = if (json.has("heldPump")) json.getString("heldPump") else null,
-            phoneHeardAtEpochMs = if (json.has("phoneHeardAt")) json.getLong("phoneHeardAt") else null
+            phoneHeardAtEpochMs = if (json.has("phoneHeardAt")) json.getLong("phoneHeardAt") else null,
+            capabilities = json.optJSONArray("capabilities")?.let { array -> List(array.length()) { array.getString(it) } }
         )
     }
 }

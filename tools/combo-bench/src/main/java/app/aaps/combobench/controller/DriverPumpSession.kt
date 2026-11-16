@@ -151,6 +151,7 @@ internal class DriverPumpSession(
                 CommandKind.DELIVER_BOLUS -> bolus(command, record)
                 CommandKind.SET_TBR,
                 CommandKind.CANCEL_TBR    -> tbr(command, record)
+                CommandKind.SET_BASAL_PROFILE -> basalProfile(command, record)
             }
         } catch (e: Exception) {
             // Anything that escaped the per-command handling ended at a point this code cannot name -
@@ -221,6 +222,67 @@ internal class DriverPumpSession(
         return when (attempt) {
             is Attempt.NotReached -> PumpSession.SessionResult.Failed("pump not reached: ${attempt.reason}")
             is Attempt.Reached    -> attempt.value
+        }
+    }
+
+    // ---- BASAL PROFILE --------------------------------------------------------------------------
+
+    /**
+     * Program the pump's 24 hourly rates, then read all 24 back and answer by what was read.
+     *
+     * The pump keeps a new profile only at the confirming press that ends the walk through its screens, so a
+     * walk that breaks off anywhere before leaves the old one. What cannot be known from here is the moment in
+     * between: the press was sent and the link died before the pump showed its main screen again. So the walk's
+     * own report is never the answer. After it - whether it said done, failed or nothing at all - the watch
+     * forgets its copy of the profile and connects once more; the driver, having no copy, reads the pump's 24
+     * hours itself, and that reading says whether the pump holds what was asked for.
+     */
+    private suspend fun basalProfile(command: ComboCommand, record: SessionRecord): PumpSession.SessionResult {
+        val wanted = BasalProfile(checkNotNull(command.basalProfileFactors) { "SET_BASAL_PROFILE without the profile" })
+        var walk = "not started"
+        val write = try {
+            withPump(record) { connected ->
+                val pump = connected.pump
+                if (pump.stateFlow.value != Pump.State.ReadyForCommands)
+                    return@withPump "pump is ${pump.stateFlow.value::class.simpleName}, not ready for commands"
+                if (pump.currentBasalProfile == wanted) return@withPump null // it holds this profile already; the reading below confirms
+                record.phase("PROFILE_WRITE", JSONObject().put("totalUPerDay", wanted.factors.sum() / 1000.0))
+                walk = "under way"
+                withTimeout(PROFILE_WRITE_TIMEOUT_MS) { pump.setBasalProfile(wanted) }
+                walk = "confirmed"
+                record.phase("PROFILE_WRITTEN")
+                null
+            }
+        } catch (e: Exception) {
+            // The walk broke off somewhere. Where does not matter: the reading below is the answer.
+            walk = "broken off (${e.javaClass.simpleName}: ${e.message?.take(80) ?: ""})"
+            record.phase("PROFILE_WRITE_BROKEN", JSONObject().put("error", walk))
+            Attempt.Reached(null)
+        }
+        if (write is Attempt.NotReached)
+            return PumpSession.SessionResult.Failed("pump not reached: ${write.reason}; its basal profile is unchanged")
+        (write as Attempt.Reached).value?.let { notReady -> return PumpSession.SessionResult.Failed("$notReady; its basal profile is unchanged") }
+
+        // Forget the copy, so that the next connection reads the pump's own 24 hours instead of trusting ours:
+        // a copy that names no pump is no copy (see loadBasalProfile).
+        runCatching { files.write(BASAL_PROFILE_FILE, JSONObject().put("pump", "").put("forgottenAt", System.currentTimeMillis()).put("factors", JSONArray())) }
+        record.phase("PROFILE_READ_BACK")
+        val readBack = try {
+            withPump(record) { connected -> connected.pump.currentBasalProfile to snapshot(connected.pump, connected) }
+        } catch (e: Exception) {
+            return PumpSession.SessionResult.Unknown("basal profile: the walk was $walk, and reading the pump back failed (${e.javaClass.simpleName}: ${e.message?.take(80) ?: ""})")
+        }
+        if (readBack is Attempt.NotReached)
+            return PumpSession.SessionResult.Unknown("basal profile: the walk was $walk, and the pump was not reached to read it back (${readBack.reason})")
+        val (onPump, after) = (readBack as Attempt.Reached).value
+        return when {
+            onPump == null    -> PumpSession.SessionResult.Unknown("basal profile: the walk was $walk, and the pump's profile was not read")
+            onPump == wanted  -> PumpSession.SessionResult.Done(after)
+            else              -> PumpSession.SessionResult.Failed(
+                "the pump holds another basal profile than the one asked for (the walk was $walk); it differs in hours " +
+                    (0 until wanted.size).filter { onPump[it] != wanted[it] }.joinToString(","),
+                after
+            )
         }
     }
 
@@ -645,6 +707,9 @@ internal class DriverPumpSession(
         /** The same file the bench's own sessions use, so the 24-screen profile read happens once. */
         private const val BASAL_PROFILE_FILE = "manual-basal-profile.json"
         private const val BOLUS_TIMEOUT_MS = 4 * 60_000L
+
+        /** The walk through the pump's 24 hourly screens; a few seconds each when little changes, longer for big steps. */
+        private const val PROFILE_WRITE_TIMEOUT_MS = 6 * 60_000L
         private const val LIMITS_FILE = "controller-limits.json"
 
         /** Create this file in the app's files directory to profile sessions in a debug build. */

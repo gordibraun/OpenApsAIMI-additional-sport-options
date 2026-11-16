@@ -40,6 +40,7 @@ import app.aaps.core.objects.activity.ActivitySamplesCsv
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.pump.combowatch.protocol.BolusKind
 import app.aaps.pump.combowatch.protocol.ComboResult
+import app.aaps.pump.combowatch.protocol.ComboWatchProtocol
 import app.aaps.pump.combowatch.protocol.CommandKind
 import app.aaps.pump.combowatch.protocol.Outcome
 import app.aaps.pump.combowatch.protocol.ActivitySamples
@@ -547,10 +548,50 @@ class ComboWatchPlugin @Inject constructor(
     override fun loadTDDs(): PumpEnactResult = refuse()
 
     /**
-     * Writing a basal profile is a walk through 24 setting screens, far beyond what the watch's
-     * link to the pump carries reliably, so it is refused here and done in direct mode.
+     * The profile's 24 hourly rates, as the pump holds them, are handed to the watch, which walks the pump's 24
+     * screens and then reads all of them back; the answer is what that reading shows. The pump stores a new
+     * profile only at the last, confirming press, so a walk that breaks off leaves the old one.
+     *
+     * Until 16.11.2026 this was refused and left to the direct driver: the watch's link was then too slow for a
+     * walk of this length. It has since carried hundreds of temporary basals a day through the same screens. A
+     * watch whose build does not know the command is not asked.
      */
-    override fun setNewBasalProfile(profile: Profile): PumpEnactResult = refuse()
+    override fun setNewBasalProfile(profile: Profile): PumpEnactResult {
+        val enact = pumpEnactResultProvider.get()
+        if (link.lastHeartbeat?.capabilities?.contains(ComboWatchProtocol.CAN_SET_BASAL_PROFILE) != true)
+            return enact.also {
+                it.success = false; it.enacted = false
+                it.comment = rh.gs(R.string.combowatch_profile_needs_newer_watch)
+            }
+        val factors = basalFactors(profile)
+        aapsLogger.info(LTag.PUMP, "combowatch: basal profile asked of the pump: ${factors.joinToString(",")} (${factors.sum() / 1000.0} U a day)")
+        val result = dispatch(CommandKind.SET_BASAL_PROFILE, basalProfileFactors = factors)
+        aapsLogger.info(
+            LTag.PUMP,
+            "combowatch: basal profile ${result.outcome} ${result.reason ?: ""}; the pump holds ${result.snapshot?.basalProfileFactors?.joinToString(",") ?: "?"}"
+        )
+        when (result.outcome) {
+            Outcome.DONE -> {
+                enact.success = true
+                enact.enacted = true
+                profileLastCompared = profile
+            }
+
+            else         -> {
+                enact.success = false
+                enact.enacted = false
+                enact.comment = when (result.outcome) {
+                    Outcome.UNKNOWN -> rh.gs(R.string.combowatch_profile_unknown, result.reason ?: "")
+                    else            -> rh.gs(R.string.combowatch_profile_not_set, result.reason ?: result.outcome.name)
+                }
+            }
+        }
+        return enact
+    }
+
+    /** The profile's rate in each hour from midnight, rounded the way the pump holds rates, in 0.001 U/h. */
+    internal fun basalFactors(profile: Profile): List<Int> =
+        (0 until 24).map { hour -> comboBasalFactor((profile.getBasalTimeFromMidnight(hour * 60 * 60) * 1000.0).roundToInt()) }
 
     /**
      * Compared against the profile the watch read off the pump, because every TBR percentage is
@@ -560,9 +601,7 @@ class ComboWatchPlugin @Inject constructor(
     override fun isThisProfileSet(profile: Profile): Boolean {
         profileLastCompared = profile
         val onPump = snapshot?.basalProfileFactors ?: return true
-        return (0 until 24).all { hour ->
-            comboBasalFactor((profile.getBasalTimeFromMidnight(hour * 60 * 60) * 1000.0).toInt()) == onPump.getOrNull(hour)
-        }
+        return basalFactors(profile) == onPump
     }
 
     // ---- identity ----------------------------------------------------------------------------
@@ -962,7 +1001,8 @@ class ComboWatchPlugin @Inject constructor(
         force100Percent: Boolean? = null,
         bolusTenthsIU: Int? = null,
         bolusKind: BolusKind? = null,
-        validForMs: Long = COMMAND_VALID_MS
+        validForMs: Long = COMMAND_VALID_MS,
+        basalProfileFactors: List<Int>? = null
     ): ComboResult = runBlocking {
         // Reading the pump is always allowed: it is how the phone finds out which pump is there.
         if (kind != CommandKind.STATUS) {
@@ -986,7 +1026,8 @@ class ComboWatchPlugin @Inject constructor(
             bolusTenthsIU = bolusTenthsIU,
             bolusKind = bolusKind,
             snapshot = snapshots.current(pumpSerial),
-            maxBolusTenthsIU = watchBolusLimitTenths()
+            maxBolusTenthsIU = watchBolusLimitTenths(),
+            basalProfileFactors = basalProfileFactors
         )
     }
 

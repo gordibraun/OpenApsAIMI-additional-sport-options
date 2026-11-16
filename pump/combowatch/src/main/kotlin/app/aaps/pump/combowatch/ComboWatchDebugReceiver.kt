@@ -48,6 +48,12 @@ import javax.inject.Inject
  * And `--es cmd TRIAL_NOTE [--es text '...']` puts a test line through the path of the rules on trial (main
  * screen list, lease, watch journal and notice); it changes no dose and counts as neither rule acting.
  *
+ * And `--es cmd PROFILE_BASAL --es rates '1=1.05,2=1.05,...' [--ez dry true]` changes the named hours (from
+ * midnight, U/h) of the basal of the local profile that is running, saves it and activates it - the same two
+ * steps as «Сохранить» and «Активировать профиль» on the profile screen, so the pump is then written the usual
+ * way. With `dry` it only says what would change. It refuses when the profile shown in the editor is not the one
+ * running, when a rate is not one the pump holds, or when an hour would move by more than a third.
+ *
  * The answer is written to files/combowatch-debug.json.
  */
 class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
@@ -55,6 +61,9 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
     @Inject lateinit var link: ComboWatchLink
     @Inject lateinit var plugin: ComboWatchPlugin
     @Inject lateinit var aapsLogger: AAPSLogger
+    @Inject lateinit var activePlugin: app.aaps.core.interfaces.plugin.ActivePlugin
+    @Inject lateinit var preferences: app.aaps.core.keys.interfaces.Preferences
+    @Inject lateinit var profileFunction: app.aaps.core.interfaces.profile.ProfileFunction
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
@@ -76,6 +85,62 @@ class ComboWatchDebugReceiver : DaggerBroadcastReceiver() {
             val text = intent.getStringExtra("text") ?: "Проверка: правила на пробе видны на телефоне и на часах (тестовая запись, доз не меняет)"
             runCatching { app.aaps.core.objects.trials.TrialRules.get(context).add("test", System.currentTimeMillis(), text) }
             val answer = JSONObject().put("tag", tag).put("cmd", cmd).put("noted", true)
+            runCatching { out.writeText(answer.toString()) }
+            aapsLogger.info(LTag.PUMP, "combowatch debug: $answer")
+            return
+        }
+        if (cmd == "AUTOTUNE_AUTO_OFF") {
+            // Autotune's «Automation Switch Profile»: with it on, any automation rule that runs Autotune rewrites the
+            // running profile's basal, ISF, IC and DIA and switches to it. Found on, 16.11.2026; nothing runs it today.
+            val answer = JSONObject().put("tag", tag).put("cmd", cmd)
+            runCatching {
+                answer.put("was", preferences.get(app.aaps.core.keys.BooleanKey.AutotuneAutoSwitchProfile))
+                preferences.put(app.aaps.core.keys.BooleanKey.AutotuneAutoSwitchProfile, false)
+                answer.put("now", preferences.get(app.aaps.core.keys.BooleanKey.AutotuneAutoSwitchProfile))
+            }.onFailure { answer.put("error", "${it.javaClass.simpleName}: ${it.message}") }
+            runCatching { out.writeText(answer.toString()) }
+            aapsLogger.info(LTag.PUMP, "combowatch debug: $answer")
+            return
+        }
+        if (cmd == "PROFILE_BASAL") {
+            val answer = JSONObject().put("tag", tag).put("cmd", cmd)
+            try {
+                val changes = checkNotNull(ProfileBasalEdit.parse(intent.getStringExtra("rates") ?: "")) { "rates must be like 1=1.05,2=1.05" }
+                val source = activePlugin.activeProfileSource
+                val current = checkNotNull(source.currentProfile()) { "no local profile is open in the editor" }
+                val running = profileFunction.getOriginalProfileName()
+                check(current.name == running) { "the editor shows «${current.name}», the running profile is «$running»" }
+                val before = checkNotNull(ProfileBasalEdit.hourly(current.basal)) { "the profile's basal blocks cannot be read: ${current.basal}" }
+                val after = ProfileBasalEdit.apply(before, changes)
+                // Only the hours that are being changed are held to the pump's own steps: the others stay as the owner
+                // wrote them (1.23 is kept by the pump as 1.25, and AAPS has always been told so).
+                changes.forEach { (hour, rate) ->
+                    check(ComboWatchPlugin.comboBasalFactor(kotlin.math.round(rate * 1000.0).toInt()) == kotlin.math.round(rate * 1000.0).toInt()) { "hour $hour: $rate U/h is not a rate the pump holds" }
+                    check(rate >= 0.05) { "hour $hour: $rate U/h is below what the pump holds" }
+                    check(kotlin.math.abs(rate - before[hour]) <= before[hour] / 3.0 + 1e-9) { "hour $hour: ${before[hour]} -> $rate is a change of more than a third" }
+                }
+                answer.put("profile", current.name)
+                    .put("watchWritesProfiles", link.lastHeartbeat?.capabilities?.contains(app.aaps.pump.combowatch.protocol.ComboWatchProtocol.CAN_SET_BASAL_PROFILE) == true)
+                    .put("onPump", link.lastSnapshot?.basalProfileFactors?.let { org.json.JSONArray(it) } ?: JSONObject.NULL)
+                    .put("before", org.json.JSONArray(before)).put("after", org.json.JSONArray(after))
+                    .put("totalBefore", before.sum()).put("totalAfter", after.sum())
+                if (intent.getBooleanExtra("dry", false)) answer.put("dry", true)
+                else {
+                    val now = System.currentTimeMillis()
+                    current.basal = ProfileBasalEdit.blocks(after)
+                    source.storeSettings(null, now)
+                    val store = checkNotNull(source.profile) { "the profile store is empty after saving" }
+                    val switched = profileFunction.createProfileSwitch(
+                        profileStore = store, profileName = current.name, durationInMinutes = 0, percentage = 100, timeShiftInHours = 0, timestamp = now,
+                        action = app.aaps.core.data.ue.Action.PROFILE_SWITCH, source = app.aaps.core.data.ue.Sources.Maintenance,
+                        note = intent.getStringExtra("note") ?: "Базал по часам обновлён по слову владельца",
+                        listValues = listOf(app.aaps.core.data.ue.ValueWithUnit.SimpleString(current.name), app.aaps.core.data.ue.ValueWithUnit.Percent(100))
+                    )
+                    answer.put("saved", true).put("switchCreated", switched)
+                }
+            } catch (t: Throwable) {
+                answer.put("error", "${t.javaClass.simpleName}: ${t.message}")
+            }
             runCatching { out.writeText(answer.toString()) }
             aapsLogger.info(LTag.PUMP, "combowatch debug: $answer")
             return

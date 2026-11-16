@@ -280,6 +280,7 @@ class ManualPumpSetupActivity : Activity() {
             CommandKind.SET_TBR       -> "базал ${entry.tbrPercentage ?: "?"} %"
             CommandKind.CANCEL_TBR    -> "отмена временного базала"
             CommandKind.DELIVER_BOLUS -> "болюс ${(entry.bolusTenthsIU ?: 0) / 10.0} ЕД"
+            CommandKind.SET_BASAL_PROFILE -> "запись базального профиля (${entry.basalProfileFactors?.let { "%.2f ЕД/сут".format(it.sum() / 1000.0) } ?: "?"})"
             null                      -> "команда"
         }
         val outcome = when (entry.outcome) {

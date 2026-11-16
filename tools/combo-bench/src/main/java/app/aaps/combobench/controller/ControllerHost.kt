@@ -286,6 +286,7 @@ internal class ControllerHost private constructor(context: Context) {
                 CommandKind.DELIVER_BOLUS -> "болюс ${(entry.bolusTenthsIU ?: 0) / 10.0} ЕД"
                 CommandKind.SET_TBR       -> "TBR ${entry.tbrPercentage ?: "?"} %"
                 CommandKind.CANCEL_TBR    -> "отмена TBR"
+                CommandKind.SET_BASAL_PROFILE -> "запись базального профиля"
                 else                      -> "команда"
             }
             warnings += "Исход последней команды ($what) не выяснен. После отвязки узнать его можно будет только по самой помпе"
@@ -1369,7 +1370,8 @@ internal class ControllerHost private constructor(context: Context) {
                 ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)?.takeIf { it in 0..100 },
             // Only ever a reading of the pump held now, never one left over from another.
             snapshot = lastSnapshot?.takeIf { it.pumpSerial == held },
-            heldPump = held
+            heldPump = held,
+            capabilities = listOf(ComboWatchProtocol.CAN_SET_BASAL_PROFILE)
         )
         files.write(HEARTBEAT_FILE, heartbeat.toJson())
         toPhone(ComboWatchProtocol.PATH_HEARTBEAT, heartbeat.toJson())
@@ -1605,6 +1607,7 @@ internal class ControllerHost private constructor(context: Context) {
         .put("kind", entry.kind?.name ?: JSONObject.NULL)
         .put("bolusTenthsIU", entry.bolusTenthsIU ?: JSONObject.NULL)
         .put("tbrPercentage", entry.tbrPercentage ?: JSONObject.NULL)
+        .put("basalProfileFactors", entry.basalProfileFactors?.let { JSONArray(it) } ?: JSONObject.NULL)
         .put("abandoned", entry.abandoned)
 
     private fun saveJournal(entries: List<CommandJournal.Entry>) {
@@ -1626,6 +1629,7 @@ internal class ControllerHost private constructor(context: Context) {
                 kind = if (json.isNull("kind")) null else CommandKind.valueOf(json.getString("kind")),
                 bolusTenthsIU = if (json.isNull("bolusTenthsIU")) null else json.getInt("bolusTenthsIU"),
                 tbrPercentage = if (json.isNull("tbrPercentage")) null else json.getInt("tbrPercentage"),
+                basalProfileFactors = json.optJSONArray("basalProfileFactors")?.let { factors -> List(factors.length()) { factors.getInt(it) } },
                 abandoned = json.optBoolean("abandoned", false)
             )
         }

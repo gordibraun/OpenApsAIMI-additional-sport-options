@@ -44,4 +44,26 @@ class RegulationSnapshotJsonTest {
         assertNull(olderPhone.carbsRequiredG)
         assertNull(olderPhone.carbsRequiredWithinMin)
     }
+
+    @Test fun `a basal profile command survives the trip to the watch, and older commands carry none`() {
+        val profile = List(24) { 900 + it * 10 }
+        val sent = app.aaps.pump.combowatch.protocol.ComboCommand(
+            "p1", 7L, app.aaps.pump.combowatch.protocol.CommandKind.SET_BASAL_PROFILE, 1_000L, 2_000L, basalProfileFactors = profile
+        )
+        val back = app.aaps.pump.combowatch.protocol.ComboCommand.fromJson(org.json.JSONObject(sent.toJson().toString()))
+        assertEquals(app.aaps.pump.combowatch.protocol.CommandKind.SET_BASAL_PROFILE, back.kind)
+        assertEquals(profile, back.basalProfileFactors)
+        val tbr = app.aaps.pump.combowatch.protocol.ComboCommand("t1", 7L, app.aaps.pump.combowatch.protocol.CommandKind.SET_TBR, 1_000L, 2_000L, percentage = 0, durationMinutes = 30)
+        assertEquals(null, app.aaps.pump.combowatch.protocol.ComboCommand.fromJson(org.json.JSONObject(tbr.toJson().toString())).basalProfileFactors)
+    }
+
+    @Test fun `a watch says what it can do in its heartbeat, and an older one says nothing`() {
+        fun beat(capabilities: List<String>?) = app.aaps.pump.combowatch.protocol.WatchHeartbeat(
+            atEpochMs = 1L, leaseGeneration = 7L, leaseLive = true, executorBusy = false, awaitingReconciliation = false,
+            pumpReachable = true, watchBatteryPercent = 80, capabilities = capabilities
+        )
+        val can = app.aaps.pump.combowatch.protocol.ComboWatchProtocol.CAN_SET_BASAL_PROFILE
+        assertEquals(listOf(can), app.aaps.pump.combowatch.protocol.WatchHeartbeat.fromJson(org.json.JSONObject(beat(listOf(can)).toJson().toString())).capabilities)
+        assertEquals(null, app.aaps.pump.combowatch.protocol.WatchHeartbeat.fromJson(org.json.JSONObject(beat(null).toJson().toString())).capabilities)
+    }
 }

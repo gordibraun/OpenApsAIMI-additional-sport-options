@@ -102,7 +102,8 @@ class ComboExecutor(
                 CommandKind.SET_TBR    -> command.percentage
                 CommandKind.CANCEL_TBR -> 100
                 else                   -> null
-            }
+            },
+            basalProfileFactors = command.basalProfileFactors?.takeIf { command.kind == CommandKind.SET_BASAL_PROFILE }
         )
         busy = true
         inFlightId = command.id
@@ -205,6 +206,23 @@ class ComboExecutor(
                     if (tookEffect) Outcome.DONE else Outcome.FAILED,
                     "reconciled from pump: shows ${shown ?: "nothing"} %, wanted ${wanted ?: "?"} %"
                 )
+            }
+
+            // A profile is judged against the profile the pump holds. The session that left it unclear also
+            // dropped the watch's copy, so what this reading reports was read off the pump's 24 screens just now.
+            CommandKind.SET_BASAL_PROFILE -> {
+                val wanted = unresolved.basalProfileFactors
+                val onPump = snapshot.basalProfileFactors
+                // An unsettled profile must not hold boluses and temporary basals back for long: a reading that
+                // brings no profile closes it as not confirmed, and the phone compares again with the next one.
+                if (wanted != null && onPump == wanted)
+                    journal.markFinished(unresolved.id, Outcome.DONE, "reconciled from pump: it holds the profile that was asked for")
+                else
+                    journal.markFinished(
+                        unresolved.id, Outcome.FAILED,
+                        if (onPump == null) "reconciled from pump: its profile was not read; not confirmed"
+                        else "reconciled from pump: it holds another profile than the one asked for"
+                    )
             }
 
             else                      ->

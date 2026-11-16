@@ -6,6 +6,9 @@
     <string name="combowatch_watch_unreachable">Часы недоступны</string>
     <string name="combowatch_not_supported">Через часы эта команда не передаётся; выполните её в прямом режиме</string>
     <string name="combowatch_awaiting_reconciliation">Исход прошлой команды не выяснен, часы сверяются с помпой</string>
+    <string name="combowatch_profile_needs_newer_watch">Базальный профиль в помпу записывают часы, а их приложение «Combo: стенд» этого ещё не умеет (нужна версия 0.74 или новее). Профиль в помпе не изменён</string>
+    <string name="combowatch_profile_not_set">Базальный профиль в помпу не записан: %1$s. В помпе остался прежний профиль</string>
+    <string name="combowatch_profile_unknown">Запись базального профиля: исход не выяснен (%1$s). Часы прочитают профиль из помпы при следующей связи, тогда станет ясно</string>
     <string name="combowatch_outcome_unknown">Исход не выяснен: часы сверяются с помпой, повторять команду нельзя</string>
     <string name="combowatch_bolus_outcome_unknown">Исход болюса %1$.1f ЕД не выяснен: скорее всего, он уже идёт на помпе. Ничего не подавайте повторно: через 1–2 минуты часы сверятся с помпой и запишут поданное. Остановить с телефона нельзя.</string>
     <string name="combowatch_bolus_delivered">Болюс %1$.1f ЕД подан через часы</string>

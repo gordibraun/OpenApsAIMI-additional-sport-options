@@ -75,6 +75,9 @@ class BasalLearner @Inject constructor(
         load()
     }
 
+    /** When the learner last took a reading in; it steers nothing it has not been able to check for long, see BasalEstimateAnchor. */
+    val lastObservationAtEpochMs: Long get() = lastObservationTime
+
     /**
      * Returns the combined multiplier from all three scales.
      * Weights: Short 40%, Medium 35%, Long 25%

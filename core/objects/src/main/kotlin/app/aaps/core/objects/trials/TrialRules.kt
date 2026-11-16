@@ -38,6 +38,21 @@ class TrialRules private constructor(context: Context) {
             noteSwitch(KEY_WARN, when (value) { WarnMode.OFF -> "выключено"; WarnMode.RECORD -> "только запись"; WarnMode.BUZZ -> "запись и жужжание на часах" })
         }
 
+    /**
+     * AIMI's own figure for "this person's basal" is held to the mean of the profile's basal instead of being
+     * multiplied by what the basal learner last learned; see BasalEstimateAnchor. On trial since 16.11.2026.
+     */
+    var anchorEnabled: Boolean
+        get() = prefs.getBoolean(PREF_ANCHOR, true)
+        set(value) { prefs.edit().putBoolean(PREF_ANCHOR, value).apply(); noteSwitch(KEY_ANCHOR, if (value) "включено" else "выключено") }
+
+    /** How a rule stands right now, in one sentence, for the screen; not an event - a rule that acts on every run says it here. */
+    fun state(key: String): String? = prefs.getString(PREF_STATE + key, null)
+
+    fun setState(key: String, text: String) {
+        if (state(key) != text) prefs.edit().putString(PREF_STATE + key, text).apply()
+    }
+
     private fun noteSwitch(key: String, state: String) = add(key, System.currentTimeMillis(), "${name(key)}: $state владельцем")
 
     /** A rule acted, or was switched: one sentence, kept for the screens. */
@@ -60,6 +75,7 @@ class TrialRules private constructor(context: Context) {
 
         const val KEY_CAP = "unconfirmed-rise-cap"
         const val KEY_WARN = "low-forecast-warning"
+        const val KEY_ANCHOR = "basal-estimate-anchor"
 
         /** The day both went on trial. */
         const val SINCE = "15.11.2026"
@@ -73,12 +89,15 @@ class TrialRules private constructor(context: Context) {
         fun name(key: String): String = when (key) {
             KEY_CAP  -> "Первая микродоза на неподтверждённом скачке не больше 0,5 ЕД"
             KEY_WARN -> "Раннее предупреждение о низком прогнозе"
+            KEY_ANCHOR -> "Внутренний базал AIMI держится за средний базал профиля"
             else     -> key
         }
 
         private const val FILE = "trial_rules"
         private const val PREF_CAP = "cap_enabled"
         private const val PREF_WARN = "warn_mode"
+        private const val PREF_ANCHOR = "anchor_enabled"
+        private const val PREF_STATE = "state_"
         private const val PREF_EVENTS = "events"
         private const val MAX_EVENTS = 60
 

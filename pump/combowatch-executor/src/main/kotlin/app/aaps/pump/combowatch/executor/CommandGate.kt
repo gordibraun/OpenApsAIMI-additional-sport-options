@@ -94,7 +94,28 @@ class CommandGate(
             CommandKind.CANCEL_TBR    -> Admission.Run
             CommandKind.SET_TBR       -> admitTbr(command)
             CommandKind.DELIVER_BOLUS -> admitBolus(command, lease)
+            CommandKind.SET_BASAL_PROFILE -> admitBasalProfile(command)
         }
+    }
+
+    /**
+     * A basal profile is what the pump delivers when nobody is steering it, so a nonsensical one is turned away
+     * before any session: all 24 hours must be there, each a rate the owner's pump could plausibly hold, and the
+     * day's total within what a profile of his has ever been near.
+     */
+    private fun admitBasalProfile(command: ComboCommand): Admission {
+        val factors = command.basalProfileFactors
+            ?: return Admission.Refused("SET_BASAL_PROFILE without the profile")
+        if (factors.size != BASAL_PROFILE_HOURS)
+            return Admission.Refused("a basal profile has $BASAL_PROFILE_HOURS hourly rates, this one ${factors.size}")
+        factors.forEachIndexed { hour, factor ->
+            if (factor !in ALLOWED_BASAL_FACTOR_RANGE)
+                return Admission.Refused("hour $hour: ${factor / 1000.0} U/h is outside ${ALLOWED_BASAL_FACTOR_RANGE.first / 1000.0}..${ALLOWED_BASAL_FACTOR_RANGE.last / 1000.0} U/h")
+        }
+        val total = factors.sum() / 1000.0
+        if (total > MAX_BASAL_PROFILE_TOTAL_U)
+            return Admission.Refused("the profile's $total U a day is above $MAX_BASAL_PROFILE_TOTAL_U U")
+        return Admission.Run
     }
 
     private fun admitBolus(command: ComboCommand, lease: ControlLease): Admission {
@@ -135,6 +156,14 @@ class CommandGate(
         private const val PERCENTAGE_STEP = 10
         private val ALLOWED_DURATION_RANGE = 15..(24 * 60)
         private const val DURATION_STEP_MINUTES = 15
+
+        const val BASAL_PROFILE_HOURS = 24
+
+        /** 0.05 U/h, the least the Combo holds as an hourly rate, to 5.0 U/h: several times any rate this owner has had. */
+        val ALLOWED_BASAL_FACTOR_RANGE = 50..5_000
+
+        /** The day's basal a profile may add up to. */
+        const val MAX_BASAL_PROFILE_TOTAL_U = 60.0
 
         /** 3.0 U: room for the loop's microboluses, and deliberately not for a meal bolus. */
         const val DEFAULT_MAX_BOLUS_TENTHS_IU = 30
