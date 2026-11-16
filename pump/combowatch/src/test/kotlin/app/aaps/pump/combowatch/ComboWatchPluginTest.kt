@@ -188,6 +188,112 @@ class ComboWatchPluginTest : TestBaseWithProfile() {
         verify(persistenceLayer, never()).syncPumpBolus(any(), any())
     }
 
+    // ---- temporary basals, when the pump's events arrive twice ----------------------------------------
+
+    /**
+     * The records of temporary basals, kept by the two rules AAPS files them with: a start ends whatever runs
+     * at its moment and is entered once per id; an end, once per id, ends whatever runs at its moment unless
+     * that has been ended by an end already.
+     */
+    private class BasalRecords {
+
+        class Row(val pumpId: Long, val start: Long, var end: Long, val percent: Int, var endId: Long? = null)
+
+        val rows = mutableListOf<Row>()
+        private fun runningAt(t: Long) = rows.filter { it.start <= t && it.end > t }.maxByOrNull { it.start }
+
+        fun start(timestamp: Long, percent: Int, durationMs: Long, pumpId: Long): Boolean {
+            if (rows.any { it.pumpId == pumpId }) return false
+            runningAt(timestamp)?.let { it.end = timestamp; it.endId = pumpId }
+            rows += Row(pumpId, timestamp, timestamp + durationMs, percent)
+            return true
+        }
+
+        fun stop(timestamp: Long, endPumpId: Long): Boolean {
+            if (rows.any { it.endId == endPumpId }) return false
+            val running = runningAt(timestamp)?.takeIf { it.endId == null } ?: return false
+            running.end = timestamp
+            running.endId = endPumpId
+            return true
+        }
+
+        fun minutesOf(percent: Int) = rows.single { it.percent == percent }.let { (it.end - it.start) / 60_000.0 }
+    }
+
+    private fun recordsKeptIn(records: BasalRecords) {
+        whenever(pumpSync.syncTemporaryBasalWithPumpId(any(), any(), any(), any(), anyOrNull(), any(), any(), any())).thenAnswer {
+            records.start(it.getArgument(0), it.getArgument<Double>(1).toInt(), it.getArgument(2), it.getArgument(5))
+        }
+        whenever(pumpSync.syncStopTemporaryBasalWithPumpId(any(), any(), any(), any(), any())).thenAnswer {
+            records.stop(it.getArgument(0), it.getArgument(1))
+        }
+    }
+
+    private fun tbrStarted(seq: Long, at: Long, percent: Int) = PumpEvent(
+        seq = seq, type = PumpEvent.Type.TBR_STARTED, timestampEpochMs = at, tbrPercentage = percent, tbrDurationMinutes = 30, tbrType = "normal", pumpSerial = pumpA
+    )
+
+    private fun tbrEnded(seq: Long, at: Long) = PumpEvent(seq = seq, type = PumpEvent.Type.TBR_ENDED, timestampEpochMs = at, pumpSerial = pumpA)
+
+    // 16.11.2026, as the watch reported it: 150 % from 07:19:05; replaced at 07:24 by 340 % (the old one "ended"
+    // at 07:24:50, the new one "started" at 07:24:24, in that order); replaced at 07:39 by 40 %.
+    private val at071905 = 1_794_802_745_942L
+    private val at072424 = 1_794_803_064_886L
+    private val at072450 = 1_794_803_090_514L
+    private val at073906 = 1_794_803_946_576L
+    private val at073938 = 1_794_803_978_185L
+
+    @Test
+    fun `a basal stays on record for as long as the pump ran it although its events arrived twice`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        val records = BasalRecords()
+        recordsKeptIn(records)
+        plugin.handlePumpEvent(tbrStarted(17368, at071905, 150))
+        // The answer to the command brings the pair, and the watch's own message brings it again.
+        repeat(2) {
+            plugin.handlePumpEvent(tbrEnded(17369, at072450))
+            plugin.handlePumpEvent(tbrStarted(17370, at072424, 340))
+        }
+        assertThat(records.minutesOf(340)).isEqualTo(30.0)
+        repeat(2) {
+            plugin.handlePumpEvent(tbrEnded(17372, at073938))
+            plugin.handlePumpEvent(tbrStarted(17373, at073906, 40))
+        }
+        // 07:19:05-07:24:24, 07:24:24-07:39:06, and the last one still running.
+        assertThat(records.minutesOf(150)).isWithin(0.01).of((at072424 - at071905) / 60_000.0)
+        assertThat(records.minutesOf(340)).isWithin(0.01).of((at073906 - at072424) / 60_000.0)
+        assertThat(records.minutesOf(40)).isEqualTo(30.0)
+    }
+
+    @Test
+    fun `events that arrive once are filed exactly as before`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        val records = BasalRecords()
+        recordsKeptIn(records)
+        plugin.handlePumpEvent(tbrStarted(17368, at071905, 150))
+        plugin.handlePumpEvent(tbrEnded(17369, at072450))
+        plugin.handlePumpEvent(tbrStarted(17370, at072424, 340))
+        plugin.handlePumpEvent(tbrEnded(17372, at073938))
+        plugin.handlePumpEvent(tbrStarted(17373, at073906, 40))
+        assertThat(records.minutesOf(150)).isWithin(0.01).of((at072424 - at071905) / 60_000.0)
+        assertThat(records.minutesOf(340)).isWithin(0.01).of((at073906 - at072424) / 60_000.0)
+        assertThat(records.minutesOf(40)).isEqualTo(30.0)
+    }
+
+    @Test
+    fun `a basal the owner or the loop cancels is ended where the pump ended it, also when told twice`() {
+        registered(pumpA)
+        watchHolds(pumpA)
+        val records = BasalRecords()
+        recordsKeptIn(records)
+        plugin.handlePumpEvent(tbrStarted(17370, at072424, 340))
+        // Cancelled five minutes in: an end alone, no start after it.
+        repeat(2) { plugin.handlePumpEvent(tbrEnded(17371, at072424 + 5 * 60_000L)) }
+        assertThat(records.minutesOf(340)).isEqualTo(5.0)
+    }
+
     @Test
     fun `carbohydrates entered on the watch are filed as carbohydrates, whatever the pump's registration says`() {
         registered(pumpA)

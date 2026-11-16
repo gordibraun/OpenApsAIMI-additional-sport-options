@@ -140,6 +140,18 @@ class ComboWatchPlugin @Inject constructor(
 
     @Volatile private var lastBolus: Pair<Long, Double>? = null
 
+    /**
+     * The order the pump reported its temporary basals in, kept across restarts: a copy of an "ended" event must
+     * not cut the basal that has replaced the one it was about. See [TbrEventOrder].
+     */
+    private val tbrOrder by lazy {
+        val kept = runCatching { context.getSharedPreferences(TBR_ORDER_PREFS, Context.MODE_PRIVATE) }.getOrNull()
+        TbrEventOrder(
+            load = { kept?.takeIf { it.contains(TBR_ORDER_SEQ) }?.let { it.getLong(TBR_ORDER_SEQ, 0L) to it.getLong(TBR_ORDER_AT, 0L) } },
+            save = { seq, at -> kept?.edit()?.putLong(TBR_ORDER_SEQ, seq)?.putLong(TBR_ORDER_AT, at)?.apply() }
+        )
+    }
+
     /** One reading of the pump asked of the watch, and how it ended; for the owner's «Обновить с помпы». */
     class StatusRead(val startedAtEpochMs: Long, val finishedAtEpochMs: Long, val outcome: Outcome, val reason: String?)
 
@@ -650,15 +662,21 @@ class ComboWatchPlugin @Inject constructor(
                     ).blockingGet()
                     aapsLogger.info(LTag.PUMP, "combowatch: TBR ${rate.toInt()} % from before AAPS registered $serial anew, filed all the same")
                 }
+                tbrOrder.started(event.seq, event.timestampEpochMs)
             }
 
-            PumpEvent.Type.TBR_ENDED            -> {
-                val filed = pumpSync.syncStopTemporaryBasalWithPumpId(
-                    timestamp = event.timestampEpochMs, endPumpId = event.timestampEpochMs, pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial
-                )
-                if (!filed && historyOfAKnownPump(serial, event.timestampEpochMs))
-                    persistenceLayer.syncPumpCancelTemporaryBasalIfAny(event.timestampEpochMs, event.timestampEpochMs, PumpType.ACCU_CHEK_COMBO, serial).blockingGet()
-            }
+            // An end is filed by its time alone. A copy of one that arrives after the basal it was about has been
+            // replaced would end the replacement instead, twenty seconds into it, while the pump runs it on.
+            PumpEvent.Type.TBR_ENDED            ->
+                if (tbrOrder.endIsOfAReplacedBasal(event.seq, event.timestampEpochMs))
+                    aapsLogger.info(LTag.PUMP, "combowatch: TBR end ${event.seq} is of a basal already replaced; the one running now is left as it is")
+                else {
+                    val filed = pumpSync.syncStopTemporaryBasalWithPumpId(
+                        timestamp = event.timestampEpochMs, endPumpId = event.timestampEpochMs, pumpType = PumpType.ACCU_CHEK_COMBO, pumpSerial = serial
+                    )
+                    if (!filed && historyOfAKnownPump(serial, event.timestampEpochMs))
+                        persistenceLayer.syncPumpCancelTemporaryBasalIfAny(event.timestampEpochMs, event.timestampEpochMs, PumpType.ACCU_CHEK_COMBO, serial).blockingGet()
+                }
 
             PumpEvent.Type.UNKNOWN_TBR_DETECTED -> uiInteraction.addNotification(
                 Notification.COMBO_UNKNOWN_TBR,
@@ -1066,5 +1084,9 @@ class ComboWatchPlugin @Inject constructor(
         private const val COMMAND_VALID_MS = 4 * 60_000L
         private const val BOLUS_VALID_MS = 2 * 60_000L
         private const val COMMAND_TIMEOUT_MS = 12 * 60_000L
+
+        private const val TBR_ORDER_PREFS = "combowatch_tbr_order"
+        private const val TBR_ORDER_SEQ = "newestStartSeq"
+        private const val TBR_ORDER_AT = "newestStartAtEpochMs"
     }
 }
