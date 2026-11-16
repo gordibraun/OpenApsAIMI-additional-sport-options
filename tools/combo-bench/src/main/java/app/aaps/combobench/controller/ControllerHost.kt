@@ -410,7 +410,23 @@ internal class ControllerHost private constructor(context: Context) {
         runCatching { onSensingTick(System.currentTimeMillis()) }
         runCatching { checkDeafness(System.currentTimeMillis()) }
         runCatching { pruneSessionRecords() }
+        // A stop of basal running out with glucose low: the phone has its turn with this reading first, then the watch looks.
+        runCatching { if (runner.wantsLowHold()) ControllerService.schedule(context, ControllerService.PATH_LOW_HOLD, null, LOW_HOLD_AFTER_READING_MS) }
         return runner.wantsToRun() || runner.needsSettling()
+    }
+
+    /**
+     * The low-glucose hold: see [AutonomyRunner.holdOnLow]. Under the pump's lock, so that a command of the
+     * phone's that is being carried out is finished - and seen - before the watch decides anything.
+     */
+    fun holdOnLow(rehearsal: Boolean = false): JSONObject? = synchronized(pumpTurn) {
+        val entry = runner.holdOnLow(rehearsal)
+        if (rehearsal && entry != null) files.write(LOW_HOLD_REHEARSAL_FILE, entry)
+        if (!rehearsal && entry != null) {
+            sendEvents()
+            refreshFace()
+        }
+        entry
     }
 
     // ---- sensing a walk or a sport session ------------------------------------------------------
@@ -1694,6 +1710,14 @@ internal class ControllerHost private constructor(context: Context) {
 
         /** A reading the owner asked for that has not finished by then is taken for lost, and another may be asked for. */
         private const val OWNER_READ_GIVE_UP_MS = 6 * 60_000L
+
+        /**
+         * How long after a reading the low-glucose hold looks at the pump. The phone's own command for the same
+         * reading reaches the watch within half a minute to a minute and, while it is carried out, holds the pump's
+         * lock - so by then it is either done, or under way and finished before the watch looks, or not coming.
+         */
+        private const val LOW_HOLD_AFTER_READING_MS = 90_000L
+        const val LOW_HOLD_REHEARSAL_FILE = "low-hold-rehearsal.json"
 
         /** Heard within this long, the phone is taken to be in touch and to get the records at once. */
         private const val PHONE_IN_TOUCH_MS = 5 * 60_000L

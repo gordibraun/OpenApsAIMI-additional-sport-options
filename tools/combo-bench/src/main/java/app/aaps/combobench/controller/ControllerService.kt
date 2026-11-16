@@ -102,6 +102,8 @@ class ControllerService : Service() {
             PATH_REHEARSAL                     -> host.regulate(rehearsal = true)
             PATH_OWNER_READ                    -> host.readPumpForOwner(checkNotNull(payload))
             PATH_TRIAGE_CHECK                  -> host.triageCheckAfterSetChange()
+            PATH_LOW_HOLD                      -> host.holdOnLow()
+            PATH_LOW_HOLD_REHEARSAL            -> host.holdOnLow(rehearsal = true)
         }
     }
 
@@ -144,6 +146,10 @@ class ControllerService : Service() {
         internal const val PATH_OWNER_READ = "/controller/owner-read"
         /** An hour after the owner changed the infusion set: did glucose turn? */
         internal const val PATH_TRIAGE_CHECK = "/controller/triage-check"
+
+        /** The low-glucose hold's look at the pump, a little after the reading that called for it; see [ControllerHost.holdOnLow]. */
+        internal const val PATH_LOW_HOLD = "/controller/low-hold"
+        internal const val PATH_LOW_HOLD_REHEARSAL = "/controller/low-hold-rehearsal"
 
         /** How often the watch looks by itself while it leads and the sensor is silent. */
         internal const val TICK_MS = 5 * 60_000L
@@ -279,7 +285,7 @@ class ControllerInboundReceiver : BroadcastReceiver() {
  * Drives the controller from adb, standing in for the phone, so that it can be tested against the
  * pump on its own. Guarded by the DUMP permission, which the shell holds and ordinary apps do not,
  * compiled to do nothing outside debug builds, and limited to the off-body test pump: with any
- * other pump paired only STATE, REHEARSAL and OWNER_READ work. The first two touch nothing; the last
+ * other pump paired only STATE, REHEARSAL, LOW_HOLD and OWNER_READ work. The first three touch nothing; the last
  * is the owner's «Обновить с помпы» - one reading of the pump, which changes nothing on it.
  *
  *   am broadcast -n <pkg>/app.aaps.combobench.controller.ControllerDebugReceiver --es cmd STATUS
@@ -288,6 +294,7 @@ class ControllerInboundReceiver : BroadcastReceiver() {
  *   ... --es cmd BOLUS --ei tenths 1 [--es bolusKind SMB]
  *   ... --es cmd STATE
  *   ... --es cmd REHEARSAL
+ *   ... --es cmd LOW_HOLD                                           (a rehearsal too: nothing is done)
  *   ... --es cmd TRIAGE [--es screen HOME|SET|RESIST|ADVICE]
  *   ... --es cmd OWNER_READ [--ez screen true]
  *   ... --es cmd TAP [--ei taps 3] [--es plain log|controller]     (am broadcast --allow-background-activity-starts ...)
@@ -305,6 +312,8 @@ class ControllerDebugReceiver : BroadcastReceiver() {
             "STATE"  -> { ControllerService.start(context, ControllerService.PATH_STATE, null); return }
             // Touches nothing either: shows what the watch would decide right now, into a file.
             "REHEARSAL" -> { ControllerService.start(context, ControllerService.PATH_REHEARSAL, null); return }
+            // Touches nothing: what the low-glucose hold makes of the present moment, into files/low-hold-rehearsal.json.
+            "LOW_HOLD" -> { ControllerService.start(context, ControllerService.PATH_LOW_HOLD_REHEARSAL, null); return }
             // Opens the owner's triage screen (not exported), at the sub-screen named by --es screen; for looking at it from adb.
             "TRIAGE" -> {
                 context.startActivity(

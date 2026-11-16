@@ -4,19 +4,33 @@ package app.aaps.plugins.aps.openAPSAIMI.learning
  * The arithmetic of learning the carb ratio from meals that have run their course.
  *
  * Nothing here reads the database or the clock; the learner feeds it what it found. A meal is the
- * carbohydrates entered within an hour of each other, and its window the four hours from the first
- * entry. Fast carbohydrates eaten inside that window with no bolus of their own are a rescue against
- * the meal's insulin and count towards the meal's grams (01.11.2026: every meal bolus was followed by
- * 8–18 g of them within the hour, and the meals taught nothing because the rescue looked like the
- * next meal). The insulin the meal turned out to need is what was on board at the start, plus what was
- * given in and around the window (boluses from 45 minutes before to 150 minutes after the entry,
- * and the temp basal above or below profile), less what was still on board at the end, plus what
- * glucose moved over the window converted at the sensitivity the loop was dosing corrections by.
- * The effective ratio is the grams over that insulin. Per time of day the median of the most recent
- * meals is the lesson; it is applied to the profile's ratio within bounds and never in one jump.
+ * carbohydrates entered within an hour of each other. A lesson is taken from a WINDOW of four hours
+ * that starts at a meal, and both sides of it are counted by the same rule:
+ *
+ *  - carbohydrates ABSORBED in the window: every entry, a meal taken to be absorbed evenly over three
+ *    hours and fast carbohydrates over an hour and a half - so what was still being absorbed at the
+ *    start counts, what was eaten during the window counts as far as it got, and what was left at the
+ *    end does not;
+ *  - insulin that ACTED in the window: what was on board at the start, plus what was given in the
+ *    window (boluses, and the temp basal above or below profile), less what was still on board at the
+ *    end; plus what glucose moved over the window, converted at the sensitivity the loop was dosing
+ *    corrections by.
+ *
+ * The effective ratio is the first over the second. A meal that starts inside a window belongs to that
+ * window and starts none of its own. Per time of day the median of the most recent windows is the
+ * lesson; it is applied to the profile's ratio within bounds and never in one jump.
+ *
+ * Until 16.11.2026 the two sides were counted by different rules. A meal with another one inside its
+ * four hours was not evaluated at all, so of a chain of meals only the LAST was - and it was charged
+ * with the earlier meals' insulin still on board, while their carbohydrates still being absorbed were
+ * not counted: a dessert of 20 g ninety minutes after a lunch came out as 3-4 g/U. Boluses were summed
+ * from 45 minutes before the entry, which counted a pre-bolus twice (it was on board at the start as
+ * well), and only to 150 minutes after it, while what was on board at the end was taken off in full.
+ * With 78 % of meals followed by more carbohydrates within five hours the lessons stood at 3.6-5.3 g/U;
+ * recounted the same three weeks give 5.3 in the morning, 7.0 by day, 7.1 in the evening, 8.8 at night.
  *
  * 28 Oct 2026: 59 meals over 45 days gave a median of 4.9 g/U against a profile of 10.3, which is why
- * every forecast promised a fall that never came.
+ * every forecast promised a fall that never came. (That count was by the old rule; the direction held.)
  */
 object MealCarbRatioMath {
 
@@ -70,7 +84,12 @@ object MealCarbRatioMath {
         val bolusesU: Double,
         val tempBasalNetU: Double,
         val sensitivityMgdlPerU: Double,
-        val profileIcGPerU: Double
+        val profileIcGPerU: Double,
+        /**
+         * Boluses given for the meal, from a little before it to the window's end: only for telling a meal that
+         * was dosed for from one that was not (a pre-bolus is on board at the start, not among [bolusesU]).
+         */
+        val givenU: Double = bolusesU
     )
 
     class Outcome(
@@ -85,7 +104,39 @@ object MealCarbRatioMath {
     )
 
     fun outcome(w: Window): Outcome =
-        Outcome(w.meal, needed(w), effectiveIc(w.meal.grams, w.bolusesU, needed(w)), w.profileIcGPerU, w.bgStartMgdl, w.bgEndMgdl, w.bolusesU)
+        Outcome(w.meal, needed(w), effectiveIc(w.meal.grams, w.givenU, needed(w)), w.profileIcGPerU, w.bgStartMgdl, w.bgEndMgdl, w.givenU)
+
+    /**
+     * The meals that windows start from, in order: a meal worth learning from (not a rescue, not a crumb) that
+     * the window before it does not cover. [coveredUntilEpochMs] is where the last window already taken ends.
+     */
+    fun windowStarts(meals: List<Meal>, coveredUntilEpochMs: Long = 0L): List<Meal> {
+        var covered = coveredUntilEpochMs
+        return meals.sortedBy { it.startEpochMs }.filter { meal ->
+            (meal.startEpochMs >= covered && !meal.rescueOnly && meal.grams >= MIN_MEAL_GRAMS).also { if (it) covered = meal.endEpochMs }
+        }
+    }
+
+    /** Grams absorbed between two moments, of everything entered; see the rule at the top. */
+    fun absorbedBetween(entries: List<CarbEntry>, fromEpochMs: Long, toEpochMs: Long): Double = entries.sumOf { entry ->
+        if (entry.grams <= 0.0) 0.0
+        else {
+            val span = (if (entry.fast) ABSORB_FAST_MS else ABSORB_MS).toDouble()
+            fun absorbedBy(at: Long) = ((at - entry.atEpochMs) / span).coerceIn(0.0, 1.0)
+            entry.grams * (absorbedBy(toEpochMs) - absorbedBy(fromEpochMs))
+        }
+    }
+
+    /** Insulin beyond the profile's basal: a bolus, or a stretch of basal above (+) or below (-) profile, at the moment it was given. */
+    class Delivery(val atEpochMs: Long, val units: Double)
+
+    /** What is still to act at a moment of everything delivered before it. [stillToAct] is the insulin's curve: the share left, minutes after a dose. */
+    fun onBoard(deliveries: List<Delivery>, atEpochMs: Long, stillToAct: (Double) -> Double): Double =
+        deliveries.sumOf { if (it.atEpochMs < atEpochMs) it.units * stillToAct((atEpochMs - it.atEpochMs) / 60_000.0) else 0.0 }
+
+    /** What was delivered from a moment up to, not including, another. */
+    fun deliveredBetween(deliveries: List<Delivery>, fromEpochMs: Long, toEpochMs: Long): Double =
+        deliveries.sumOf { if (it.atEpochMs >= fromEpochMs && it.atEpochMs < toEpochMs) it.units else 0.0 }
 
     fun needed(w: Window): Double = w.iobStartU + w.bolusesU + w.tempBasalNetU - w.iobEndU + (w.bgEndMgdl - w.bgStartMgdl) / w.sensitivityMgdlPerU
 
@@ -155,8 +206,13 @@ object MealCarbRatioMath {
 
     const val CLUSTER_MS = 60 * 60_000L
     const val WINDOW_MS = 4 * 60 * 60_000L
+
+    /** A bolus this long before the meal's first entry was given for it; see [Window.givenU]. */
     const val BOLUS_BEFORE_MS = 45 * 60_000L
-    const val BOLUS_AFTER_MS = 150 * 60_000L
+
+    /** A meal is taken to be absorbed evenly over this long, fast carbohydrates over [ABSORB_FAST_MS]. */
+    const val ABSORB_MS = 3 * 60 * 60_000L
+    const val ABSORB_FAST_MS = 90 * 60_000L
     const val MIN_MEAL_GRAMS = 8.0
 
     /** Less insulin than this over four hours says nothing about a ratio. */

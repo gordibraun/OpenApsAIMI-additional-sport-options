@@ -384,4 +384,136 @@ class AutonomyRunnerTest {
         glucose(150.0, 0.0)
         assertEquals(20, runner.onReading()!!.getInt("resistancePercent"))
     }
+
+    // ---- the low-glucose hold: the one thing done with the phone in charge ---------------------------
+
+    /** The phone is in charge - heard a minute ago, its lease live - and had stopped basal [setMinutesAgo] minutes ago for half an hour. */
+    private fun phoneInChargeWithAStop(setMinutesAgo: Int, percent: Int = 0) {
+        phoneLeft(silentMinutes = 1)
+        store.onPumpEvent(PumpEvent(0, PumpEvent.Type.TBR_STARTED, now - minutes(setMinutesAgo), tbrPercentage = percent, tbrDurationMinutes = 30), byWatch = false)
+    }
+
+    @Test fun aStopRunningOutWithGlucoseLowIsRenewedThoughThePhoneIsInCharge() {
+        phoneInChargeWithAStop(setMinutesAgo = 25)
+        store.setMode(AutonomyPolicy.Mode.ACTIVE)
+        glucose(59.0, -3.0)
+        // The regulator itself stays out of it: the phone is in charge.
+        assertFalse(runner.wantsToRun())
+        assertTrue(runner.wantsLowHold())
+
+        val entry = runner.holdOnLow()!!
+
+        assertEquals("LOW_HOLD", entry.getString("action"))
+        assertTrue(entry.getBoolean("done"))
+        val command = sent.single()
+        assertEquals(CommandKind.SET_TBR, command.kind)
+        assertEquals(0, command.percentage)
+        assertEquals(30, command.durationMinutes)
+        assertEquals(AutonomyPolicy.OWN_GENERATION, command.leaseGeneration)
+        assertTrue(notes.single().startsWith("Часы: сахар 59, остановка базала на помпе истекает"))
+        assertEquals(1, store.journal().size)
+        // The new stop is the watch's own, and with it in place there is nothing more to do.
+        assertTrue(store.delivery().tbrs.last().byWatch)
+        assertFalse(runner.wantsLowHold())
+        assertNull(runner.holdOnLow())
+        assertEquals(1, sent.size)
+    }
+
+    @Test fun whenThePhonesOwnCommandCameInBetweenTheWatchDoesNothing() {
+        phoneInChargeWithAStop(setMinutesAgo = 25)
+        store.setMode(AutonomyPolicy.Mode.ACTIVE)
+        glucose(59.0, -3.0)
+        assertTrue(runner.wantsLowHold())
+        // The phone's next stop arrives and is carried out before the watch looks.
+        store.onPumpEvent(PumpEvent(0, PumpEvent.Type.TBR_ENDED, now), byWatch = false)
+        store.onPumpEvent(PumpEvent(0, PumpEvent.Type.TBR_STARTED, now, tbrPercentage = 0, tbrDurationMinutes = 30), byWatch = false)
+
+        assertNull(runner.holdOnLow())
+        assertTrue(sent.isEmpty())
+        assertTrue(notes.isEmpty())
+    }
+
+    @Test fun theHoldLeavesThePumpAloneWhileItIsInUseOrACommandIsUnsettled() {
+        phoneInChargeWithAStop(setMinutesAgo = 25)
+        store.setMode(AutonomyPolicy.Mode.ACTIVE)
+        glucose(59.0, -3.0)
+        benchUsesThePump = true
+        assertNull(runner.holdOnLow())
+        assertTrue(sent.isEmpty())
+        benchUsesThePump = false
+        assertNotNull(runner.holdOnLow())
+    }
+
+    @Test fun observingTheHoldIsWrittenDownAndThePumpNotTouched() {
+        phoneInChargeWithAStop(setMinutesAgo = 25)
+        glucose(59.0, -3.0)
+        assertEquals(AutonomyPolicy.Mode.OBSERVE, store.mode())
+
+        val entry = runner.holdOnLow()!!
+
+        assertFalse(entry.getBoolean("done"))
+        assertTrue(entry.getString("text").startsWith("Наблюдение, помпа не тронута"))
+        assertTrue(sent.isEmpty())
+        assertTrue(notes.isEmpty())
+    }
+
+    @Test fun switchedOffOrWithGlucoseNotLowThereIsNoHold() {
+        phoneInChargeWithAStop(setMinutesAgo = 25)
+        store.setMode(AutonomyPolicy.Mode.OFF)
+        glucose(59.0, -3.0)
+        assertFalse(runner.wantsLowHold())
+        assertNull(runner.holdOnLow())
+        store.setMode(AutonomyPolicy.Mode.ACTIVE)
+        now += minutes(1)
+        glucose(84.0, 4.0)
+        assertFalse(runner.wantsLowHold())
+        assertNull(runner.holdOnLow())
+        assertTrue(sent.isEmpty())
+    }
+
+    @Test fun aloneTheRegulatorKeepsTheBasalAndTheHoldStaysOutOfIt() {
+        phoneLeft()
+        store.onPumpEvent(PumpEvent(0, PumpEvent.Type.TBR_STARTED, now - minutes(25), tbrPercentage = 0, tbrDurationMinutes = 30), byWatch = false)
+        store.setMode(AutonomyPolicy.Mode.ACTIVE)
+        glucose(59.0, -3.0)
+        assertTrue(runner.wantsToRun())
+        assertFalse(runner.wantsLowHold())
+        assertNull(runner.holdOnLow())
+    }
+
+    @Test fun aHoldThePumpDidNotTakeIsToldOnceAndTriedAgainAtTheNextReading() {
+        phoneInChargeWithAStop(setMinutesAgo = 25)
+        store.setMode(AutonomyPolicy.Mode.ACTIVE)
+        glucose(59.0, -3.0)
+        pumpAnswers = { PumpSession.SessionResult.Failed("pump not reached") }
+
+        val first = runner.holdOnLow()!!
+        assertFalse(first.getBoolean("done"))
+        assertTrue(notes.single().contains("не выполнено (pump not reached)"))
+
+        now += minutes(5)
+        phoneHeard = now - minutes(1)
+        glucose(55.0, -3.0)
+        assertTrue(runner.wantsLowHold())
+        pumpAnswers = { PumpSession.SessionResult.Done(null) }
+        val second = runner.holdOnLow()!!
+        assertTrue(second.getBoolean("done"))
+        assertEquals(2, sent.size)
+        assertEquals(2, notes.size)
+    }
+
+    @Test fun theRehearsalOfTheHoldSaysWhatItSeesAndDoesNothing() {
+        phoneInChargeWithAStop(setMinutesAgo = 25)
+        store.setMode(AutonomyPolicy.Mode.ACTIVE)
+        glucose(59.0, -3.0)
+        val entry = runner.holdOnLow(rehearsal = true)!!
+        assertTrue(entry.getBoolean("hold"))
+        assertTrue(entry.getString("text").contains("остановка базала на помпе истекает"))
+        assertTrue(sent.isEmpty())
+        assertTrue(store.journal().isEmpty())
+        // And with nothing to do it says so.
+        now += minutes(1)
+        glucose(110.0, 1.0)
+        assertFalse(runner.holdOnLow(rehearsal = true)!!.getBoolean("hold"))
+    }
 }

@@ -221,6 +221,65 @@ internal class AutonomyRunner(
         return entry
     }
 
+    // ---- the low-glucose hold ------------------------------------------------------------------
+    //
+    // The one thing the watch does to the pump while the phone is in charge: a stop of basal that
+    // runs out with glucose still low and nothing put in its place is renewed. See [LowGlucoseHold].
+
+    private fun lowHold(): app.aaps.pump.combowatch.regulation.LowGlucoseHold.Hold? {
+        if (store.mode() == AutonomyPolicy.Mode.OFF || heldPump() == null) return null
+        // Alone, the regulator keeps the basal itself, at every reading.
+        if (standing() == AutonomyPolicy.Standing.Alone) return null
+        return app.aaps.pump.combowatch.regulation.LowGlucoseHold.decide(nowEpochMs(), store.readings(), store.delivery())
+    }
+
+    /** At a reading: is there a stop to renew, should the phone's own command for this reading not come? Cheap; touches nothing. */
+    fun wantsLowHold(): Boolean = lowHold() != null
+
+    /**
+     * Asked a little after the reading, when the phone has had its turn: if the stop is still running out with
+     * glucose low and the pump is free, the watch stops basal for another half hour itself.
+     *
+     * With [rehearsal] nothing is done or told: the entry only says what the watch makes of the present moment.
+     * @return the journal entry, or null when there was nothing to do
+     */
+    fun holdOnLow(rehearsal: Boolean = false): JSONObject? {
+        val now = nowEpochMs()
+        val hold = lowHold()
+        if (rehearsal) return JSONObject().put("at", now).put("action", "LOW_HOLD_REHEARSAL").put("mode", store.mode().name)
+            .put("hold", hold != null).put("text", hold?.text ?: "предохранителю низкого сахара сейчас делать нечего")
+            .put("busy", executor.isBusy || pumpInOtherUse()).put("unsettled", executor.awaitingReconciliation)
+        hold ?: return null
+        // A command under way, or one whose outcome is not known, is somebody acting: nothing is done on top of it.
+        // The next reading asks again.
+        if (executor.isBusy || pumpInOtherUse() || executor.awaitingReconciliation) return null
+        val mode = store.mode()
+        val entry = JSONObject().put("at", now).put("mode", mode.name).put("action", "LOW_HOLD").put("glucose", hold.glucoseMgdl)
+            .put("ranOutAt", hold.running.scheduledEndEpochMs).put("wasPercent", hold.running.percent)
+        if (mode == AutonomyPolicy.Mode.OBSERVE) {
+            entry.put("done", false).put("text", "Наблюдение, помпа не тронута: ${hold.text}")
+            store.addToJournal(entry)
+            return entry
+        }
+        val result = runOwn(WatchRegulator.Action.SetTbr(0, app.aaps.pump.combowatch.regulation.LowGlucoseHold.HOLD_MINUTES))
+        val done = result?.outcome == Outcome.DONE
+        val failure = if (done) null else (result?.reason ?: "помпа не привязана")
+        val text = "Часы: ${hold.text}" + (failure?.let { " — не выполнено ($it)" } ?: "")
+        entry.put("done", done).put("outcome", result?.outcome?.name ?: "NOT_SENT").put("reason", result?.reason ?: JSONObject.NULL).put("text", text)
+        store.addToJournal(entry)
+        // Told to the phone's records every time it is done; a failure that repeats, once and again after a while.
+        val failureKind = failure?.substringBefore(':')
+        if (done || failureKind != lastHoldFailure || now - lastHoldFailureNotedAtEpochMs >= FAILURE_REPEAT_MS) {
+            if (!done) lastHoldFailureNotedAtEpochMs = now
+            note(text, now)
+        }
+        lastHoldFailure = failureKind
+        return entry
+    }
+
+    private var lastHoldFailure: String? = null
+    private var lastHoldFailureNotedAtEpochMs = 0L
+
     private fun inputs(now: Long): WatchRegulator.Inputs {
         // The owner's word that insulin works worse today: the coefficients ask more insulin per
         // gram and per mg/dL, and the regulator widens its caps by the same factor.

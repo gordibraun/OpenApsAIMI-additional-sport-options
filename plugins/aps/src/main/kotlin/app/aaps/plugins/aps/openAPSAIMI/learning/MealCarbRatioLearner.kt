@@ -2,16 +2,17 @@ package app.aaps.plugins.aps.openAPSAIMI.learning
 
 import app.aaps.core.data.model.BS
 import app.aaps.core.interfaces.db.PersistenceLayer
-import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
+import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.interfaces.Preferences
-import app.aaps.core.objects.extensions.convertedToAbsolute
+import app.aaps.core.objects.basaltuner.BasalNeed
+import app.aaps.core.objects.basaltuner.BasalTuner
 import app.aaps.core.utils.MidnightUtils
 import org.json.JSONArray
 import org.json.JSONObject
@@ -34,12 +35,12 @@ import kotlin.math.roundToInt
 @Singleton
 class MealCarbRatioLearner @Inject constructor(
     private val persistenceLayer: PersistenceLayer,
-    private val iobCobCalculator: IobCobCalculator,
     private val profileFunction: ProfileFunction,
     private val preferences: Preferences,
     private val sp: SP,
     private val dateUtil: DateUtil,
-    private val aapsLogger: AAPSLogger
+    private val aapsLogger: AAPSLogger,
+    private val activePlugin: ActivePlugin
 ) {
 
     /** One evaluated meal, kept for the lessons and for the owner to read. */
@@ -56,6 +57,9 @@ class MealCarbRatioLearner @Inject constructor(
     private val applied = mutableMapOf<MealCarbRatioMath.Bucket, Applied>()
     private var lessons = mapOf<MealCarbRatioMath.Bucket, MealCarbRatioMath.Lesson>()
     private var evaluatedUpToEpochMs = 0L
+
+    /** Where the last window taken ends: a meal that starts before this belongs to that window. */
+    private var coveredUntilEpochMs = 0L
     private var lastUpdateEpochMs = 0L
     private var lastRampEpochMs = 0L
 
@@ -138,7 +142,7 @@ class MealCarbRatioLearner @Inject constructor(
         val usable = stored.filter { it.effectiveIc != null }.sortedByDescending { it.startEpochMs }
         sb.appendLine("Обедов с результатом ${usable.size} из ${stored.size} оценённых; просмотрено до ${if (evaluatedUpToEpochMs > 0) dateUtil.dateAndTimeString(evaluatedUpToEpochMs) else "—"}.")
         usable.take(8).forEach { s ->
-            sb.appendLine("  ${dateUtil.dateAndTimeString(s.startEpochMs)} ${s.grams.roundToInt()} г: подано ${u1(s.bolusesU)} ЕД, нужно было ${u1(s.neededU)} → IC ${u1(s.effectiveIc!!)} (сахар ${s.bgStart.roundToInt()}→${s.bgEnd.roundToInt()} за 4 ч)")
+            sb.appendLine("  ${dateUtil.dateAndTimeString(s.startEpochMs)} усвоено ${s.grams.roundToInt()} г за 4 ч: подано ${u1(s.bolusesU)} ЕД, понадобилось ${u1(s.neededU)} → IC ${u1(s.effectiveIc!!)} (сахар ${s.bgStart.roundToInt()}→${s.bgEnd.roundToInt()})")
         }
         sb.toString()
     }
@@ -169,27 +173,30 @@ class MealCarbRatioLearner @Inject constructor(
 
     private fun evaluateClosedMeals(nowEpochMs: Long): Int {
         val horizon = nowEpochMs - MealCarbRatioMath.KEEP_DAYS * 86_400_000L
-        val from = max(evaluatedUpToEpochMs, horizon) - MealCarbRatioMath.CLUSTER_MS
+        // Entries from well before the first window looked at: what was still being absorbed when it began counts in it.
+        val from = max(evaluatedUpToEpochMs, horizon) - MealCarbRatioMath.CLUSTER_MS - MealCarbRatioMath.ABSORB_MS
         val entries = persistenceLayer.getCarbsFromTimeToTimeExpanded(from, nowEpochMs, true)
+            .filter { it.isValid && it.amount > 0.0 }
             .map { MealCarbRatioMath.CarbEntry(it.timestamp, it.amount, fast = isFastCarbs(it.notes)) }
         // Manual boluses tell a rescue (fast carbohydrates with no bolus) from fast food bolused for.
         val manualBoluses = persistenceLayer.getBolusesFromTimeToTime(from - MealCarbRatioMath.RESCUE_BOLUS_MS, nowEpochMs, true)
-            .filter { it.type == BS.Type.NORMAL }
+            .filter { it.isValid && it.type == BS.Type.NORMAL }
             .map { it.timestamp }
         val meals = MealCarbRatioMath.meals(entries, manualBoluses)
         var looked = 0
         var stoppedAtTheLimit = false
-        for ((index, meal) in meals.withIndex()) {
+        for (meal in meals) {
             if (meal.startEpochMs <= evaluatedUpToEpochMs || meal.startEpochMs < horizon) continue
+            // Inside the window before: its carbohydrates and its insulin were counted there.
+            if (meal.startEpochMs < coveredUntilEpochMs) { evaluatedUpToEpochMs = meal.startEpochMs; continue }
             if (meal.endEpochMs > nowEpochMs) break
             if (looked >= MAX_MEALS_PER_UPDATE) { stoppedAtTheLimit = true; break }
             evaluatedUpToEpochMs = meal.startEpochMs
             looked++
+            // A window does not start from a rescue or a crumb.
             if (meal.grams < MealCarbRatioMath.MIN_MEAL_GRAMS || meal.rescueOnly) continue
-            // Another meal inside the window would be charged to this one.
-            val next = meals.getOrNull(index + 1)
-            if (next != null && next.startEpochMs < meal.endEpochMs) continue
-            runCatching { evaluate(meal) }
+            coveredUntilEpochMs = meal.endEpochMs
+            runCatching { evaluate(meal, entries) }
                 .onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner: meal at ${dateUtil.dateAndTimeString(meal.startEpochMs)} not evaluated: ${it.javaClass.simpleName}") }
                 .getOrNull()?.let { stored += it }
         }
@@ -200,45 +207,67 @@ class MealCarbRatioLearner @Inject constructor(
         return looked
     }
 
-    private fun evaluate(meal: MealCarbRatioMath.Meal): Stored? {
+    private fun evaluate(meal: MealCarbRatioMath.Meal, entries: List<MealCarbRatioMath.CarbEntry>): Stored? {
         val t0 = meal.startEpochMs
         val t1 = meal.endEpochMs
         val profile = profileFunction.getProfile(t0) ?: return null
         val readings = persistenceLayer.getBgReadingsDataFromTimeToTime(t0 - READING_TOLERANCE_MS, t1 + READING_TOLERANCE_MS, true)
         val bg0 = readings.filter { kotlin.math.abs(it.timestamp - t0) <= READING_TOLERANCE_MS }.minByOrNull { kotlin.math.abs(it.timestamp - t0) }?.value ?: return null
         val bg1 = readings.filter { kotlin.math.abs(it.timestamp - t1) <= READING_TOLERANCE_MS }.minByOrNull { kotlin.math.abs(it.timestamp - t1) }?.value ?: return null
-        val iob0 = iobCobCalculator.calculateFromTreatmentsAndTemps(t0, profile).iob
-        val iob1 = iobCobCalculator.calculateFromTreatmentsAndTemps(t1, profileFunction.getProfile(t1) ?: profile).iob
-        val boluses = persistenceLayer.getBolusesFromTimeToTime(t0 - MealCarbRatioMath.BOLUS_BEFORE_MS, t0 + MealCarbRatioMath.BOLUS_AFTER_MS, true)
-            .filter { it.type != BS.Type.PRIMING }
-            .sumOf { it.amount }
-        val tempBasalNet = tempBasalNetUnits(t0, t1, profile)
+        val absorbed = MealCarbRatioMath.absorbedBetween(entries, t0, t1)
+        // Insulin by the curve the loop itself counts insulin on board by, over deliveries as the pump made them.
+        val diaMinutes = (profile.dia * 60.0).roundToInt().coerceIn(180, 600)
+        val peakMinutes = runCatching { activePlugin.activeInsulin.peak }.getOrDefault(55).coerceIn(30, 120)
+        val stillToAct = { minutes: Double -> BasalNeed.stillToAct(minutes, diaMinutes, peakMinutes) }
+        val since = t0 - diaMinutes * 60_000L
+        val boluses = persistenceLayer.getBolusesFromTimeToTime(since, t1, true)
+            .filter { it.isValid && it.type != BS.Type.PRIMING && it.amount > 0.0 }
+            .map { MealCarbRatioMath.Delivery(it.timestamp, it.amount) }
+        val basal = netBasal(since, t0, t1, profile)
+        val all = boluses + basal
+        val iob0 = MealCarbRatioMath.onBoard(all, t0, stillToAct)
+        val iob1 = MealCarbRatioMath.onBoard(all, t1, stillToAct)
+        val bolusesInWindow = MealCarbRatioMath.deliveredBetween(boluses, t0, t1)
+        val given = MealCarbRatioMath.deliveredBetween(boluses, t0 - MealCarbRatioMath.BOLUS_BEFORE_MS, t1)
+        val tempBasalNet = MealCarbRatioMath.deliveredBetween(basal, t0, t1)
         val sensitivity = sensitivityAt(t0, profile)
         val base = profile.getIcTimeFromMidnight(MidnightUtils.secondsFromMidnight(t0))
         if (!(sensitivity.isFinite() && sensitivity > 0.0 && base.isFinite() && base > 0.0)) return null
         val outcome = MealCarbRatioMath.outcome(
-            MealCarbRatioMath.Window(meal, bg0, bg1, iob0, iob1, boluses, tempBasalNet, sensitivity, base)
+            MealCarbRatioMath.Window(MealCarbRatioMath.Meal(t0, absorbed, meal.entries), bg0, bg1, iob0, iob1, bolusesInWindow, tempBasalNet, sensitivity, base, givenU = given)
         )
         aapsLogger.debug(
             LTag.APS,
-            "MealCarbRatioLearner: meal ${dateUtil.dateAndTimeString(t0)} ${meal.grams} g: boluses ${u2(boluses)} U, IOB ${u2(iob0)}→${u2(iob1)}, " +
+            "MealCarbRatioLearner: window ${dateUtil.dateAndTimeString(t0)}: ${u1(absorbed)} g absorbed (${u1(meal.grams)} g entered first), boluses ${u2(bolusesInWindow)} U, IOB ${u2(iob0)}→${u2(iob1)}, " +
                 "TBR ${u2(tempBasalNet)} U, BG $bg0→$bg1 at ISF ${u1(sensitivity)} → needed ${u2(outcome.neededU)} U, " +
                 "IC ${outcome.effectiveIcGPerU?.let { u1(it) } ?: "—"} (profile ${u1(base)})"
         )
-        return Stored(t0, meal.grams, boluses, outcome.neededU, outcome.effectiveIcGPerU, base, bg0, bg1)
+        return Stored(t0, absorbed, given, outcome.neededU, outcome.effectiveIcGPerU, base, bg0, bg1)
     }
 
-    /** Insulin the temp basals delivered above (or withheld below) profile over the window, walking it in five-minute slots. */
-    private fun tempBasalNetUnits(t0: Long, t1: Long, profile: Profile): Double {
-        val tbrs = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(t0 - 3 * 60 * 60_000L, t1, true)
-        var net = 0.0
-        var t = t0
+    /**
+     * Basal above (+) or below (-) profile, in five-minute stretches from [since] to [t1], laid out from [t0] so
+     * that the window holds whole stretches. Temp basals as they ran: until 16.11.2026 a third of them stood in
+     * the records as a few seconds long (see [BasalNeed.asTheyRan]).
+     */
+    private fun netBasal(since: Long, t0: Long, t1: Long, profile: Profile): List<MealCarbRatioMath.Delivery> {
+        val ran = BasalNeed.asTheyRan(
+            persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(since - 3 * 60 * 60_000L, t1, true).filter { it.isValid }
+                .map { BasalNeed.TempBasal(it.timestamp, it.duration, it.rate, it.isAbsolute) },
+            BasalTuner.TEMP_BASALS_FILED_SHORT_BEFORE
+        )
+        val out = ArrayList<MealCarbRatioMath.Delivery>()
+        var t = t0 - ((t0 - since) / SLOT_MS) * SLOT_MS
         while (t < t1) {
-            val running = tbrs.filter { it.timestamp <= t && t < it.end }.maxByOrNull { it.timestamp }
-            if (running != null) net += (running.convertedToAbsolute(t, profile) - profile.getBasal(t)) * (5.0 / 60.0)
-            t += 5 * 60_000L
+            val running = ran.lastOrNull { it.atEpochMs <= t && t < it.atEpochMs + it.durationMs }
+            if (running != null) {
+                val ofProfile = profile.getBasal(t)
+                val rate = if (running.absolute) running.rate else ofProfile * running.rate / 100.0
+                if (rate != ofProfile) out += MealCarbRatioMath.Delivery(t, (rate - ofProfile) * SLOT_MS / 3_600_000.0)
+            }
+            t += SLOT_MS
         }
-        return net
+        return out
     }
 
     /** The sensitivity the loop was dosing corrections by at [t]: its own variable one from the run nearest before, else the profile's now. */
@@ -258,8 +287,9 @@ class MealCarbRatioLearner @Inject constructor(
         lessons = MealCarbRatioMath.learn(
             stored.mapNotNull { s -> s.effectiveIc?.let { MealCarbRatioMath.Learned(MealCarbRatioMath.bucket(hourOfDay(s.startEpochMs)), it, s.startEpochMs) } }
         )
-        // A bucket that lost its lesson loses its applied ratio: the profile's own stands again.
-        applied.keys.retainAll(lessons.keys)
+        // A bucket that lost its lesson loses its applied ratio: the profile's own stands again. Not while the
+        // window is still being read: half-read, every bucket lacks its lesson, and the ratios in use must hold.
+        if (caughtUp) applied.keys.retainAll(lessons.keys)
     }
 
     private fun ramp(nowEpochMs: Long) {
@@ -299,10 +329,20 @@ class MealCarbRatioLearner @Inject constructor(
         runCatching {
             val saved = sp.getStringOrNull(KEY, null)?.let { JSONObject(it) } ?: return
             evaluatedUpToEpochMs = saved.optLong("evaluatedUpTo")
+            coveredUntilEpochMs = saved.optLong("coveredUntil")
             lastRampEpochMs = saved.optLong("lastRamp")
             val version = saved.optInt("version", 1)
             caughtUp = saved.optBoolean("caughtUp", false)
-            val meals = saved.optJSONArray("meals") ?: JSONArray()
+            // Meals counted by the arithmetic before version 3 are counted again from the records; the ratios in
+            // use stay as they are meanwhile and move on from there once the three weeks have been read again.
+            val recount = version < 3
+            if (recount) {
+                evaluatedUpToEpochMs = 0L
+                coveredUntilEpochMs = 0L
+                caughtUp = false
+                aapsLogger.info(LTag.APS, "MealCarbRatioLearner: state version $version → $STATE_VERSION, the meals are counted again by the corrected arithmetic; applied ratios are kept")
+            }
+            val meals = (if (recount) null else saved.optJSONArray("meals")) ?: JSONArray()
             for (i in 0 until meals.length()) {
                 val m = meals.getJSONObject(i)
                 val grams = m.getDouble("g")
@@ -312,7 +352,7 @@ class MealCarbRatioLearner @Inject constructor(
                 stored += Stored(m.getLong("t0"), grams, given, needed, MealCarbRatioMath.effectiveIc(grams, given, needed), m.optDouble("profileIc"), m.optDouble("bg0"), m.optDouble("bg1"))
             }
             // Ratios applied by version 1 started from a half-read window; they start again from the profile.
-            if (version >= STATE_VERSION) {
+            if (version >= 2) {
                 val app = saved.optJSONObject("applied") ?: JSONObject()
                 for (bucket in MealCarbRatioMath.Bucket.entries) {
                     app.optJSONObject(bucket.name)?.let { applied[bucket] = Applied(it.getDouble("ic"), it.getLong("at")) }
@@ -320,7 +360,7 @@ class MealCarbRatioLearner @Inject constructor(
             } else {
                 // Start again from the profile, and take the first step at the next update rather than an hour on.
                 lastRampEpochMs = 0L
-                aapsLogger.info(LTag.APS, "MealCarbRatioLearner: state version $version → $STATE_VERSION, applied ratios start again from the profile")
+                aapsLogger.info(LTag.APS, "MealCarbRatioLearner: state version $version, applied ratios start again from the profile")
             }
             lessons = MealCarbRatioMath.learn(stored.mapNotNull { s -> s.effectiveIc?.let { MealCarbRatioMath.Learned(MealCarbRatioMath.bucket(hourOfDay(s.startEpochMs)), it, s.startEpochMs) } })
         }.onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner: saved state unreadable: ${it.javaClass.simpleName}") }
@@ -339,7 +379,7 @@ class MealCarbRatioLearner @Inject constructor(
             applied.forEach { (bucket, a) -> app.put(bucket.name, JSONObject().put("ic", a.icGPerU).put("at", a.atEpochMs)) }
             sp.putString(
                 KEY,
-                JSONObject().put("version", STATE_VERSION).put("evaluatedUpTo", evaluatedUpToEpochMs).put("lastRamp", lastRampEpochMs)
+                JSONObject().put("version", STATE_VERSION).put("evaluatedUpTo", evaluatedUpToEpochMs).put("coveredUntil", coveredUntilEpochMs).put("lastRamp", lastRampEpochMs)
                     .put("caughtUp", caughtUp).put("meals", meals).put("applied", app).toString()
             )
         }.onFailure { aapsLogger.warn(LTag.APS, "MealCarbRatioLearner: state not saved: ${it.javaClass.simpleName}") }
@@ -351,7 +391,9 @@ class MealCarbRatioLearner @Inject constructor(
     companion object {
 
         const val KEY = "aimi_meal_ic_learner_v1"
-        const val STATE_VERSION = 2
+        /** 3 since 16.11.2026: one rule for the carbohydrates and the insulin of a window; see [MealCarbRatioMath]. */
+        const val STATE_VERSION = 3
+        private const val SLOT_MS = 5 * 60_000L
         const val UPDATE_EVERY_MS = 15 * 60_000L
         const val RAMP_EVERY_MS = 60 * 60_000L
 
