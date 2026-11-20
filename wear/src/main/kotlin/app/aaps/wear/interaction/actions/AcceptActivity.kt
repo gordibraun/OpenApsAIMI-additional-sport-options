@@ -98,6 +98,8 @@ class AcceptActivity : ViewSelectorActivity() {
                     DeliveryStatus.sent(this@AcceptActivity, DeliveryStatus.shortDecision(message))
                     startService(IntentWearToMobile(this@AcceptActivity, actionKey))
                     startForegroundService(IntentCancelNotification(this@AcceptActivity))
+                    // What becomes of it is shown at once and by itself, not left to a line over the input form.
+                    runCatching { startActivity(Intent(this@AcceptActivity, DeliveryActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                     finishAffinity()
                 }
             }, LinearLayout.LayoutParams(-1, -2))

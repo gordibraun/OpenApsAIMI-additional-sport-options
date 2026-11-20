@@ -29,7 +29,21 @@ object WatchUiState {
     fun handOverToWatch(nowMs: Long = System.currentTimeMillis()) { handedToWatchAtMs = nowMs }
 
     /** A new request went to the phone: its answer is wanted again. */
-    fun phoneAsked() { handedToWatchAtMs = 0L }
+    fun phoneAsked(nowMs: Long = System.currentTimeMillis()) { handedToWatchAtMs = 0L; phoneAskedAtMs = nowMs }
+
+    @Volatile private var phoneAskedAtMs = 0L
+    @Volatile private var phoneAnsweredAtMs = 0L
+
+    /** Something came back from the phone about a request: its calculation to confirm, a refusal, a result. */
+    fun phoneAnswered(nowMs: Long = System.currentTimeMillis()) { phoneAnsweredAtMs = nowMs }
+
+    /**
+     * True when the phone has answered since a request went out at [askedAtMs]. The form that sent the request
+     * waits a few seconds and then offers the watch's own calculation "because the phone did not answer"; it
+     * went on to say so, with all its buttons live, behind the phone's calculation and after the dose had been
+     * confirmed (20.11.2026) - an invitation to give the dose a second time.
+     */
+    fun phoneAnsweredSince(askedAtMs: Long): Boolean = askedAtMs > 0L && phoneAnsweredAtMs >= askedAtMs
 
     /** True while an answer of the phone can only be the late one to a request the watch has taken over. */
     fun phoneAnswerComesLate(nowMs: Long = System.currentTimeMillis()): Boolean =

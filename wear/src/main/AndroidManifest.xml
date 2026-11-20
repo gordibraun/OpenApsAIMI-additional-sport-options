@@ -605,6 +605,11 @@
         </service>
 
         <receiver android:name=".complications.ComplicationTapBroadcastReceiver" />
+        <!-- Sets what the dose's status line and screens show, from adb, to look at them without a dose; debuggable builds only. -->
+        <receiver
+            android:name=".interaction.actions.DeliveryDebugReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
 
         <activity
             android:name=".interaction.menus.MainMenuActivity"
@@ -665,6 +670,16 @@
             android:exported="true"
             android:label="@string/action_confirm"
             android:launchMode="singleInstance" />
+        <!-- What became of the dose confirmed a moment ago; opened right after the confirmation (20.11.2026).
+             It only tells - nothing on it gives insulin - so it may be opened from adb to be looked at.
+             One instance in a task of its own: started over an input form, or with one behind it, it always comes to the front. -->
+        <activity
+            android:name=".interaction.actions.DeliveryActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="AAPS"
+            android:launchMode="singleInstance"
+            android:taskAffinity="app.aaps.wear.delivery" />
         <activity
             android:name=".interaction.actions.FillActivity"
             android:exported="true"

@@ -24,4 +24,17 @@ class WatchUiStateTest {
         WatchUiState.phoneAsked()
         assertFalse(WatchUiState.phoneAnswerComesLate(t + 5_000L))
     }
+
+    @Test
+    fun `the form may say the phone did not answer only when nothing came back since it asked`() {
+        val asked = 3_000_000_000L
+        WatchUiState.phoneAsked(asked)
+        assertFalse(WatchUiState.phoneAnsweredSince(asked))
+        // The phone's calculation arrives four seconds on - the confirmation is on screen, the dose may be confirmed.
+        WatchUiState.phoneAnswered(asked + 4_000L)
+        assertTrue(WatchUiState.phoneAnsweredSince(asked))
+        // A later request has had no answer yet, whatever came for the one before; and a form that never asked says nothing.
+        assertFalse(WatchUiState.phoneAnsweredSince(asked + 60_000L))
+        assertFalse(WatchUiState.phoneAnsweredSince(0L))
+    }
 }

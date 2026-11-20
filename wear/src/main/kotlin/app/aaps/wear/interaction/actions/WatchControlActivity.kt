@@ -58,15 +58,35 @@ class WatchControlActivity : DaggerActivity() {
     private var deliveryStrip: TextView? = null
     private val deliveryListener: () -> Unit = { runOnUiThread { refreshDeliveryStrip() } }
     private val deliveryTick = object : Runnable {
-        override fun run() { refreshDeliveryStrip(); handler.postDelayed(this, 20_000L) }
+        // By the second while a dose is on its way (the block counts it), now and then otherwise.
+        override fun run() { refreshDeliveryStrip(); handler.postDelayed(this, if (dosePending) 1_000L else 20_000L) }
     }
+
+    /** The form itself - amount, food type, buttons - under the title and the lines about the dose before. */
+    private lateinit var body: LinearLayout
+
+    // While a dose confirmed here is on its way, the form is closed and this stands in its place:
+    // what is happening, large, and one small button for the owner who does mean to enter more.
+    private var pendingBlock: LinearLayout? = null
+    private var pendingHead: TextView? = null
+    private var pendingNote: TextView? = null
+    private var pendingReadPump: Button? = null
+    private var enterMore: Button? = null
+    private var closesForDose = false
+    private var dosePending = false
+    private var formOpenedByOwner = false
+    private var formClosed = false
+    private var compactForm = false
+
+    /** When the phone was last asked from this form; see [WatchUiState.phoneAnsweredSince]. */
+    private var phoneAskedAtMs = 0L
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         // On the amount screens the crown changes the amount: one unit per detent of travel however
         // many events the watch splits it into, larger steps only after a long turn (RotaryStepper);
         // elsewhere it scrolls the page.
         val change = amountChange
-        if (change != null && event.action == MotionEvent.ACTION_SCROLL && event.isFromSource(InputDeviceCompat.SOURCE_ROTARY_ENCODER)) {
+        if (change != null && !formClosed && event.action == MotionEvent.ACTION_SCROLL && event.isFromSource(InputDeviceCompat.SOURCE_ROTARY_ENCODER)) {
             val px = -event.getAxisValue(MotionEventCompat.AXIS_SCROLL) *
                 ViewConfigurationCompat.getScaledVerticalScrollFactor(ViewConfiguration.get(this), this)
             val step = rotary.onScroll(px, System.currentTimeMillis())
@@ -96,9 +116,12 @@ class WatchControlActivity : DaggerActivity() {
         }
         scroll = RotaryScrollView(this).apply { id = R.id.watch_control_scroll; addView(root) }
         setContentView(scroll)
-        label(when (kind) { "INSULIN" -> "Инсулин"; "ACTIVITY" -> "Нагрузка"; else -> "Углеводы" }, if (compact) 14f else 18f).apply {
-            if (compact) layoutParams = LinearLayout.LayoutParams(-1, dp(18))
-        }
+        compactForm = compact
+        closesForDose = kind != "ACTIVITY"
+        root.addView(TextView(this).apply {
+            text = when (kind) { "INSULIN" -> "Инсулин"; "ACTIVITY" -> "Нагрузка"; else -> "Углеводы" }
+            textSize = if (compact) 14f else 18f; setTextColor(android.graphics.Color.WHITE); gravity = Gravity.CENTER
+        }, if (compact) LinearLayout.LayoutParams(-1, dp(18)) else LinearLayout.LayoutParams(-1, -2))
         // The dose confirmed a moment ago: sent, delivered, failed. Its answer no longer takes the
         // screen while something is being entered here, so this line is where it shows.
         deliveryStrip = TextView(this).apply {
@@ -107,6 +130,36 @@ class WatchControlActivity : DaggerActivity() {
             visibility = View.GONE
         }
         root.addView(deliveryStrip, LinearLayout.LayoutParams(-1, -2))
+        // 20.11.2026: with a dose on its way the form stood here emptied, every button live, under one line cut
+        // off before the dose - and read as "it did not go through, enter it again". Now the dose's state stands
+        // here large and the form is closed until the pump has finished; «Ввести ещё…» opens it for a new entry.
+        fun small(title: String, onClick: () -> Unit) = Button(this).apply {
+            text = title; isAllCaps = false; textSize = 12f; letterSpacing = 0f
+            minHeight = 0; minimumHeight = 0; setPadding(dp(6), 0, dp(6), 0); includeFontPadding = false
+            setOnClickListener { onClick() }
+        }
+        pendingHead = TextView(this).apply {
+            gravity = Gravity.CENTER; setTextColor(0xFFF2C14E.toInt())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            // One line whatever the dose, within what the round screen gives.
+            maxLines = 1
+            setAutoSizeTextTypeUniformWithConfiguration(12, 18, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
+        }
+        pendingNote = TextView(this).apply { textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.LTGRAY) }
+        pendingReadPump = small("Обновить с помпы") { openPumpRead() }.apply { visibility = View.GONE }
+        enterMore = small(if (kind == "INSULIN") "Ввести ещё дозу" else "Ввести ещё еду") { formOpenedByOwner = true; refreshDeliveryStrip() }
+        pendingBlock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; visibility = View.GONE
+            addView(pendingHead, LinearLayout.LayoutParams(-1, dp(32)).apply { topMargin = dp(4) })
+            addView(pendingNote, LinearLayout.LayoutParams(-1, -2))
+            addView(pendingReadPump, LinearLayout.LayoutParams(-1, dp(34)).apply { topMargin = dp(6); marginStart = dp(20); marginEnd = dp(20) })
+            addView(enterMore, LinearLayout.LayoutParams(-1, dp(34)).apply { topMargin = dp(8); marginStart = dp(20); marginEnd = dp(20) })
+        }
+        root.addView(pendingBlock, LinearLayout.LayoutParams(-1, -2))
+        body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(body, LinearLayout.LayoutParams(-1, -2))
+        // Heard for as long as the form lives, not only while it is in front: the dose is confirmed on another screen.
+        DeliveryStatus.addListener(deliveryListener)
         if (kind == "ACTIVITY") {
             choices("Режим", listOf("Прогулка", "Спорт")) { mode = if (it == 0) "WALK" else "SPORT" }
             choices("Длительность", listOf("30 мин", "50 мин", "90 мин")) { duration = listOf(30, 50, 90)[it] }
@@ -152,10 +205,10 @@ class WatchControlActivity : DaggerActivity() {
             row.addView(step(R.drawable.ic_action_minus, -1, "Уменьшить"), LinearLayout.LayoutParams(dp(44), dp(if (compact) 44 else 48)))
             row.addView(amountView, LinearLayout.LayoutParams(0, dp(if (compact) 44 else 64), 1f))
             row.addView(step(R.drawable.ic_action_add, 1, "Увеличить"), LinearLayout.LayoutParams(dp(44), dp(if (compact) 44 else 48)))
-            root.addView(row); refresh()
+            body.addView(row); refresh()
         }
         if (kind == "CARBS") {
-            root.addView(RadioGroup(this).apply {
+            body.addView(RadioGroup(this).apply {
                 id = R.id.watch_control_food_type
                 // A fresh form resets the amount and food type together, including after recreation.
                 isSaveFromParentEnabled = false
@@ -217,7 +270,9 @@ class WatchControlActivity : DaggerActivity() {
                 }
                 buttons.forEach { it.isEnabled = false }
                 showStatus("Ожидание подтверждения телефона")
-                WatchUiState.phoneAsked()
+                val askedAt = System.currentTimeMillis()
+                phoneAskedAtMs = askedAt
+                WatchUiState.phoneAsked(askedAt)
                 rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
                     UUID.randomUUID().toString(), System.currentTimeMillis(), requestKind,
                     insulin = if (kind == "INSULIN") amount / 10.0 else 0.0,
@@ -226,8 +281,9 @@ class WatchControlActivity : DaggerActivity() {
                     carbType = if (kind == "CARBS") foodType else carbType
                 )))
                 handler.postDelayed({
-                    showStatus("Нет ответа? Проверьте связь и AAPS на телефоне.")
                     buttons.forEach { it.isEnabled = true }
+                    if (WatchUiState.phoneAnsweredSince(askedAt)) clearStatus()
+                    else showStatus("Нет ответа? Проверьте связь и AAPS на телефоне.")
                 }, 20_000)
             }
             setOnClickListener {
@@ -311,15 +367,19 @@ class WatchControlActivity : DaggerActivity() {
                             return@phoneAnswers
                         }
                         showStatus("Телефон рядом: ожидание его подтверждения")
-                        WatchUiState.phoneAsked()
+                        val askedAt = System.currentTimeMillis()
+                        phoneAskedAtMs = askedAt
+                        WatchUiState.phoneAsked(askedAt)
                         rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
                             UUID.randomUUID().toString(), System.currentTimeMillis(), "INSULIN",
                             insulin = tenths / 10.0
                         )))
                         handler.postDelayed({
+                            buttons.forEach { it.isEnabled = true }
+                            // The phone did answer - its confirmation is, or was, on screen: the watch's own way is not offered.
+                            if (WatchUiState.phoneAnsweredSince(askedAt)) { clearStatus(); return@postDelayed }
                             showStatus("Телефон не ответил. Можно подать с часов.")
                             watchBolusButton.visibility = View.VISIBLE
-                            buttons.forEach { it.isEnabled = true }
                         }, PHONE_ANSWER_MS)
                     }
                     return@setOnClickListener
@@ -335,15 +395,19 @@ class WatchControlActivity : DaggerActivity() {
                             return@phoneAnswers
                         }
                         showStatus("Телефон рядом: ожидание его расчёта")
-                        WatchUiState.phoneAsked()
+                        val askedAt = System.currentTimeMillis()
+                        phoneAskedAtMs = askedAt
+                        WatchUiState.phoneAsked(askedAt)
                         rxBus.send(EventWearToMobile(EventData.WatchControlRequest(
                             UUID.randomUUID().toString(), System.currentTimeMillis(), "MEAL",
                             carbs = grams, carbType = type
                         )))
                         handler.postDelayed({
+                            buttons.forEach { it.isEnabled = true }
+                            // The phone did answer - its calculation is, or was, on screen: the watch's own is not offered.
+                            if (WatchUiState.phoneAnsweredSince(askedAt)) { clearStatus(); return@postDelayed }
                             showStatus("Телефон не ответил. Можно рассчитать на часах.")
                             watchMealButton.visibility = View.VISIBLE
-                            buttons.forEach { it.isEnabled = true }
                         }, PHONE_ANSWER_MS)
                     }
                     return@setOnClickListener
@@ -353,7 +417,7 @@ class WatchControlActivity : DaggerActivity() {
             }
         }
         if (kind == "CARBS") {
-            root.addView(action("Рассчитать инсулин", "MEAL").apply { id = R.id.watch_control_calculate },
+            body.addView(action("Рассчитать инсулин", "MEAL").apply { id = R.id.watch_control_calculate },
                 LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(4) })
             watchMealButton = Button(this).apply {
                 text = "Рассчитать на часах"; isAllCaps = false; textSize = 12f; letterSpacing = 0f
@@ -361,13 +425,13 @@ class WatchControlActivity : DaggerActivity() {
                 visibility = View.GONE
                 setOnClickListener { openWatchMeal(amount, foodType) }
             }
-            root.addView(watchMealButton, LinearLayout.LayoutParams(-1, dp(34)).apply { topMargin = dp(2); marginStart = dp(20); marginEnd = dp(20) })
-            root.addView(action("Только углеводы", "CARBS").apply { id = R.id.watch_control_carbs_only; textSize = 12f },
+            body.addView(watchMealButton, LinearLayout.LayoutParams(-1, dp(34)).apply { topMargin = dp(2); marginStart = dp(20); marginEnd = dp(20) })
+            body.addView(action("Только углеводы", "CARBS").apply { id = R.id.watch_control_carbs_only; textSize = 12f },
                 LinearLayout.LayoutParams(-1, dp(34)).apply {
                     topMargin = dp(2); marginStart = dp(20); marginEnd = dp(20)
                 })
         } else {
-            root.addView(
+            body.addView(
                 action(if (kind == "ACTIVITY" && ComboWatchMode.isWatchMode(this)) "Записать на часах" else "Проверить на телефоне", kind),
                 LinearLayout.LayoutParams(-1, -2)
             )
@@ -377,21 +441,21 @@ class WatchControlActivity : DaggerActivity() {
                     visibility = View.GONE
                     setOnClickListener { openWatchBolus(amount) }
                 }
-                root.addView(watchBolusButton, LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(2) })
+                body.addView(watchBolusButton, LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(2) })
             }
         }
         // Before a dose is worked out, here or on the phone: have the pump read now, so that a bolus given
         // with its own buttons is counted. Only with the pump driven through this watch; the amount entered
         // above stays as it is while the controller's screen is open.
         if (kind != "ACTIVITY" && ComboWatchMode.isWatchMode(this)) {
-            root.addView(Button(this).apply {
+            body.addView(Button(this).apply {
                 id = R.id.watch_control_read_pump
                 text = "Обновить с помпы"; isAllCaps = false; textSize = 12f; letterSpacing = 0f
                 minHeight = 0; minimumHeight = 0; setPadding(dp(6), 0, dp(6), 0); includeFontPadding = false
                 setOnClickListener { openPumpRead() }
             }, LinearLayout.LayoutParams(-1, dp(34)).apply { topMargin = dp(2); marginStart = dp(20); marginEnd = dp(20) })
         }
-        root.addView(status)
+        body.addView(status)
         scroll.requestFocus()
     }
 
@@ -460,15 +524,17 @@ class WatchControlActivity : DaggerActivity() {
     }
 
     private fun showStatus(message: String) { statusView?.let { it.text = message; it.visibility = View.VISIBLE } }
+
+    private fun clearStatus() { statusView?.let { it.text = ""; if (compactForm) it.visibility = View.GONE } }
     private var statusView: TextView? = null
 
     private fun label(value: String, size: Float): TextView = TextView(this).apply {
         text = value; textSize = size; setTextColor(android.graphics.Color.WHITE); gravity = Gravity.CENTER
-    }.also { root.addView(it) }
+    }.also { body.addView(it) }
 
     private fun choices(title: String, labels: List<String>, initial: Int = 0, selected: (Int) -> Unit) {
         label(title, 14f)
-        root.addView(RadioGroup(this).apply {
+        body.addView(RadioGroup(this).apply {
             labels.forEachIndexed { index, title ->
                 addView(RadioButton(this@WatchControlActivity).apply {
                     id = View.generateViewId(); text = title; textSize = 15f
@@ -500,13 +566,18 @@ class WatchControlActivity : DaggerActivity() {
 
     override fun onResume() {
         super.onResume()
-        DeliveryStatus.addListener(deliveryListener)
         handler.post(deliveryTick)
+        // Back from the phone's calculation, which came after this form had given the phone up: the offer of the
+        // watch's own way that the form put up meanwhile is taken down again.
+        if (phoneAskedAtMs > 0L && WatchUiState.phoneAnsweredSince(phoneAskedAtMs)) {
+            if (::watchMealButton.isInitialized) watchMealButton.visibility = View.GONE
+            if (::watchBolusButton.isInitialized) watchBolusButton.visibility = View.GONE
+            if (statusView?.text?.startsWith("Телефон не ответил") == true) clearStatus()
+        }
     }
 
     override fun onPause() {
         handler.removeCallbacks(deliveryTick)
-        DeliveryStatus.removeListener(deliveryListener)
         super.onPause()
     }
 
@@ -536,12 +607,49 @@ class WatchControlActivity : DaggerActivity() {
         return true
     }
 
+    /** The line about the dose before; and, while a dose is on its way, the block that stands in the form's place. */
     private fun refreshDeliveryStrip() {
         val strip = deliveryStrip ?: return
-        val line = DeliveryStatus.line(this)
+        val now = System.currentTimeMillis()
+        val progress = DeliveryStatus.progress(this, now)
+        // What this form asked the phone for has been confirmed and is on its way, or given: the form's work is
+        // done. Left open it would come back from behind the dose's screen with the amount still in it and its
+        // buttons live. (A request the phone turned down leaves the form as it was, to be tried again.)
+        if (phoneAskedAtMs > 0L && progress != null && progress.sentAtEpochMs >= phoneAskedAtMs && progress.phase != DeliveryStatus.Phase.FAILED && !isFinishing) {
+            android.util.Log.i(DeliveryStatus.LOG_TAG, "input form: closes, its request was confirmed (${progress.phase})")
+            finish()
+            return
+        }
+        val pending = closesForDose && progress != null && progress.pending && progress.isDose
+        dosePending = pending
+        if (!pending) formOpenedByOwner = false
+        if (progress != null && pending) {
+            pendingHead?.text = DeliveryStatus.headline(progress)
+            pendingNote?.text = DeliveryStatus.detail(progress, now)
+            pendingReadPump?.visibility = if (progress.phase == DeliveryStatus.Phase.NO_ANSWER && ComboWatchMode.isWatchMode(this)) View.VISIBLE else View.GONE
+            enterMore?.visibility = if (formOpenedByOwner) View.GONE else View.VISIBLE
+        }
+        pendingBlock?.visibility = if (pending) View.VISIBLE else View.GONE
+        formClosed = pending && !formOpenedByOwner
+        if (::body.isInitialized) body.visibility = if (formClosed) View.GONE else View.VISIBLE
+        // The one-line version, when the block is not saying the same thing large.
+        val line = if (pending || progress == null) null else DeliveryStatus.lineOf(progress, now)
         strip.text = line ?: ""
         strip.visibility = if (line == null) View.GONE else View.VISIBLE
+        // What stands on the screen, for the log: once per state.
+        val shown = "form closed=$formClosed | block=${if (pending) pendingHead?.text else "-"} | more=${enterMore?.visibility == View.VISIBLE && pending} " +
+            "readPump=${pendingReadPump?.visibility == View.VISIBLE && pending} | line=${line ?: "-"}"
+        if (shown != lastShownDelivery) {
+            lastShownDelivery = shown
+            android.util.Log.i(DeliveryStatus.LOG_TAG, "input form: $shown" + (if (pending) " | ${pendingNote?.text}" else ""))
+        }
     }
 
-    override fun onDestroy() { handler.removeCallbacksAndMessages(null); pongWatch?.dispose(); super.onDestroy() }
+    private var lastShownDelivery = ""
+
+    override fun onDestroy() {
+        DeliveryStatus.removeListener(deliveryListener)
+        handler.removeCallbacksAndMessages(null); pongWatch?.dispose()
+        super.onDestroy()
+    }
 }

@@ -76,6 +76,8 @@ class DataHandlerWear @Inject constructor(
             .observeOn(aapsSchedulers.io)
             .subscribe {
                 aapsLogger.debug(LTag.WEAR, "ConfirmAction received from ${it.sourceNodeId}")
+                // Whatever it says, the phone has answered: the form that asked must not go on to say it did not.
+                WatchUiState.phoneAnswered()
                 // A plain answer, with nothing to send back, is the phone reporting how an earlier
                 // request ended. It settles the status line; while a dose is being entered or
                 // confirmed it must not take the screen and wipe that work (19 Oct 2026), so it goes

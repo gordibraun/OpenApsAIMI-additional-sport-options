@@ -15,6 +15,12 @@ import java.util.concurrent.CopyOnWriteArraySet
  * request still in flight - the phone's queue delivers them in order - and the screens show the
  * state: sent, delivered, or failed. Kept in preferences so an answer that arrives while no screen
  * is open still shows on the next one.
+ *
+ * 20.11.2026: between «Подтвердить» and the phone's answer - a minute and forty seconds that day - the
+ * watch showed nothing but a line cut short («⏳ Подаётся: Подать инсулин: 2.…») over an input form
+ * with all its buttons live, which the owner read as "it did not go through, enter it again". So the
+ * state is now given as a [Progress] that the screens show large: a screen of its own right after the
+ * confirmation ([DeliveryActivity]), and the input forms closed behind it while the dose is on its way.
  */
 object DeliveryStatus {
 
@@ -33,7 +39,6 @@ object DeliveryStatus {
     private const val DONE_SHOWN_MS = 3 * 60_000L
     private const val FAILED_SHOWN_MS = 10 * 60_000L
     private const val MAX_LINE_CHARS = 56
-    private const val NO_ANSWER_WARN_MS = 10 * 60_000L
     private const val NO_ANSWER_GIVE_UP_MS = 60 * 60_000L
     private const val MAX_ENTRIES = 4
     private const val SUCCESS_TITLE = "Готово"
@@ -44,6 +49,91 @@ object DeliveryStatus {
     /** How long a confirmed dose is taken to be on its way: the phone drops a bolus the watch has not started within two minutes. */
     const val IN_FLIGHT_MAX_MS = 150_000L
     private val UNITS = Regex("""([0-9]+(?:[.,][0-9]+)?)\s*Е""")
+
+    /** Where the request the screens tell about stands. */
+    enum class Phase {
+
+        /** Confirmed and on its way: the pump is being reached, or is delivering. */
+        IN_FLIGHT,
+
+        /** Longer than a dose takes and no answer: it may have been given, or not. */
+        NO_ANSWER,
+        DONE,
+        FAILED
+    }
+
+    /** What to tell about the request confirmed last. [unitsU] is the dose, when the request is one. */
+    class Progress(
+        val phase: Phase, val unitsU: Double?, val decision: String, val answer: String,
+        val sentAtEpochMs: Long, val answeredAtEpochMs: Long, val queued: Int
+    ) {
+
+        /** A dose of insulin, as opposed to carbohydrates or a walk recorded through the phone. */
+        val isDose: Boolean get() = (unitsU ?: 0.0) > 0.0
+
+        /** True while the answer is still awaited: nothing is known to have failed, and nothing to have landed. */
+        val pending: Boolean get() = phase == Phase.IN_FLIGHT || phase == Phase.NO_ANSWER
+    }
+
+    /** The dose a text of the phone's names («Подать инсулин: 2.0 Е»), if it names one. */
+    internal fun unitsIn(text: String): Double? = UNITS.find(text)?.groupValues?.get(1)?.replace(',', '.')?.toDoubleOrNull()
+
+    /** «2,0 ЕД» */
+    internal fun dose(unitsU: Double): String = String.format(java.util.Locale.US, "%.1f", unitsU).replace('.', ',') + " ЕД"
+
+    /**
+     * What the screens tell: the request on its way if there is one (the oldest, as the phone delivers in
+     * order); else whichever is newer - a request that has had no answer for longer than a dose takes, or the
+     * answer that came last.
+     */
+    internal fun progressOf(entries: List<Entry>, now: Long): Progress? {
+        val sent = entries.filter { it.state == State.SENT }
+        val flying = sent.filter { now - it.sentAtEpochMs in 0 until IN_FLIGHT_MAX_MS }
+        flying.minByOrNull { it.sentAtEpochMs }?.let {
+            return Progress(Phase.IN_FLIGHT, unitsIn(it.decision), it.decision, "", it.sentAtEpochMs, 0L, flying.size - 1)
+        }
+        val silent = sent.maxByOrNull { it.sentAtEpochMs }
+        val answered = entries.filter { it.state != State.SENT }.maxByOrNull { it.answeredAtEpochMs }
+        if (silent != null && (answered == null || silent.sentAtEpochMs > answered.answeredAtEpochMs))
+            return Progress(Phase.NO_ANSWER, unitsIn(silent.decision), silent.decision, "", silent.sentAtEpochMs, 0L, 0)
+        answered ?: return null
+        return Progress(
+            if (answered.state == State.DONE) Phase.DONE else Phase.FAILED,
+            unitsIn(answered.decision) ?: unitsIn(answered.answer), answered.decision, answered.answer, answered.sentAtEpochMs, answered.answeredAtEpochMs, 0
+        )
+    }
+
+    @Synchronized fun progress(context: Context, now: Long = System.currentTimeMillis()): Progress? = progressOf(live(load(context), now), now)
+
+    /** The heading of the large status: one glance must tell "on its way" from "given" from "not given". */
+    internal fun headline(p: Progress): String = when (p.phase) {
+        Phase.IN_FLIGHT -> if (p.isDose) "⏳ Подаётся ${dose(p.unitsU!!)}" else "⏳ Отправлено телефону"
+        Phase.NO_ANSWER -> "❓ Нет ответа"
+        Phase.DONE      -> if (p.isDose) "✅ Подано ${dose(p.unitsU!!)}" else "✅ Готово"
+        Phase.FAILED    -> "❌ Не подано"
+    }
+
+    /** What stands under the heading. */
+    internal fun detail(p: Progress, now: Long): String {
+        val seconds = ((now - p.sentAtEpochMs) / 1000L).coerceAtLeast(0L)
+        val waited = if (seconds < 90) "$seconds с" else "${seconds / 60} мин"
+        return when (p.phase) {
+            Phase.IN_FLIGHT ->
+                (if (p.isDose) "Доза уже отправлена на помпу, идёт $waited. Повторять ввод не нужно." else "${p.decision}. Идёт $waited.") +
+                    (if (p.queued > 0) " Ещё в очереди: ${p.queued}." else "")
+
+            Phase.NO_ANSWER ->
+                if (p.isDose) "Телефон не ответил за $waited. Доза ${dose(p.unitsU!!)} могла быть подана. Не вводите её заново, пока не проверите помпу."
+                else "Телефон не ответил за $waited: ${p.decision}."
+
+            Phase.DONE      -> p.answer
+            Phase.FAILED    -> {
+                val why = p.answer.ifEmpty { "Телефон отказал" }.trimEnd('.') + "."
+                // The phone's own refusals end in «Инсулин не отправлен»; others (the pump did not answer) do not say it.
+                if (p.isDose && !why.contains("Инсулин не", ignoreCase = true)) "$why Инсулин не введён." else why
+            }
+        }
+    }
 
     private val listeners = CopyOnWriteArraySet<() -> Unit>()
 
@@ -120,19 +210,22 @@ object DeliveryStatus {
     /** What the status line says now, or null when there is nothing to tell. */
     @Synchronized fun line(context: Context): String? {
         val now = System.currentTimeMillis()
-        val entries = live(load(context), now)
-        val inFlight = entries.filter { it.state == State.SENT }
-        if (inFlight.isNotEmpty()) {
-            val first = inFlight.first()
-            val minutes = (now - first.sentAtEpochMs) / 60_000L
-            val queued = if (inFlight.size > 1) " (+${inFlight.size - 1} в очереди)" else ""
-            val late = if (now - first.sentAtEpochMs >= NO_ANSWER_WARN_MS) " — телефон не отвечает $minutes мин" else ""
-            return "⏳ Подаётся: ${first.decision}$queued$late"
+        return lineOf(progressOf(live(load(context), now), now) ?: return null, now)
+    }
+
+    /**
+     * One short line: the phone's full text is in the notification. A long refusal wrapped to three
+     * lines here and pushed the bottom button off the round screen (21 Oct 2026); a line that began
+     * with the phone's own heading had its dose cut off (20 Nov 2026: «⏳ Подаётся: Подать инсулин: 2.…»).
+     */
+    internal fun lineOf(p: Progress, now: Long): String {
+        val minutes = (now - p.sentAtEpochMs) / 60_000L
+        val text = when (p.phase) {
+            Phase.IN_FLIGHT -> (if (p.isDose) "⏳ Подаётся ${dose(p.unitsU!!)}" else "⏳ Отправлено: ${p.decision}") + (if (p.queued > 0) " (+${p.queued} в очереди)" else "")
+            Phase.NO_ANSWER -> if (p.isDose) "❓ Нет ответа о дозе ${dose(p.unitsU!!)}, $minutes мин" else "❓ Нет ответа $minutes мин: ${p.decision}"
+            Phase.DONE      -> "✓ ${p.answer}"
+            Phase.FAILED    -> "✗ Не подано: ${p.answer.removeSuffix(" Инсулин не отправлен").trimEnd('.')}"
         }
-        val last = entries.filter { it.state != State.SENT }.maxByOrNull { it.answeredAtEpochMs } ?: return null
-        // One short line: the phone's full text is in the notification. A long refusal wrapped to
-        // three lines here and pushed the bottom button off the round screen (21 Oct 2026).
-        val text = if (last.state == State.DONE) "✓ ${last.answer}" else "✗ Не подано: ${last.answer.removeSuffix(" Инсулин не отправлен").trimEnd('.')}"
         return if (text.length <= MAX_LINE_CHARS) text else text.take(MAX_LINE_CHARS - 1) + "…"
     }
 
@@ -145,6 +238,15 @@ object DeliveryStatus {
     }.toMutableList()
 
     private fun notifyListeners() = listeners.forEach { runCatching { it() } }
+
+    /** For [DeliveryDebugReceiver] only: what the screens have to show, set outright. Nothing is sent anywhere. */
+    @Synchronized internal fun replaceForDisplayTest(context: Context, entries: List<Entry>) {
+        save(context, entries)
+        notifyListeners()
+    }
+
+    /** What the screens show about a dose is written to the log under this tag whenever it changes. */
+    const val LOG_TAG = "WatchDelivery"
 
     private fun load(context: Context): MutableList<Entry> = runCatching {
         val array = JSONArray(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_ENTRIES, "[]") ?: "[]")
